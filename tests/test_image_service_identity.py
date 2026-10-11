@@ -72,6 +72,14 @@ def test_nonroot_smoke_is_executed_as_confirmed_nas_identity():
     assert "umask 077" in entrypoint and 'test "$(id -G)" = 100' in entrypoint
 
 
+def test_production_startup_checks_storage_and_automatic_deploy_is_opt_in():
+    entrypoint = (ROOT / "scripts/cloud_image_entrypoint.sh").read_text()
+    assert 'if test -n "${IMAGE_REPOSITORY_NFS_SOURCE:-}"' in entrypoint
+    assert entrypoint.index("check_image_root") < entrypoint.index('exec "$@"')
+    workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    assert workflow.count("&& vars.CLOUD_AUTO_DEPLOY == 'true'") == 2
+
+
 def test_staging_capture_uses_matching_local_history_and_source_run(monkeypatch):
     run = "capture-synthetic"
     snapshot = f"/opt/cloud-image-staging/state/frozen/{run}/Kering/history.sqlite3"

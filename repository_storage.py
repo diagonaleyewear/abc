@@ -78,11 +78,46 @@ def require_local(path: Path):
         raise ValueError("El estado SQLite requiere almacenamiento local persistente")
 
 
+def check_production_directory(root: Path, role: str) -> bool:
+    configured = os.getenv("IMAGE_REPOSITORY_MOUNT_ROOT", "").strip()
+    if not configured:
+        return False
+    mount = Path(configured).absolute()
+    if ".." in Path(configured).parts or mount.resolve() != mount:
+        raise ValueError("Montaje productivo no admite aliases")
+    if ".." in root.parts or root.resolve() != root.absolute():
+        raise ValueError("Ruta productiva no admite aliases")
+    if role not in {"images", "backups", "work"} or root.absolute() != mount / role:
+        raise ValueError(f"Ruta productiva debe ser exactamente {role} del montaje")
+    expected = os.getenv("IMAGE_REPOSITORY_NFS_SOURCE", "").strip()
+    if not expected:
+        raise ValueError("Montaje productivo requiere exportacion esperada")
+    specific = os.getenv(f"IMAGE_REPOSITORY_{'BACKUP' if role == 'backups' else 'WORK'}_NFS_SOURCE", "").strip()
+    if role != "images" and specific and specific != expected:
+        raise ValueError("Exportacion del almacenamiento productivo no coincide")
+    require_nfs_directory(root, mount, expected)
+    return True
+
+
+def require_distinct_storage(source: Path, target: Path) -> None:
+    if os.getenv("IMAGE_REPOSITORY_MOUNT_ROOT", "").strip():
+        mount = Path(os.environ["IMAGE_REPOSITORY_MOUNT_ROOT"]).absolute()
+        if source.parent == target.parent == mount:
+            check_production_directory(source, source.name)
+            check_production_directory(target, target.name)
+            if source == target:
+                raise ValueError("Almacenamientos productivos deben ser distintos")
+            return
+    require_distinct_replica(source, target)
+
+
 def check_image_root(root: Path):
     if check_staging_role(root, "images"):
         return
     if excluded_staging_path(root):
         raise ValueError("Repositorio productivo no puede apuntar a staging")
+    if check_production_directory(root, "images"):
+        return
     expected = os.getenv("IMAGE_REPOSITORY_NFS_SOURCE", "").strip()
     if expected:
         require_nfs(root, expected)
@@ -109,6 +144,23 @@ def check_write_path(path: Path):
                         raise ValueError("Destino staging cubierto por otro montaje/alias")
                     return
             raise ValueError("Escritura fuera de destinos privados staging; source es congelada")
+    production_mount = os.getenv("IMAGE_REPOSITORY_MOUNT_ROOT", "").strip()
+    if production_mount:
+        mount = Path(production_mount).absolute()
+        canonical = path.absolute()
+        if canonical == mount or mount in canonical.parents:
+            if ".." in path.parts or canonical.resolve() != canonical:
+                raise ValueError("Escritura productiva mediante alias no permitida")
+            for role in ("images", "backups", "work"):
+                base = mount / role
+                if canonical == base or base in canonical.parents:
+                    check_production_directory(base, role)
+                    actual = filesystem_mount(canonical)
+                    expected = os.environ["IMAGE_REPOSITORY_NFS_SOURCE"]
+                    if actual not in {(mount, "nfs", expected), (mount, "nfs4", expected)}:
+                        raise ValueError("Escritura productiva cubierta por otro montaje")
+                    return
+            raise ValueError("Escritura productiva fuera de images/backups/work")
     expected = os.getenv("IMAGE_REPOSITORY_NFS_SOURCE", "").strip()
     if expected:
         configured = os.getenv("IMAGE_REPOSITORY_ROOT", "").strip()
@@ -158,6 +210,9 @@ def backup_root(images: Path) -> Path:
 
 def check_backup_root(images: Path, backups: Path):
     check_image_root(images)
+    if check_production_directory(backups, "backups"):
+        require_distinct_storage(images, backups)
+        return
     if check_staging_role(backups, "backups"):
         require_distinct_replica(images, backups)
         return

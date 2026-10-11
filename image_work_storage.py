@@ -7,7 +7,8 @@ import shutil
 from filelock import FileLock
 
 from repository_storage import (
-    state_root, check_image_root, require_distinct_replica, filesystem_mount, check_staging_role,
+    state_root, check_image_root, require_distinct_storage, filesystem_mount, check_staging_role,
+    check_production_directory,
 )
 from scripts.nfs_repository_guard import require_nfs
 from service_stop import acquire, checkpoint
@@ -26,6 +27,8 @@ def archive_limit() -> int:
 
 def check_work_root(root: Path) -> None:
     if check_staging_role(root, "work"):
+        return
+    if check_production_directory(root, "work"):
         return
     if root.resolve() != root:
         raise ValueError("Temporales no pueden redirigirse mediante enlaces simbolicos")
@@ -53,8 +56,8 @@ def work_root(images: Path) -> Path:
         raise ValueError("Imagenes NFS requieren temporales independientes explicitos")
     root = Path(configured).absolute() if configured else state_root(images) / ".incoming"
     if configured:
-        require_distinct_replica(images, root)
-        require_distinct_replica(state_root(images), root)
+        require_distinct_storage(images, root)
+        require_distinct_storage(state_root(images), root)
     check_work_root(root)
     return root
 

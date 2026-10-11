@@ -17,6 +17,58 @@ import repository_storage as storage
 EAN = "0012345678901"
 
 
+@pytest.fixture
+def production_nfs(tmp_path, monkeypatch):
+    mount = tmp_path / "nas"
+    mount.mkdir()
+    for role in ("images", "backups", "work", "staging"):
+        (mount / role).mkdir()
+    monkeypatch.setenv("IMAGE_REPOSITORY_MOUNT_ROOT", str(mount))
+    monkeypatch.setenv("IMAGE_REPOSITORY_NFS_SOURCE", storage.EXPECTED_SOURCE)
+    monkeypatch.delenv("IMAGE_REPOSITORY_STAGING_ROOT", raising=False)
+    monkeypatch.setattr(storage, "require_nfs_directory", lambda *args: {})
+    monkeypatch.setattr(storage, "filesystem_mount", lambda p: (mount, "nfs4", storage.EXPECTED_SOURCE))
+    return mount
+
+
+def test_production_sibling_storage_does_not_allow_self_replica(production_nfs):
+    root = production_nfs
+    storage.check_image_root(root / "images")
+    storage.check_backup_root(root / "images", root / "backups")
+    storage.require_distinct_storage(root / "images", root / "work")
+    for role in ("images", "backups", "work"):
+        storage.check_write_path(root / role / "new-file")
+    with pytest.raises(ValueError, match="misma exportacion"):
+        storage.require_distinct_replica(root / "images", root / "backups")
+
+
+def test_production_root_staging_alias_and_nested_mount_rejected(production_nfs, monkeypatch):
+    root = production_nfs
+    for path in (root, root / "staging", root / "other"):
+        with pytest.raises(ValueError):
+            storage.check_write_path(path)
+    with pytest.raises(ValueError):
+        storage.check_image_root(root)
+    with pytest.raises(ValueError):
+        storage.check_image_root(root / "staging")
+    monkeypatch.setattr(storage, "filesystem_mount", lambda p: (root / "images", "ext4", "local"))
+    with pytest.raises(ValueError, match="otro montaje"):
+        storage.check_write_path(root / "images" / "file")
+    with pytest.raises(ValueError, match="aliases"):
+        storage.check_production_directory(root / "images" / ".." / "images", "images")
+
+
+def test_production_missing_mount_and_same_path_fail_closed(production_nfs, monkeypatch):
+    root = production_nfs
+    with pytest.raises(ValueError, match="distintos"):
+        storage.require_distinct_storage(root / "images", root / "images")
+    def absent(*args):
+        raise RuntimeError("NFS absent")
+    monkeypatch.setattr(storage, "require_nfs_directory", absent)
+    with pytest.raises(RuntimeError, match="absent"):
+        storage.check_image_root(root / "images")
+
+
 def photo():
     buffer = BytesIO()
     Image.new("RGB", (600, 600), (10, 20, 30)).save(buffer, "PNG")
