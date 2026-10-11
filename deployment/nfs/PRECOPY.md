@@ -1,10 +1,117 @@
 # Precopia y cierre coherente: protocolo y resultados
 
-Continua [CAPTURE.md](CAPTURE.md). La precopia real termino y la primera
-ventana autorizada de cierre sin snapshot se aborto con restauracion
-verificada, como se detalla debajo. No existe fuente consistente promovida,
-ni migracion/recuperacion real ejecutada. No se crearon snapshots.
-Este protocolo sustituye la copia integra durante pausa SIN rebajar la coherencia.
+Continua [CAPTURE.md](CAPTURE.md). La primera ventana se aborto y restauro;
+ese resultado historico se conserva debajo. La nueva autorizacion permite
+parar los cuatro servicios el tiempo necesario y registrar una terminacion
+forzada del monitor sin convertir su salida137, por si sola, en motivo de
+aborto. No autoriza desplegar el artefacto corregido ni cambiar el repositorio
+productivo. No se crean snapshots ni se modifican originales.
+
+## Nueva ventana sin snapshot: criterios de captura
+
+Con usuarios avisados y sin admision manual, comprobar primero cero trabajos
+activos y cero avisos pendientes mediante copias SQLite locales. Conservar
+privadamente IDs, imagenes, configuracion y mounts. Parar solo los cuatro
+servicios Cloud y verificar que todos estan detenidos, sin procesos escritores
+restantes ni otro contenedor con acceso de escritura a sus origenes.
+
+Una salida137 del monitor queda registrada. Antes de copiar imagenes, capturar
+DB y sidecars en estado local nuevo1037:100, abrir solamente copias scratch y
+obtener backups por SQLite backup API. Exigir integrity_check=ok y cero
+foreign_key_check; comprobar cobertura de todas las bases, recibos activos,
+configuracion cifrada recuperable y archivos parciales/journals. Conservar
+estos ultimos y clasificarlos, sin reparar ni borrar originales. Un journal
+no vacio requiere recuperacion validada sobre COPIAS; no se omite para seguir.
+
+Esta ventana utiliza una fuente NUEVA separada de la candidata anterior:
+source/capture-20261011T102000Z. La candidata viva y su semilla siguen intactas
+y no migrables. La copia completa evita actualizarla o eliminar entradas.
+Releer Kering original con lector propietario read-only sin NAS, canalizado
+al escritor1037:100; nunca sustituirlo por la semilla antigua.
+
+Mantener parados los escritores durante transferencia, rsync checksum con
+dry-run posterior sin diferencias, fsync/sync y comparacion SHA256 del conjunto
+completo contra los originales aun detenidos. SQLite, claves y runtime quedan
+solo en disco local, fuera de source NAS. No afirmar que quick-check prueba
+coherencia ni prometer una pausa corta. Solo entonces marcar source consistente
+(migratable=false hasta resolver el inventario) y restaurar los mismos IDs
+previamente activos, exigiendo running y salud Cloud/alertas.
+
+Ante un error de integridad, cambio de origen, escritor restante, montaje,
+espacio, permisos, transferencia o verificacion: conservar el estado incompleto
+sin promocion y restaurar por trap los servicios previamente activos. No hay
+limite artificial de55min ni aborto automatico por137 en esta autorizacion.
+Inventario, revision de EAN, migracion y recuperacion se hacen despues de
+restaurar servicios, exclusivamente en staging y con todos los bloqueos.
+La copia en el mismo NAS no acredita recuperacion ante fallo de ese NAS.
+
+### Captura real 2026-10-11 UTC: asegurada y servicios restaurados
+
+- Preflight: roles privados1037:100/0700; NAS disponible2.993.422.598.144B
+  frente a199.715.979.264B (186GiB) requeridos; local17.386.950.656B,
+  superior a la reserva2GiB. Cero trabajos/envios pendientes; runtime privado.
+- Pausa10:11:18Z; salidas app0, Luxoptica137, Kering0 y alertas0.
+  Todos detenidos; no escritor Cloud restante; las dos apps ajenas no montan
+  raices Cloud y permanecieron activas. No hubo despliegue del nuevo monitor.
+- Captura local13archivos originales y6backups SQLite de5bases distintas
+  (history Kering aparece en dos roles). Integridad, FK y checksums correctos;
+  cero parciales/journals locales. Catalogo comun: cero assets/representations,
+  eventos/order_eans/migrations; historial Kering159images/4runs/6attempts,
+  process_activity294recibos. Configuracion cifrada recuperable, sin NAS.
+- Fuente completa nueva:3.981archivos/18.780.099.617B. Cinco pasadas rsync
+  exit0 y dry-run checksum vacio; comparacion SHA256/tamano/conjunto completo
+  contra originales todavia detenidos; cero parciales en imagenes.
+  Source consistente a10:35:07.101020Z; no se promovio la candidata previa.
+- Restauracion10:35:19Z: **24min1s** de indisponibilidad. Los mismos cuatro
+  IDs, imagen, Config, HostConfig y mounts; todos running, app/alertas healthy
+  y endpoint Streamlit respondeok. Monitor/Kering no tienen healthcheck:
+  running no se presenta como prueba de una descarga/envio externo.
+- Recuperacion LOCAL verificada de13archivos y6snapshots: mismos SHA256,
+  integridad/FK/recuentos y configuracion recuperable. No se arrancaron servicios
+  desde esas copias ni se modificaron DB originales.
+
+Recibos privados nuevos1037:100 bajo
+`/opt/cloud-image-staging/state/closure-20261011T102000Z/`:
+`status.json`, `sqlite.json`, `local-integrity.json`, `frozen-checksums.json`,
+`local-recovery.json`, `frozen-plan.json` y `frozen-review.json`.
+Source: `/mnt/cloud-imagenes/staging/source/capture-20261011T102000Z`.
+La candidata anterior, semilla, originales y recibos abortados se conservan.
+
+Inventario congelado v2, plan
+`1f445641b28ad02f7a8e902cefe344d49ea16fb24d2252cbb45015244609878b`:
+3.936imagenes/45otrosarchivos,6asociaciones historicas de intentos/pedidos,
+cero EAN sin resolver, cero imagenes no reutilizables, cero colisiones.
+153claves ambiguas en15manifiestos, **cero archivos del inventario coincidentes**:
+se conserva toda la relacion/candidatos y se bloquean futuras asociaciones
+afectadas; no se elige EAN arbitrariamente. 2.187vistas Luxoptica desconocidas
+siguen unknown, no acreditan nuevas vistas. No reemplaza los informes previos
+locales388EANsinresolver/7invalidas/44coincidencias ni los descarta.
+Ensayo EAN real **terminado y verificado** despues de restaurar produccion:
+`rehearsal.json`, estado verified-staging. Apply completo y segunda aplicacion
+idempotente;3.981entradas verificadas y3.981originales recuperados desde los
+backups de migracion, nombres/rutas/checksums iguales. Galeria del repositorio:
+3.936representaciones; ZIP completos por EAN para TODOS los EAN,2.347entradas
+exportadas comprobadas por SHA256 (alternativas/nombres se conservan y bytes
+duplicados por mismo nombre/checksum no duplican entrada). No se genero un
+ZIP global de18,78GB en RAM ni se presenta como probado.
+Catalogo local:2.011assets/3.936representations/3.936events/3.981migrations,
+63asociaciones order_eans derivadas de6intentos historicos verificados.
+Se comprobaron proveedor/origen/vista/mercado/nombre/fecha/metadatos y
+asociaciones de pedidos; el historial operacional sigue local y su recuperacion
+se verifico por separado. No se arrancaron servicios externos desde staging.
+
+Esta validacion no resuelve153claves ambiguas sin archivos afectados, las
+incidencias del inventario LOCAL previo ni las vistas unknown. Tampoco autoriza
+corte productivo; status de captura conserva migratable=false.
+
+Recuperacion completa de la captura ya terminada, recibo `capture-recovery.json`:
+los3.981archivos/18.780.099.617B se copiaron a
+`backups/capture-20261011T102000Z` y se recuperaron en
+`recovery/capture-20261011T102000Z`, verificando en ambos conjuntos SHA256,
+tamano y rutas/nombres originales. Incluye todos los ficheros, sin filtrar por
+EAN/vista/validez ni usar esta copia para eludir bloqueos de migracion.
+SQLite/configuracion se recuperaron independientemente en local.
+Ambos destinos comparten el NAS: no son backup independiente ante su fallo.
 
 ## Ventana autorizada 2026-10-10 UTC: abortada y restaurada
 
@@ -58,10 +165,10 @@ handler SIGTERM registrado en `/proc/<pid>/status`; el codigo vigente no
 registra SIGTERM y espera mediante `time.sleep`. Esto explica el bloqueo
 observado de parada, no un fallo de rsync/SQLite. Antes de otra ventana:
 validar parada drenada en un contenedor aislado del artefacto realmente activo
-y acordar el mecanismo de terminacion. No ampliar timeouts, aceptar137,
+y acordar el mecanismo de terminacion. En aquella autorizacion no se permitia ampliar timeouts ni aceptar137,
 modificar el contenedor activo ni desplegar un handler para hacer pasar la
-captura. Una nueva ventana requiere resolver este bloqueo y coordinar de
-nuevo admision/ausencia de trabajos.
+captura. Esa restriccion historica fue sustituida por la autorizacion
+explicitada arriba; no se altera el resultado de la primera ventana.
 
 No se modifico el repositorio activo ni sus permisos; no hubo migracion
 productiva, replica remota, eliminacion de originales, fusion, despliegue

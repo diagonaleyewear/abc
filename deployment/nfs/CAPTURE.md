@@ -1,14 +1,13 @@
-# Captura consistente: procedimiento preparado, NO ejecutado
+# Captura consistente: procedimiento y resultados
 
-Estado actualizado: [PRECOPY.md](PRECOPY.md) registra la ventana autorizada
-del2026-10-10UTC, abortada por salida137 del monitor Luxoptica, y la
-restauracion saludable de los mismos contenedores en99,04s. No se capturo
-fuente consistente ni se ejecuto el ensayo de migracion/recuperacion.
+Estado actualizado: [PRECOPY.md](PRECOPY.md) distingue la ventana abortada
+del2026-10-10UTC y la nueva autorizacion de parada completa, que permite
+terminacion forzada documentada si la integridad posterior queda acreditada.
 Los comandos y restricciones de autorizacion siguientes son historicos.
 
 Staging existente, SQLite local y guardas: [STAGING.md](STAGING.md).
-Esta entrega NO autoriza parar escritores. Se necesita una ventana explicita
-antes de ejecutar los comandos de mantenimiento de este documento.
+La nueva ventana cuenta con autorizacion explicita y usuarios avisados;
+no concede autorizacion permanente para otras paradas o despliegues.
 La replica antigua **no bloquea** el ensayo por decision del responsable.
 
 **Revision posterior b9edc02**: [PRECOPY.md](PRECOPY.md) separa precopia,
@@ -18,8 +17,39 @@ La parada corta queda condicionada a snapshot local verificado; sin snapshot
 se requiere cierre de contenido bajo pausa, no quick-check por fechas.
 La reserva vigente se actualiza a work64GiB/186GiB agregados; los138GiB
 de las evidencias/comandos originales siguientes son historicos.
-El aviso SQLite de alertas NO era esperado y su carrera de inicializacion
-sigue pendiente; se refuerza el test para propagar excepciones de ambos actores.
+El aviso SQLite de alertas NO era esperado. La carrera de inicializacion
+se corrigio con bloqueo compartido y espera acotada, sin debilitar los tests;
+CI f4dae43 paso327pruebas, lint, compilacion y Docker con smoke. El artefacto
+validado no se ha desplegado sobre los servicios activos.
+
+## Preparar estado local productivo: pasos pendientes, NO ejecutar ahora
+
+1. Autorizar por separado el corte y la identidad1037:100. Crear un directorio
+   NUEVO local, por ejemplo `/opt/cloud-image-production/state/<fecha-UTC>`,
+   privado0700, propietario1037:100; comprobar filesystem local y reserva2GiB.
+   No cambiar owners/modos de DB activas ni reutilizar las copias de ensayo como
+   estado productivo: los servicios han seguido escribiendo desde la captura.
+2. En esa futura ventana, registrar los cuatro IDs/config/env/mounts/imagen,
+   bloquear admision, comprobar recibos y parar escritores. Capturar DB,
+   WAL y configuracion/clave con lector read-only en raw local nuevo. Ejecutar
+   `scripts/snapshot_sqlite_copy.py --source <raw-local-db> --target <nuevo-db>`
+   para cada base enumerada; cero journals sin revision. Integridad/FK,
+   SHA256 y recuentos comprobados antes de publicar, sin abrir el original.
+3. Conservar raw/sidecars y runtime previo para rollback, claves solo local0600.
+   Comprobar travesia, escritura, rename y locks como1037:100 en estado y
+   temporales; abrir copias verificadas, nunca corregir permisos de originals.
+   El estado del catalogo/repositorio, historial Kering, alertas, autenticacion,
+   process_activity y mail/market-state deben estar cubiertos individualmente.
+4. Preparar override con rutas locales nuevas e identidad aprobada, comparar
+   comando/env/mounts y referencia de artefacto. No habilitarlo hasta validar
+   asociaciones, galeria/ZIP y rollback; cambio de repositorio requiere su
+   autorizacion propia y resolver las incidencias aplicables al nuevo inventario.
+5. Ante fallo, detener solo los servicios del intento y restablecer override,
+   imagen y rutas originales registrados; iniciar los IDs/config anteriores
+   y comprobar salud. Las DB originales no modificadas por la preparacion
+   permiten rollback. Restaurar backups en otro directorio local si es necesario,
+   validar integridad/FK/recuentos/configuracion antes de seleccionar esa copia.
+   No copiar archivos SQLite sobre una base abierta ni borrar fuentes.
 
 ## Replica encontrada: hechos y limites
 
