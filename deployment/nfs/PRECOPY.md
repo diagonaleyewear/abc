@@ -113,6 +113,19 @@ EAN/vista/validez ni usar esta copia para eludir bloqueos de migracion.
 SQLite/configuracion se recuperaron independientemente en local.
 Ambos destinos comparten el NAS: no son backup independiente ante su fallo.
 
+Validacion final13:41:49Z, recibo `final-validation.json`: fuente SHA256
+todavia inalterada tras ensayo, integridad/FK del catalogo local correctos,
+todos los destinos nuevos revisados como1037:100 y privados.
+La comprobacion detecto tres ficheros0600pendientes (DB/WAL/SHM del
+history-input LOCAL nuevo tenian0644); se corrigieron exclusivamente esos
+tres ficheros propiedad1037 y el preparador ahora fija umask077 antes de
+copiar. Ningun permiso/owner de base activa u original se cambio; la segunda
+verificacion completa paso. Capacidad final: NAS2.897.759.961.088B,
+local17.335.816.192B, reservas holgadas. Servicios productivos seguian
+running, Cloud/alertas healthy, endpointok; sin procesos auxiliares pendientes.
+La verificacion/ensayo posterior llevo aproximadamente3h6min, separado de
+los24min1s de indisponibilidad; no es una nueva estimacion de pausa productiva.
+
 ## Ventana autorizada 2026-10-10 UTC: abortada y restaurada
 
 Seguimiento del bloqueo del monitor: [MONITOR_STOP.md](MONITOR_STOP.md)
