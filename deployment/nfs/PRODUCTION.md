@@ -1,5 +1,8 @@
 # Corte controlado al NAS local
 
+Preparacion posterior, sin despliegue: [cache comun de miniaturas](THUMBNAILS.md).
+No cambia ni invalida la evidencia del corte registrada a continuacion.
+
 Continuacion autorizada desde b6502b8. No promover la captura antigua:
 capturar de nuevo todos los cambios con los cuatro escritores detenidos.
 Conservar el ensayo y todos los originales locales para rollback independiente

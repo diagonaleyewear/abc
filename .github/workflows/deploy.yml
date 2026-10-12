@@ -10,6 +10,7 @@ on:
       - main
       - master
       - 'copilot/**'
+      - 'prep/synology-nfs-images'
 
 concurrency:
   group: abcd-control-deploy-${{ github.ref }}
@@ -127,6 +128,10 @@ jobs:
           docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
             --mount "type=volume,source=$VOLUME,target=/smoke" -e CLOUD_SMOKE_DIRECTORY=/smoke/state \
             -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_image_storage.py
+          docker run --rm --network none --read-only --user 1037:100 --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:size=536870912,mode=1777 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            -e CLOUD_SMOKE_DIRECTORY=/smoke/state -e HOME=/home/cloud-images -e PYTHONPATH=/app \
+            "$IMAGE" python scripts/smoke_image_thumbnails.py
           docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
             --mount "type=volume,source=$VOLUME,target=/smoke" -e HOME=/home/cloud-images -e PYTHONPATH=/app \
             "$IMAGE" python scripts/smoke_luxoptica_stop.py --directory /smoke/state/monitor-stop
@@ -260,8 +265,21 @@ jobs:
       - name: Run offline tests
         run: python -m pytest -q tests test_transform_luxottica_masterdata.py test_validate_masterdata_odoo_dryrun.py
 
+      - name: Benchmark synthetic thumbnail cold and hot reads
+        run: |
+          python -m scripts.benchmark_image_thumbnails \
+            --directory "$GITHUB_WORKSPACE/.thumbnail-benchmark" \
+            --output "$RUNNER_TEMP/thumbnail-benchmark.json"
+
+      - name: Retain synthetic benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbnail-benchmark-synthetic
+          path: ${{ runner.temp }}/thumbnail-benchmark.json
+
       - name: Lint with flake8
         run: |
+          flake8 image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py tests/test_image_work_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 scripts/nfs_isolated_probe.py scripts/audit_image_identity.py tests/test_image_service_identity.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 scripts/verify_staging_exports.py scripts/test_staging_storage.py tests/test_staging_exports.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -278,6 +296,7 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py
           sh -n deployment/nfs/remove-failed-staging-units.sh
           sh -n deployment/nfs/validate-isolated-nfs.sh
           python -m py_compile scripts/verify_staging_exports.py scripts/test_staging_storage.py
