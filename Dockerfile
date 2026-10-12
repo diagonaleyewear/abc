@@ -65,6 +65,7 @@ RUN BUILD_COMMIT="$BUILD_COMMIT" BUILD_VERSION="$BUILD_VERSION" BUILD_PUBLISHED=
 COPY scripts/validate_kering_portal.py ./scripts/validate_kering_portal.py
 COPY db_loader.py .
 COPY engine.py .
+COPY abcd_snapshots.py .
 COPY auth_session.py .
 COPY db_config.py .
 COPY transform_luxottica_masterdata.py .
