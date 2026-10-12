@@ -141,7 +141,7 @@ Períodos de agotamiento:
 | **A** | Demanda en últimos 180 días + Valor alto | ✅ REPONER | Gafas con múltiples ventas |
 | **B** | Demanda en últimos 180 días + Valor medio | 📌 MANTENER | Gafas con ventas moderadas |
 | **C** | **60+ días sin ventas** (excluyendo agotamientos) | ⚠️ REVISAR | Baja demanda, posible liquidar |
-| **D** | **120+ días sin ventas** AND sin demanda 180d | 🔴 LIQUIDAR | Producto obsoleto |
+| **D** | **180+ días sin ventas** AND sin demanda 180d | 🔴 LIQUIDAR | Producto obsoleto |
 
 ### **Ventanas de Agotamiento**
 

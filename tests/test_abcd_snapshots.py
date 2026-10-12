@@ -82,3 +82,14 @@ def test_snapshot_round_trip_keeps_existing_payload_and_date() -> None:
     assert saved_day == snapshot_day
     assert restored.loc[0, "Cód Barras"] == "00123"
     assert restored.loc[0, "Extra"] == "kept"
+
+
+def test_ui_and_cli_import_the_shared_snapshot_service() -> None:
+    import abcd_snapshots
+    import app_enhanced
+    import save_abcd_weekly_snapshot as cli
+
+    assert app_enhanced.build_abcd_report_export_df is abcd_snapshots.build_abcd_report_export_df
+    assert app_enhanced.save_abcd_weekly_snapshot is abcd_snapshots.save_abcd_weekly_snapshot
+    assert cli.build_abcd_report_export_df is abcd_snapshots.build_abcd_report_export_df
+    assert cli.save_abcd_weekly_snapshot is abcd_snapshots.save_abcd_weekly_snapshot

@@ -1,0 +1,2020 @@
+{
+  "name": "Publicacion y Despublicaciones Productos en canales de venta en Fin de Semana",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        3824,
+        3520
+      ],
+      "id": "10288018-e33b-4eeb-8f6c-6549f70a462a",
+      "name": "When clicking ‘Test workflow’"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cookieHeader = $json.headers['set-cookie'];\nconst sessionCookie = cookieHeader.find(c => c.includes(\"session_id=\"));\nconst sessionId = sessionCookie.match(/session_id=([^;]+)/)[1];\n\nreturn [{\n  json: {\n    cookie: `session_id=${sessionId}`\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5184,
+        3600
+      ],
+      "id": "4601f009-36b1-4290-b3d7-d1189d23a3b1",
+      "name": "Extraer session_id"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"fields_get\",\n    \"args\": [],\n    \"kwargs\": {}\n  },\n  \"id\": null\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5552,
+        3424
+      ],
+      "id": "9ee71d48-b6d0-4fff-8390-5c5ccb4b6686",
+      "name": "Extraer caracteristicas campos",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b6d32514-4bac-406b-869e-039d19759523",
+              "name": "db",
+              "value": "DiagonalDBProd",
+              "type": "string"
+            },
+            {
+              "id": "b277fcb1-6784-4fd4-a4da-048016301ea9",
+              "name": "login",
+              "value": "ruben.cebreiros@diagonaleyewear.com",
+              "type": "string"
+            },
+            {
+              "id": "b9eda8a0-67c6-4c57-a7ed-e818f91663de",
+              "name": "password",
+              "value": "s&$-QSz3v>@dE{.F",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4800,
+        3600
+      ],
+      "id": "5f2ac619-8800-4c92-b928-63975debba74",
+      "name": "Set Login Datos"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/session/authenticate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"params\": {\n    \"db\": \"{{$json.db}}\",\n    \"login\": \"{{$json.login}}\",\n    \"password\": \"{{$json.password}}\"\n  }\n}\n",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4992,
+        3600
+      ],
+      "id": "53b48ba3-dce2-4d09-bcd1-48300516510d",
+      "name": "Obtener Datos de Sesión",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"search_read\",\n    \"args\": [\n      [[\"siteweb_id\", \"=\", {{ $json['Id Canal de Venta'] }}],[\"x_studio_stock_disponible\", {{ $json.Stock }}],[\"published\", \"=\", {{ $json.Publicado }}],[\"x_brand_id\", \"in\", [{{ $json['Ids Marcas'] }}]]],\n      [\"id\", \"product_id\", \"barcode\", \"published\", \"x_brand_id\", \"x_studio_stock_disponible\", \"siteweb_id\", \"product_website_id\"]\n    ],\n    \"kwargs\": {\n      \"limit\": {{ $json['Limite de Registros'] }}\n    }\n  },\n  \"id\": null\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4528,
+        4032
+      ],
+      "id": "da99fcf7-3df5-4dee-aee1-4b5f8bc393de",
+      "name": "Buscar Productos en Canales de Venta"
+    },
+    {
+      "parameters": {
+        "content": "## Canales de Ventas a 14/07/2025\n1 - Optica Diagonal\n2 - Miinto\n3 - Farfetch\n4 - Vytria\n5 - Deipe\n7 - Poizon\n",
+        "height": 180,
+        "width": 400
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3952,
+        3824
+      ],
+      "id": "f7ebf3dc-bc1c-4e05-9bd2-20e254350c98",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Marcas a 24/04/2026\nFARFETCH:\nBrunello Cucinelli 361\nMoscot 178\nTAG Heuer 358\nVuarnet 364\nBVulgari 386\n\nMIINTO:\nChanel 199\nMoscot 178\nBarton Perreira 356\n",
+        "height": 380,
+        "width": 320,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        5792,
+        3536
+      ],
+      "id": "daa74792-634e-473a-8f2d-8a370a78963a",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"write\",\n    \"args\": [\n      [{{ $json.id }}],\n      {\n        \"published\": true\n      }\n    ],\n    \"kwargs\": {}\n  },\n  \"id\": null\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4976,
+        3872
+      ],
+      "id": "7756cc71-3055-4969-b3b2-daf0b2fbaf41",
+      "name": "Publicar Producto en Canales de Venta",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"write\",\n    \"args\": [\n      [{{ $json.id }}],\n      {\n        \"published\": false\n      }\n    ],\n    \"kwargs\": {}\n  },\n  \"id\": null\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4768,
+        4752
+      ],
+      "id": "d6cf4f9d-dfc6-45d1-890d-65c357afc261",
+      "name": "Des-Publicar Producto en Canales de Venta1",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfor (const item of items) {\n  const response = item.json;\n\n  if (response.error) {\n    const message = response.error.message || JSON.stringify(response.error);\n    throw new Error(`Odoo no pudo publicar el producto: ${message}`);\n  }\n\n  if (response.result !== true) {\n    throw new Error(`Odoo no confirmó la publicación: ${JSON.stringify(response)}`);\n  }\n}\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5232,
+        3888
+      ],
+      "id": "daa9c2ed-0ddd-4afe-b4e9-e658b3d121f3",
+      "name": "Validar publicación en Odoo"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nfor (const item of items) {\n  const response = item.json;\n\n  if (response.error) {\n    const message = response.error.message || JSON.stringify(response.error);\n    throw new Error(`Odoo no pudo despublicar el producto: ${message}`);\n  }\n\n  if (response.result !== true) {\n    throw new Error(`Odoo no confirmó la despublicación: ${JSON.stringify(response)}`);\n  }\n}\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5104,
+        4752
+      ],
+      "id": "94ea754b-bd11-4a30-9564-59c63e3f4adb",
+      "name": "Validar despublicación en Odoo"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 5 20 * * 5"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        4224,
+        3424
+      ],
+      "id": "53e899b2-1601-4ded-ab27-0daa3f40281d",
+      "name": "Activar Viernes",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 23 * * 0"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        4224,
+        3616
+      ],
+      "id": "03fd853f-10c3-4e76-b4a2-a8d189fe13c7",
+      "name": "Des-activar Domingo",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b9eda8a0-67c6-4c57-a7ed-e818f91663de",
+              "name": "Dia",
+              "value": "Viernes",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4400,
+        3424
+      ],
+      "id": "1cdecef5-0320-4294-8a3c-9900c4cb3123",
+      "name": "Viernes"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b9eda8a0-67c6-4c57-a7ed-e818f91663de",
+              "name": "Dia",
+              "value": "Domingo",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4400,
+        3616
+      ],
+      "id": "b83f6bc1-1da4-43f1-95ac-255ed9825958",
+      "name": "Domingo"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Dia').item.json.Dia }}",
+                    "rightValue": "Viernes",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "4dbb689a-9176-4d51-97d0-7473b5c09b55"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Viernes"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "acd21e64-a29f-4f91-a99d-3628c34012cf",
+                    "leftValue": "={{ $('Dia').item.json.Dia }}",
+                    "rightValue": "Domingo",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Domingo"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        3920,
+        4336
+      ],
+      "id": "9d26ea3c-87f5-4d2b-bd16-5e3be44b58d8",
+      "name": "Switch"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        4592,
+        3600
+      ],
+      "id": "2b22f6f7-5049-4440-a8b0-7cea78afe91f",
+      "name": "Dia"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8ad37317-0105-43b1-9629-1141b09e9807",
+              "name": "Limite de Registros",
+              "value": 1000000,
+              "type": "number"
+            },
+            {
+              "id": "3e477909-5e02-45c4-92e5-8118681a340c",
+              "name": "Publicado",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "c9346681-8ee8-4b13-9cac-a011c08ad8b4",
+              "name": "Stock",
+              "value": "\">\", 0",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4144,
+        4144
+      ],
+      "id": "5083c27a-d54e-4579-aa0f-0282f3e0f649",
+      "name": "Filtros Generales Viernes"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8ad37317-0105-43b1-9629-1141b09e9807",
+              "name": "Limite de Registros",
+              "value": 1000000,
+              "type": "number"
+            },
+            {
+              "id": "3e477909-5e02-45c4-92e5-8118681a340c",
+              "name": "Publicado",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4144,
+        4544
+      ],
+      "id": "1c6bd1c7-3893-49d3-ae45-7618eaee11fd",
+      "name": "Filtros Generales Domingo"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b6d32514-4bac-406b-869e-039d19759523",
+              "name": "Id Canal de Venta",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "c5e68a30-065d-4061-97aa-5a3f7f1b1669",
+              "name": "Ids Marcas",
+              "value": "199, 178",
+              "type": "string"
+            },
+            {
+              "id": "95338062-b388-4240-bd93-fd910df89bef",
+              "name": "Publicado",
+              "value": "={{ $json.Publicado }}",
+              "type": "boolean"
+            },
+            {
+              "id": "8cccd774-5356-4bb8-a1b5-2b2a6e508871",
+              "name": "Stock",
+              "value": "={{ $json.Stock }}",
+              "type": "string"
+            },
+            {
+              "id": "de81d4ab-99ca-4ee0-8f4b-26e5a666a140",
+              "name": "Limite de Registros",
+              "value": "={{ $json['Limite de Registros'] }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4336,
+        4032
+      ],
+      "id": "cd653171-ed0b-4dad-9e50-eef429574f91",
+      "name": "Filtros Miinto Viernes"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "96c44089-9d87-45b2-95b7-c53e5a53c4c9",
+              "name": "Id Canal de Venta",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "6ff4e66a-90ac-480a-910a-de2419ecd474",
+              "name": "Ids Marcas",
+              "value": "361, 178, 364, 386, 358, 343",
+              "type": "string"
+            },
+            {
+              "id": "31183338-748c-4317-8494-13f8598770eb",
+              "name": "Publicado",
+              "value": "={{ $json.Publicado }}",
+              "type": "boolean"
+            },
+            {
+              "id": "e94e7f7d-7252-4e0e-8d81-2b88e5a08b19",
+              "name": "Stock",
+              "value": "={{ $json.Stock }}",
+              "type": "string"
+            },
+            {
+              "id": "97d7f9ae-379a-4913-9778-4882a7d9c7ed",
+              "name": "Limite de Registros",
+              "value": "={{ $json['Limite de Registros'] }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4336,
+        4240
+      ],
+      "id": "e59cf5ab-1ebb-4b3c-a160-b652fa4033e4",
+      "name": "Filtros Farfetch Viernes"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b6d32514-4bac-406b-869e-039d19759523",
+              "name": "Id Canal de Venta",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "c5e68a30-065d-4061-97aa-5a3f7f1b1669",
+              "name": "Ids Marcas",
+              "value": "199, 178",
+              "type": "string"
+            },
+            {
+              "id": "95338062-b388-4240-bd93-fd910df89bef",
+              "name": "Publicado",
+              "value": "={{ $json.Publicado }}",
+              "type": "boolean"
+            },
+            {
+              "id": "de81d4ab-99ca-4ee0-8f4b-26e5a666a140",
+              "name": "Limite de Registros",
+              "value": "={{ $json['Limite de Registros'] }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4336,
+        4432
+      ],
+      "id": "7c1599b2-1f3b-4ec6-8405-c70187154216",
+      "name": "Filtros Miinto Domingo"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "96c44089-9d87-45b2-95b7-c53e5a53c4c9",
+              "name": "Id Canal de Venta",
+              "value": 3,
+              "type": "number"
+            },
+            {
+              "id": "6ff4e66a-90ac-480a-910a-de2419ecd474",
+              "name": "Ids Marcas",
+              "value": "361, 178, 364, 386, 358, 343",
+              "type": "string"
+            },
+            {
+              "id": "31183338-748c-4317-8494-13f8598770eb",
+              "name": "Publicado",
+              "value": "={{ $json.Publicado }}",
+              "type": "boolean"
+            },
+            {
+              "id": "97d7f9ae-379a-4913-9778-4882a7d9c7ed",
+              "name": "Limite de Registros",
+              "value": "={{ $json['Limite de Registros'] }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        4336,
+        4640
+      ],
+      "id": "0222a225-1c76-4139-a658-1f9d18c0e0ff",
+      "name": "Filtros Farfetch Domingo"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        5664,
+        4352
+      ],
+      "id": "a31672e3-126d-4574-8f6f-571c55d6e6d4",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {}
+          ]
+        },
+        "options": {
+          "includeBinaries": true
+        }
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        5824,
+        4352
+      ],
+      "id": "1e57cfd3-3c27-4306-a674-6db656066c05",
+      "name": "Aggregate"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "20dd4db7-7125-4bbe-9a4e-da5898d45721",
+              "name": "SiteWebs",
+              "value": "={{ $('Split Out Viernes').item.json.siteweb_id[1] }}",
+              "type": "string"
+            },
+            {
+              "id": "c38928d5-0cea-4919-8d5b-e59fd1945ca1",
+              "name": "Marca",
+              "value": "={{ $('Split Out Viernes').item.json.x_brand_id[1] }}",
+              "type": "string"
+            },
+            {
+              "id": "5cb247ad-3839-4696-9249-d8276a8ee297",
+              "name": "Producto",
+              "value": "={{ $('Split Out Viernes').item.json.product_id[1] }}",
+              "type": "string"
+            },
+            {
+              "id": "df33de9a-1503-40ca-ac94-6ab416aaeca5",
+              "name": "barcode",
+              "value": "={{ $('Split Out Viernes').item.json.barcode }}",
+              "type": "string"
+            },
+            {
+              "id": "fecaf66d-b8ce-473d-ba88-165e6fc2919c",
+              "name": "Website Product Id",
+              "value": "={{ $('Split Out Viernes').item.json.product_website_id }}",
+              "type": "string"
+            },
+            {
+              "id": "f509e968-63ba-4638-9809-cae2bb4e6ea8",
+              "name": "Publicada",
+              "value": "True",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        5056,
+        4144
+      ],
+      "id": "9d8f8a7f-d863-4802-839e-f690d6ec6fcc",
+      "name": "Datos Salida Viernes",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"search_read\",\n    \"args\": [\n      [[\"siteweb_id\", \"=\", 3], [\"barcode\", \"=\", 8059026097527]],\n      []\n    ],\n    \"kwargs\": {\n      \"limit\": 10\n    }\n  },\n  \"id\": null\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5552,
+        3632
+      ],
+      "id": "381f81fc-13c8-4178-95f4-1d7322a9676b",
+      "name": "Extraer datos de 1 producto",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "result",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        4864,
+        4144
+      ],
+      "id": "886e461c-a324-46be-80f9-fc82ae1eb465",
+      "name": "Split Out Viernes"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "20dd4db7-7125-4bbe-9a4e-da5898d45721",
+              "name": "SiteWebs",
+              "value": "={{ $('Split Out Domingo').item.json.siteweb_id[1] }}",
+              "type": "string"
+            },
+            {
+              "id": "c38928d5-0cea-4919-8d5b-e59fd1945ca1",
+              "name": "Marca",
+              "value": "={{ $('Split Out Domingo').item.json.x_brand_id[1] }}",
+              "type": "string"
+            },
+            {
+              "id": "5cb247ad-3839-4696-9249-d8276a8ee297",
+              "name": "Producto",
+              "value": "={{ $('Split Out Domingo').item.json.product_id[1] }}",
+              "type": "string"
+            },
+            {
+              "id": "df33de9a-1503-40ca-ac94-6ab416aaeca5",
+              "name": "barcode",
+              "value": "={{ $('Split Out Domingo').item.json.barcode }}",
+              "type": "string"
+            },
+            {
+              "id": "fecaf66d-b8ce-473d-ba88-165e6fc2919c",
+              "name": "Website Product Id",
+              "value": "={{ $('Split Out Domingo').item.json.product_website_id }}",
+              "type": "string"
+            },
+            {
+              "id": "f509e968-63ba-4638-9809-cae2bb4e6ea8",
+              "name": "Publicada",
+              "value": "False",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        5024,
+        4544
+      ],
+      "id": "88538ab7-708f-488a-8278-0b57691111b6",
+      "name": "Datos Salida Domingo",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "result",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        4816,
+        4544
+      ],
+      "id": "b247ae0a-18ce-4bed-a2b4-4339e7f476ca",
+      "name": "Split Out Domingo",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $items('Merge').length }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    },
+                    "id": "8db415a4-f26a-4074-a07a-6403e9a7067a"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c914fc73-3662-4e15-810a-12bf8c0c9abd",
+                    "leftValue": "={{ $items('Merge').length }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "2"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        5968,
+        4352
+      ],
+      "id": "8367effe-1d32-440d-90e4-1df31f150ed4",
+      "name": "Switch2"
+    },
+    {
+      "parameters": {
+        "toRecipients": "ruben.cebreiros@diagonaleyewear.com",
+        "subject": "Informe Referencias Des/Publicadas",
+        "bodyContent": "=Ficheros con las referencias Des/Publicadas",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "data"
+              },
+              {
+                "binaryPropertyName": "data_1"
+              }
+            ]
+          },
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        6240,
+        4592
+      ],
+      "id": "388da03e-f83b-40eb-99c5-24b7afcf70bf",
+      "name": "Microsoft Outlook YO 2 Ficheros",
+      "webhookId": "03cc6dcc-baf3-4d37-aa5b-8fc45ac8c213",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "T8OuBN9Lhv85hqDz",
+          "name": "Pedidos Stars"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "=data",
+        "options": {
+          "fileName": "={{ $json.SiteWebs }} Ref. Publicadas.xlsx "
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        5392,
+        4016
+      ],
+      "id": "f147b2c8-aec1-4d41-9c65-f35ccc6e1f93",
+      "name": "Convert to File Publicadas 1"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "=data",
+        "options": {
+          "fileName": "={{ $json.SiteWebs }} Ref. Publicadas.xlsx "
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        5392,
+        4224
+      ],
+      "id": "dbe5cb74-6485-4370-9e4a-0c9413a04c22",
+      "name": "Convert to File Publicadas 2"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "=data",
+        "options": {
+          "fileName": "={{ $json.SiteWebs }} Ref. Despublicadas.xlsx "
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        5392,
+        4416
+      ],
+      "id": "c0414f46-27f6-4a7d-8f12-95162b781863",
+      "name": "Convert to File Des-Publicadas 1"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "=data",
+        "options": {
+          "fileName": "={{ $json.SiteWebs }} Ref. Despublicadas.xlsx "
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        5392,
+        4624
+      ],
+      "id": "94ffb03d-6840-4fc4-9c16-0df5ed1c5d54",
+      "name": "Convert to File Des-Publicadas 3"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.SiteWebs }}",
+                    "rightValue": "Miinto",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "e13ca570-0d5d-4c60-a509-ef75221f6c5d"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Miinto"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "bf110ff0-cab4-45e2-bf8f-05ebe653984a",
+                    "leftValue": "={{ $json.SiteWebs }}",
+                    "rightValue": "Farfetch",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Farfetch"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        5216,
+        4144
+      ],
+      "id": "1a6339b2-8022-4807-b5cf-4e641ee14197",
+      "name": "Switch Viernes",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.SiteWebs }}",
+                    "rightValue": "Miinto",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "e13ca570-0d5d-4c60-a509-ef75221f6c5d"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Miinto"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "bf110ff0-cab4-45e2-bf8f-05ebe653984a",
+                    "leftValue": "={{ $json.SiteWebs }}",
+                    "rightValue": "Farfetch",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Farfetch"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        5168,
+        4544
+      ],
+      "id": "dd3987be-ba4d-4a69-a640-aa069ffeca74",
+      "name": "Switch Domingo",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "toRecipients": "ruben.cebreiros@diagonaleyewear.com",
+        "subject": "Informe Referencias Des/Publicadas",
+        "bodyContent": "=Ficheros con las referencias Des/Publicadas",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "data"
+              }
+            ]
+          },
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        6256,
+        4240
+      ],
+      "id": "b6042534-7b4f-42df-ab45-bf9955795629",
+      "name": "Microsoft Outlook YO 1 Ficheros",
+      "webhookId": "03cc6dcc-baf3-4d37-aa5b-8fc45ac8c213",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "T8OuBN9Lhv85hqDz",
+          "name": "Pedidos Stars"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "roberto@diagonaleyewear.com",
+        "subject": "Informe Referencias Des/Publicadas",
+        "bodyContent": "=Ficheros con las referencias Des/Publicadas",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "data"
+              }
+            ]
+          },
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        6240,
+        4032
+      ],
+      "id": "a5ce76a5-8d88-4370-b229-67b1ab377814",
+      "name": "Microsoft Outlook Roberto 1 Ficheros",
+      "webhookId": "03cc6dcc-baf3-4d37-aa5b-8fc45ac8c213",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "T8OuBN9Lhv85hqDz",
+          "name": "Pedidos Stars"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "roberto@diagonaleyewear.com",
+        "subject": "Informe Referencias Des/Publicadas",
+        "bodyContent": "=Ficheros con las referencias Des/Publicadas",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "data"
+              },
+              {
+                "binaryPropertyName": "data_1"
+              }
+            ]
+          },
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        6224,
+        4432
+      ],
+      "id": "82ebe103-27c9-48a0-ad3f-dbaf0af057ff",
+      "name": "Microsoft Outlook Roberto 2 Ficheros",
+      "webhookId": "03cc6dcc-baf3-4d37-aa5b-8fc45ac8c213",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "T8OuBN9Lhv85hqDz",
+          "name": "Pedidos Stars"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "virginia.nunez@diagonaleyewear.com",
+        "subject": "Informe Referencias Des/Publicadas",
+        "bodyContent": "=Ficheros con las referencias Des/Publicadas",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "data"
+              }
+            ]
+          },
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        5728,
+        4048
+      ],
+      "id": "0d8eed98-6037-4018-9b05-d058f1247ef5",
+      "name": "Microsoft Outlook VIrginia 1 Ficheros",
+      "webhookId": "03cc6dcc-baf3-4d37-aa5b-8fc45ac8c213",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "T8OuBN9Lhv85hqDz",
+          "name": "Pedidos Stars"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        4752,
+        3392
+      ],
+      "id": "d03370c1-a6af-47e9-82af-569b1973aee5",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "toRecipients": "fernando.coladas@diagonaleyewear.com",
+        "subject": "=Error en  {{ $workflow.name }}",
+        "bodyContent": "=Error en el Flow {{ $workflow.name }}\n",
+        "additionalFields": {
+          "importance": "High",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        5072,
+        3392
+      ],
+      "id": "6b4a9a17-0846-4279-99c5-755a27332ec6",
+      "name": "Microsoft Outlook YO",
+      "webhookId": "03cc6dcc-baf3-4d37-aa5b-8fc45ac8c213",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "T8OuBN9Lhv85hqDz",
+          "name": "Pedidos Stars"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"search_read\",\n    \"args\": [\n      [[\"siteweb_id\", \"=\", {{ $json['Id Canal de Venta'] }}],[\"x_studio_stock_disponible\", {{ $json.Stock }}],[\"x_brand_id\", \"in\", [{{ $json['Ids Marcas'] }}]]],\n      [\"id\", \"product_id\", \"barcode\", \"published\", \"x_brand_id\", \"x_studio_stock_disponible\", \"siteweb_id\", \"product_website_id\"]\n    ],\n    \"kwargs\": {\n      \"limit\": {{ $json['Limite de Registros'] }}\n    }\n  },\n  \"id\": null\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4528,
+        4240
+      ],
+      "id": "6a67f443-7d42-41f4-a466-cc26e0dc339c",
+      "name": "Buscar Productos en Canales de Venta2"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        4720,
+        4144
+      ],
+      "id": "4652253e-8147-4c67-ab33-dc14552b2bea",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"search_read\",\n    \"args\": [\n      [[\"siteweb_id\", \"=\", {{ $json['Id Canal de Venta'] }}],[\"published\", \"=\", {{ $json.Publicado }}],[\"x_brand_id\", \"in\", [{{ $json['Ids Marcas'] }}]]],\n      [\"id\", \"product_id\", \"barcode\", \"published\", \"x_brand_id\",  \"siteweb_id\", \"product_website_id\"]\n    ],\n    \"kwargs\": {\n      \"limit\": {{ $json['Limite de Registros'] }}\n    }\n  },\n  \"id\": null\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4512,
+        4640
+      ],
+      "id": "430ca52a-a2df-40f8-b683-103a681f4715",
+      "name": "Buscar Productos en Canales de Venta3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"search_read\",\n    \"args\": [\n      [[\"siteweb_id\", \"=\", {{ $json['Id Canal de Venta'] }}],[\"published\", \"=\", {{ $json.Publicado }}],[\"x_brand_id\", \"in\", [{{ $json['Ids Marcas'] }}]]],\n      [\"id\", \"product_id\", \"barcode\", \"published\", \"x_brand_id\", \"siteweb_id\", \"product_website_id\"]\n    ],\n    \"kwargs\": {\n      \"limit\": {{ $json['Limite de Registros'] }}\n    }\n  },\n  \"id\": null\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4512,
+        4432
+      ],
+      "id": "e46c2400-bf16-4071-9aae-9e93b981f7b3",
+      "name": "Buscar Productos en Canales de Venta1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        4672,
+        4544
+      ],
+      "id": "c0fd8594-8198-4c3e-bcd7-cf61867d6c76",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://odoo.diagonaleyewear.net/web/dataset/call_kw",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "cookie",
+              "value": "={{ $('Extraer session_id').item.json.cookie }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"jsonrpc\": \"2.0\",\n  \"method\": \"call\",\n  \"params\": {\n    \"model\": \"diagonal.product.website\",\n    \"method\": \"search_read\",\n    \"args\": [\n      [[\"siteweb_id\", \"=\", {{ $json['Id Canal de Venta'] }}],[\"x_studio_stock_disponible\", {{ $json.Stock }}],[\"published\", \"=\", {{ $json.Publicado }}],[\"x_brand_id\", \"in\", [{{ $json['Ids Marcas'] }}]]],\n      [\"id\", \"product_id\", \"barcode\", \"published\", \"x_brand_id\", \"x_studio_stock_disponible\", \"siteweb_id\", \"product_website_id\"]\n    ],\n    \"kwargs\": {\n      \"limit\": {{ $json['Limite de Registros'] }}\n    }\n  },\n  \"id\": null\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6592,
+        4320
+      ],
+      "id": "37e5c548-985f-4a20-af52-02876b487772",
+      "name": "Buscar Productos en Canales de Venta5"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Extraer session_id": {
+      "main": [
+        [
+          {
+            "node": "Extraer caracteristicas campos",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extraer datos de 1 producto",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Login Datos": {
+      "main": [
+        [
+          {
+            "node": "Obtener Datos de Sesión",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Obtener Datos de Sesión": {
+      "main": [
+        [
+          {
+            "node": "Extraer session_id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Productos en Canales de Venta": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Activar Viernes": {
+      "main": [
+        [
+          {
+            "node": "Viernes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Des-activar Domingo": {
+      "main": [
+        [
+          {
+            "node": "Domingo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Viernes": {
+      "main": [
+        [
+          {
+            "node": "Dia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Domingo": {
+      "main": [
+        [
+          {
+            "node": "Dia",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Dia": {
+      "main": [
+        [
+          {
+            "node": "Set Login Datos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtros Generales Viernes": {
+      "main": [
+        [
+          {
+            "node": "Filtros Miinto Viernes",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Filtros Farfetch Viernes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Filtros Generales Viernes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Filtros Generales Domingo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtros Miinto Viernes": {
+      "main": [
+        [
+          {
+            "node": "Buscar Productos en Canales de Venta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtros Farfetch Viernes": {
+      "main": [
+        [
+          {
+            "node": "Buscar Productos en Canales de Venta2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtros Generales Domingo": {
+      "main": [
+        [
+          {
+            "node": "Filtros Miinto Domingo",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Filtros Farfetch Domingo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtros Miinto Domingo": {
+      "main": [
+        [
+          {
+            "node": "Buscar Productos en Canales de Venta1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtros Farfetch Domingo": {
+      "main": [
+        [
+          {
+            "node": "Buscar Productos en Canales de Venta3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate": {
+      "main": [
+        [
+          {
+            "node": "Switch2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Aggregate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Datos Salida Viernes": {
+      "main": [
+        [
+          {
+            "node": "Switch Viernes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out Viernes": {
+      "main": [
+        [
+          {
+            "node": "Publicar Producto en Canales de Venta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publicar Producto en Canales de Venta": {
+      "main": [
+        [
+          {
+            "node": "Validar publicación en Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar publicación en Odoo": {
+      "main": [
+        [
+          {
+            "node": "Datos Salida Viernes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Datos Salida Domingo": {
+      "main": [
+        [
+          {
+            "node": "Switch Domingo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out Domingo": {
+      "main": [
+        [
+          {
+            "node": "Des-Publicar Producto en Canales de Venta1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Des-Publicar Producto en Canales de Venta1": {
+      "main": [
+        [
+          {
+            "node": "Validar despublicación en Odoo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar despublicación en Odoo": {
+      "main": [
+        [
+          {
+            "node": "Datos Salida Domingo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch2": {
+      "main": [
+        [
+          {
+            "node": "Microsoft Outlook Roberto 1 Ficheros",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Microsoft Outlook YO 1 Ficheros",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Microsoft Outlook YO 2 Ficheros",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Microsoft Outlook Roberto 2 Ficheros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File Publicadas 1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Microsoft Outlook VIrginia 1 Ficheros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File Publicadas 2": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Convert to File Des-Publicadas 1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Microsoft Outlook VIrginia 1 Ficheros",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File Des-Publicadas 3": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Switch Viernes": {
+      "main": [
+        [
+          {
+            "node": "Convert to File Publicadas 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Convert to File Publicadas 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Domingo": {
+      "main": [
+        [
+          {
+            "node": "Convert to File Des-Publicadas 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Convert to File Des-Publicadas 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Microsoft Outlook YO",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Productos en Canales de Venta2": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Split Out Viernes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Split Out Domingo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Productos en Canales de Venta1": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Productos en Canales de Venta3": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "6b953313-59ef-4754-91ed-6950fa173d69",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "120691cb4e9d47fe0c3cd6c4103c5a9375ddfe62a1ab3d292d00a951acd1e11b"
+  },
+  "nodeGroups": [],
+  "id": "F4IDHyRD901kCu6f",
+  "tags": [
+    {
+      "updatedAt": "2026-03-06T16:14:32.556Z",
+      "createdAt": "2026-03-06T16:14:32.556Z",
+      "id": "eIpUFAY15eY4oPtB",
+      "name": "Diagonal Eyewear"
+    }
+  ]
+}

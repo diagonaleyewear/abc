@@ -8,10 +8,12 @@ from pathlib import Path
 from datetime import datetime
 import json
 import sys
+from image_repository import ImageRepository, repository_root
+from repository_storage import state_root
 
 def check_download_state():
     """Revisa el archivo de estado de descargas."""
-    state_file = Path("docs/Luxoptica/descargas/.mail_download_state.json")
+    state_file = state_root(repository_root()) / ".mail_download_state.json"
     
     print("\n" + "=" * 80)
     print("MONITOREO: Estado de Descargas Automáticas")
@@ -46,7 +48,7 @@ def check_download_state():
 
 def check_descargas_folder():
     """Revisa si hay archivos descargados."""
-    descargas_dir = Path("docs/Luxoptica/descargas")
+    descargas_dir = repository_root()
     
     print(f"\n" + "=" * 80)
     print("MONITOREO: Carpeta de Descargas")
@@ -57,33 +59,16 @@ def check_descargas_folder():
         print("   Se creará automáticamente cuando llegue la primera imagen")
         return True
     
-    # Buscar carpetas por fecha y lote
-    fecha_dirs = sorted([d for d in descargas_dir.iterdir() if d.is_dir() and d.name != ".mail_download_state.json"])
-    
-    if not fecha_dirs:
+    records = ImageRepository(descargas_dir).records()
+    if not records:
         print(f"\n⏳ Carpeta existe pero vacía (esperando respuesta de Luxoptica)")
         print(f"   {descargas_dir.absolute()}/")
         return True
     
     print(f"\n✅ Se han descargado imágenes:")
-    total_images = 0
-    
-    for fecha_dir in fecha_dirs:
-        lote_dirs = sorted([d for d in fecha_dir.iterdir() if d.is_dir()])
-        for lote_dir in lote_dirs:
-            images = list(lote_dir.glob("*"))
-            image_count = len([f for f in images if f.is_file()])
-            if image_count > 0:
-                total_images += image_count
-                print(f"   📁 {fecha_dir.name}/{lote_dir.name}/")
-                print(f"      └─ {image_count} archivo(s)")
-                # Mostrar primeros archivos
-                for img in images[:3]:
-                    if img.is_file():
-                        size_kb = img.stat().st_size / 1024
-                        print(f"         ├─ {img.name} ({size_kb:.1f} KB)")
-                if image_count > 3:
-                    print(f"         └─ ... y {image_count - 3} más")
+    total_images = len({record.path for record in records})
+    for record in records[:10]:
+        print(f"   EAN {record.ean}: {record.name} ({record.provider}, {record.market or 'Original'})")
     
     if total_images > 0:
         print(f"\n✅ TOTAL: {total_images} imagen(es) descargada(s)")
@@ -107,7 +92,7 @@ def check_env_config():
         "M365_CLIENT_ID",
         "M365_CLIENT_SECRET",
         "M365_MAILBOX",
-        "M365_DOWNLOAD_ROOT",
+        "IMAGE_REPOSITORY_ROOT",
     ]
     
     all_ok = True
@@ -181,7 +166,7 @@ def main():
     if all_ok:
         print(f"\n🎉 TODO ESTÁ LISTO")
         print(f"\n   El sistema descargará automáticamente las imágenes cuando Luxoptica responda.")
-        print(f"   Revisar: docs/Luxoptica/descargas/.mail_download_state.json")
+        print(f"   Revisar: {state_root(repository_root()) / '.mail_download_state.json'}")
         return 0
     else:
         print(f"\n⚠️  Hay items que revisar")

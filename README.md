@@ -2,13 +2,35 @@
 
 > Aplicación web Streamlit para gestionar la clasificación ABCD de 13,454 productos con análisis de demanda, períodos de agotamiento y optimización de inventario.
 
+## Imágenes Kering (Borrador)
+
+Configuración cifrada, selección de pedidos Odoo e historial persistente:
+[documentación y límites de validación](docs/KERING_IMAGES.md).
+Adaptador Playwright basado en el portal autenticado observado; consulta la guía
+para distinguir validación offline, evidencia real y comprobaciones pendientes.
+
+## Repositorio común de imágenes por EAN
+
+Luxoptica y Kering comparten `IMAGE_REPOSITORY_ROOT`, sin copias por pedido o
+proveedor. Antes de desplegar este cambio, seguir el
+[plan de inventario, simulación, migración y recuperación](docs/IMAGE_REPOSITORY.md).
+No ejecutar la migración en producción ni retirar originales sin validación.
+
+## Inicio Cloud e identidad de build
+
+Panel de procesos con estados locales persistidos, consulta inicial y actualización
+explícita; cabecera con el logo original Diagonal y soporte con la identidad real
+del artefacto. [Fuentes de estado, límites, capturas y build](docs/CLOUD_HOME.md).
+Para construir Docker/Compose desde fuentes se requieren los argumentos de
+proveniencia documentados; no activar servicios ni ejecutar migraciones al validar.
+
 ## 🎯 ¿Qué Es?
 
 Sistema inteligente que clasifica productos en 4 categorías:
 - **A**: Alta demanda → REPONER
 - **B**: Demanda media → MANTENER  
 - **C**: 60+ días sin ventas → REVISAR
-- **D**: 120+ días sin ventas → LIQUIDAR
+- **D**: 180+ días sin ventas → LIQUIDAR
 
 Con análisis único de **ventanas de agotamiento** que entiende la diferencia entre "sin demanda" vs "sin stock".
 

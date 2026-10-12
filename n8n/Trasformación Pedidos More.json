@@ -1,0 +1,1080 @@
+{
+  "name": "Trasformación Pedidos More",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyHour",
+              "minute": 10
+            }
+          ]
+        },
+        "output": "raw",
+        "filters": {
+          "hasAttachments": true,
+          "readStatus": "unread",
+          "sender": "sys.integracion@diagonaleyewear.net"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.microsoftOutlookTrigger",
+      "typeVersion": 1,
+      "position": [
+        352,
+        -256
+      ],
+      "id": "eed9fe6d-18a1-482f-942b-e06124546411",
+      "name": "Disparador",
+      "notesInFlow": false,
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "getAll",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        720,
+        -256
+      ],
+      "id": "dfc184f5-b28c-4f88-8b2f-15db33fb234c",
+      "name": "Adjuntos",
+      "webhookId": "713e2a63-9291-4692-83ea-e279fa298d82",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "output": "raw",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        544,
+        -256
+      ],
+      "id": "32c7d8ef-f087-4a2c-b86f-0da15716e945",
+      "name": "Mensaje",
+      "webhookId": "217861f5-6d57-40df-8de8-83ab09ae7f6b",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "messageAttachment",
+        "operation": "download",
+        "messageId": {
+          "__rl": true,
+          "value": "={{ $('Mensaje').item.json.id }}",
+          "mode": "id"
+        },
+        "attachmentId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "datoss"
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -256
+      ],
+      "id": "99dc024b-dc9a-4dba-a83d-67da1de96c9c",
+      "name": "Adjunto",
+      "webhookId": "44e898f0-2e9a-4ade-bc85-a38f1b207c87",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "messageId": {
+          "__rl": true,
+          "value": "={{$('Disparador').item.json['id'] }}",
+          "mode": "id"
+        },
+        "updateFields": {
+          "isRead": true
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        2144,
+        608
+      ],
+      "id": "175a9b4a-04d8-417a-9d5b-a585ee316bd4",
+      "name": "Marcar Leído",
+      "webhookId": "c51fbcd8-5bd4-4bfb-b8cd-85ac9c885cb4",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        2496,
+        -160
+      ],
+      "id": "0e43f5bf-8cdf-4707-bdd7-8883ae1dc525",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1152,
+        -256
+      ],
+      "id": "d876c4e3-8776-41b7-842a-6818345249c5",
+      "name": "Bucle"
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "options": {
+          "includeBinaries": true
+        }
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        1216,
+        592
+      ],
+      "id": "b2333e15-981e-4af0-8cf0-3a398e8da52d",
+      "name": "Aggregate",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Bucle').all().length }}",
+                    "rightValue": 1,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    },
+                    "id": "8db415a4-f26a-4074-a07a-6403e9a7067a"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c914fc73-3662-4e15-810a-12bf8c0c9abd",
+                    "leftValue": "={{ $('Bucle').all().length }}",
+                    "rightValue": 2,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "6e44b2e6-50c0-4b46-ad0d-2ad5fa2643de",
+                    "leftValue": "={{ $('Bucle').all().length }}",
+                    "rightValue": 3,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "9700723c-e93b-48a3-a33e-ea6fb46144f0",
+                    "leftValue": "={{ $('Bucle').all().length }}",
+                    "rightValue": 4,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "bfc51e1f-df1c-4ea5-9718-247f047e7fe7",
+                    "leftValue": "={{ $('Bucle').all().length }}",
+                    "rightValue": 5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "b3e504cc-91ad-4fc4-ab6c-273157dd3f1c",
+                    "leftValue": "={{ $('Bucle').all().length }}",
+                    "rightValue": 6,
+                    "operator": {
+                      "type": "number",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1456,
+        528
+      ],
+      "id": "175156fb-f2f2-47f4-930c-6524d7729cca",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "toRecipients": "pedidos.more@diagonaleyewear.com",
+        "subject": "Marcolin MORE - Transformado - SG",
+        "bodyContent": "={{ \n    'Este Email parte del email:\\n\\t- TITULO: ' + $('Disparador').item.json.subject +\n    '\\n\\t- FECHA: ' + \n    (() => {\n        // Obtener la fecha original en UTC\n        let fechaUTC = new Date($('Disparador').item.json.receivedDateTime);\n\n        // Crear una nueva fecha en la zona horaria de Madrid\n        let fechaMadrid = new Intl.DateTimeFormat(\"es-ES\", { \n            timeZone: \"Europe/Madrid\",\n            weekday: \"short\", \n            day: \"2-digit\", \n            month: \"2-digit\", \n            year: \"numeric\",\n            hour: \"2-digit\",\n            minute: \"2-digit\",\n            hour12: false \n        }).format(fechaUTC);\n\n        return fechaMadrid;\n    })() \n}}\n",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "datoss"
+              },
+              {
+                "binaryPropertyName": "datass"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        128
+      ],
+      "id": "934f092f-cdab-4619-b01b-c0a73ddfd9b6",
+      "name": "Outlook 2 Adj",
+      "webhookId": "4188fba5-c412-45f5-a9d5-8fa76153a51a",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "pedidos.more@diagonaleyewear.com",
+        "subject": "Marcolin MORE - Transformado - SG",
+        "bodyContent": "={{ \n    'Este Email parte del email:\\n\\t- TITULO: ' + $('Disparador').item.json.subject +\n    '\\n\\t- FECHA: ' + \n    (() => {\n        // Obtener la fecha original en UTC\n        let fechaUTC = new Date($('Disparador').item.json.receivedDateTime);\n\n        // Crear una nueva fecha en la zona horaria de Madrid\n        let fechaMadrid = new Intl.DateTimeFormat(\"es-ES\", { \n            timeZone: \"Europe/Madrid\",\n            weekday: \"short\", \n            day: \"2-digit\", \n            month: \"2-digit\", \n            year: \"numeric\",\n            hour: \"2-digit\",\n            minute: \"2-digit\",\n            hour12: false \n        }).format(fechaUTC);\n\n        return fechaMadrid;\n    })() \n}}\n",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "datoss"
+              },
+              {
+                "binaryPropertyName": "datass"
+              },
+              {
+                "binaryPropertyName": "datoss_1"
+              },
+              {
+                "binaryPropertyName": "datass_1"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        336
+      ],
+      "id": "99ca7cc2-a75e-424a-811e-57cad756be0e",
+      "name": "Outlook 4 Adj",
+      "webhookId": "4188fba5-c412-45f5-a9d5-8fa76153a51a",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "pedidos.more@diagonaleyewear.com",
+        "subject": "Marcolin MORE - Transformado - SG",
+        "bodyContent": "={{ \n    'Este Email parte del email:\\n\\t- TITULO: ' + $('Disparador').item.json.subject +\n    '\\n\\t- FECHA: ' + \n    (() => {\n        // Obtener la fecha original en UTC\n        let fechaUTC = new Date($('Disparador').item.json.receivedDateTime);\n\n        // Crear una nueva fecha en la zona horaria de Madrid\n        let fechaMadrid = new Intl.DateTimeFormat(\"es-ES\", { \n            timeZone: \"Europe/Madrid\",\n            weekday: \"short\", \n            day: \"2-digit\", \n            month: \"2-digit\", \n            year: \"numeric\",\n            hour: \"2-digit\",\n            minute: \"2-digit\",\n            hour12: false \n        }).format(fechaUTC);\n\n        return fechaMadrid;\n    })() \n}}\n",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "datoss"
+              },
+              {
+                "binaryPropertyName": "datass"
+              },
+              {
+                "binaryPropertyName": "datoss_1"
+              },
+              {
+                "binaryPropertyName": "datass_1"
+              },
+              {
+                "binaryPropertyName": "datoss_2"
+              },
+              {
+                "binaryPropertyName": "datass_2"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        512
+      ],
+      "id": "9fb0c1f2-8df6-4ce3-ab20-1b554ba601ca",
+      "name": "Outlook 6 Adj",
+      "webhookId": "4188fba5-c412-45f5-a9d5-8fa76153a51a",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "pedidos.more@diagonaleyewear.com",
+        "subject": "Marcolin MORE - Transformado - SG",
+        "bodyContent": "={{ \n    'Este Email parte del email:\\n\\t- TITULO: ' + $('Disparador').item.json.subject +\n    '\\n\\t- FECHA: ' + \n    (() => {\n        // Obtener la fecha original en UTC\n        let fechaUTC = new Date($('Disparador').item.json.receivedDateTime);\n\n        // Crear una nueva fecha en la zona horaria de Madrid\n        let fechaMadrid = new Intl.DateTimeFormat(\"es-ES\", { \n            timeZone: \"Europe/Madrid\",\n            weekday: \"short\", \n            day: \"2-digit\", \n            month: \"2-digit\", \n            year: \"numeric\",\n            hour: \"2-digit\",\n            minute: \"2-digit\",\n            hour12: false \n        }).format(fechaUTC);\n\n        return fechaMadrid;\n    })() \n}}\n",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "datoss"
+              },
+              {
+                "binaryPropertyName": "datass"
+              },
+              {
+                "binaryPropertyName": "datoss_1"
+              },
+              {
+                "binaryPropertyName": "datass_1"
+              },
+              {
+                "binaryPropertyName": "datoss_2"
+              },
+              {
+                "binaryPropertyName": "datass_2"
+              },
+              {
+                "binaryPropertyName": "datoss_3"
+              },
+              {
+                "binaryPropertyName": "datass_3"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        688
+      ],
+      "id": "b1fd1a6d-486e-448f-8563-4c40f7d87700",
+      "name": "Outlook 8 Adj",
+      "webhookId": "4188fba5-c412-45f5-a9d5-8fa76153a51a",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "binaryPropertyName": "=datoss",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        -128
+      ],
+      "id": "a9f9141a-9473-4148-a9eb-9604c85a3d3d",
+      "name": "a txt"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verificar que tenemos texto\nconst texto = $json.data;\nif (!texto) {\n  throw new Error(\"No se encontró la propiedad 'data' con el contenido del archivo.\");\n}\n\n// Dividir el contenido por líneas\nconst lineas = texto.split('\\n');\n\n// Eliminar las dos primeras líneas\nconst resultado = lineas.slice(2).join('\\n');\n\n// Devolver el nuevo texto en el mismo campo 'data'\nreturn [{\n  json: {\n    data: resultado\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1616,
+        -128
+      ],
+      "id": "4af7885f-3553-4d25-8eab-f88fee2daae4",
+      "name": "Eliminar cabecera"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b774c52f-22ec-4dfb-a1ed-24199648b448",
+              "name": "name",
+              "value": "={{ $('Adjunto').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "609b2a51-cb26-431a-add6-d28f94364b8e",
+              "name": "data",
+              "value": "={{ $json.data }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1776,
+        -128
+      ],
+      "id": "3dd6d10c-80b3-4b5c-a087-9265f297f257",
+      "name": "Editor Campos1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const texto = $json.data;\nconst filename = $json.filename || $json.name || \"\";\n\nif (!texto || !filename) {\n  throw new Error(\"Faltan los campos 'data' (texto del fichero) o 'filename'/'name'.\");\n}\n\n// Separar líneas\nconst lineas = texto\n  .replace(/\\\\r\\\\n/g, '\\n')\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/\\r/g, '\\n')\n  .split('\\n')\n  .filter(l => l.trim().length > 0);\n\n// Extraer albarán y fecha\nconst albaranMatch = filename.match(/SHIP_(\\d+)_/);\nconst fechaMatch = filename.match(/_(\\d{8})_/);\nif (!albaranMatch || !fechaMatch) {\n  throw new Error(\"Nombre de fichero inválido.\");\n}\n\nconst albaran = albaranMatch[1];\nconst fechaRaw = fechaMatch[1];\nconst yyyy = fechaRaw.slice(0, 4);\nconst mm = fechaRaw.slice(4, 6);\nconst dd = fechaRaw.slice(6, 8);\nconst fechaCompra = `${dd}/${mm}/${yyyy}`;\n\n// Calcular fecha estimada de entrega (fecha + 2 días)\nconst fechaEntregaObj = new Date(`${yyyy}-${mm}-${dd}`);\nfechaEntregaObj.setDate(fechaEntregaObj.getDate() + 2);\nconst fechaEntrega = fechaEntregaObj.toLocaleDateString('es-ES', {\n  day: '2-digit', month: '2-digit', year: 'numeric'\n});\n\n// Recoger IDs únicos y productos\nconst idsCliente = new Set();\nconst productos = [];\n\nfor (const linea of lineas) {\n  const id_raw = linea.substring(94, 106).trim();\n  const id_cliente = id_raw.substring(1, 11); // quitar primer carácter, dejar 10\n\n  const barcode = linea.substring(149, 162).trim();\n  const cantidad_str = linea.substring(348, 354);\n  const cantidad = parseInt(cantidad_str, 10).toString();\n\n  const pvo_raw = linea.substring(357, 365).trim();\n  const pvo_euros = parseInt(pvo_raw, 10) / 100000; // convertir a euros\n  const pvo_formateado = pvo_euros.toFixed(6).replace('.', ',').padStart(9, '0');\n\n  idsCliente.add(id_cliente);\n\n  productos.push({\n    Proveedor: \"MARCOLIN IBERICA, S.A.\",\n    \"Referencia Proveedor\": `ALB${albaran}`, // se completa más abajo\n    \"Fecha Compra\": fechaCompra,\n    \"Fecha Estimada Entrega\": fechaEntrega,\n    Barcode: barcode,\n    Descripción: \"\",\n    PVO: pvo_formateado,\n    Descuento: \"20\",\n    Cantidad: cantidad\n  });\n}\n\n// Agrupar por EAN y sumar cantidades\nconst agrupados = {};\nfor (const item of productos) {\n  const ean = item.Barcode;\n  if (!agrupados[ean]) {\n    agrupados[ean] = { ...item };\n    agrupados[ean].Cantidad = parseInt(item.Cantidad, 10);\n  } else {\n    agrupados[ean].Cantidad += parseInt(item.Cantidad, 10);\n  }\n}\n\n// Completar Referencia Proveedor\nconst refCompleta = `ALB${albaran} | ${Array.from(idsCliente).join(' | ')} | MORE`;\nconst resultadoFinal = Object.values(agrupados).map(prod => ({\n  ...prod,\n  \"Referencia Proveedor\": refCompleta,\n  Cantidad: prod.Cantidad.toString()\n}));\n\nreturn resultadoFinal.map(r => ({ json: r }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1936,
+        -128
+      ],
+      "id": "56611a0d-3aa2-4e62-88f8-e962a36dbd4f",
+      "name": "Gestión completa"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "datass",
+        "options": {
+          "delimiter": ";",
+          "fileName": "={{ 'TRANS - ' + $('Bucle').item.json.name + '.csv' }}"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2096,
+        -128
+      ],
+      "id": "ca5b6a25-e53b-4749-8296-e0ced42959d9",
+      "name": "a csv"
+    },
+    {
+      "parameters": {
+        "toRecipients": "pedidos.more@diagonaleyewear.com",
+        "subject": "Marcolin MORE - Transformado",
+        "bodyContent": "={{ \n    'Este Email parte del email:\\n\\t- TITULO: ' + $('Disparador').item.json.subject +\n    '\\n\\t- FECHA: ' + \n    (() => {\n        // Obtener la fecha original en UTC\n        let fechaUTC = new Date($('Disparador').item.json.receivedDateTime);\n\n        // Crear una nueva fecha en la zona horaria de Madrid\n        let fechaMadrid = new Intl.DateTimeFormat(\"es-ES\", { \n            timeZone: \"Europe/Madrid\",\n            weekday: \"short\", \n            day: \"2-digit\", \n            month: \"2-digit\", \n            year: \"numeric\",\n            hour: \"2-digit\",\n            minute: \"2-digit\",\n            hour12: false \n        }).format(fechaUTC);\n\n        return fechaMadrid;\n    })() \n}}\n",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "datoss"
+              },
+              {
+                "binaryPropertyName": "datass"
+              },
+              {
+                "binaryPropertyName": "datoss_1"
+              },
+              {
+                "binaryPropertyName": "datass_1"
+              },
+              {
+                "binaryPropertyName": "datoss_2"
+              },
+              {
+                "binaryPropertyName": "datass_2"
+              },
+              {
+                "binaryPropertyName": "datoss_3"
+              },
+              {
+                "binaryPropertyName": "datass_3"
+              },
+              {
+                "binaryPropertyName": "datoss_4"
+              },
+              {
+                "binaryPropertyName": "datass_4"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        880
+      ],
+      "id": "8fd43ad8-14b8-4fa7-9e82-9e3c92274a62",
+      "name": "Outlook 10 Adj1",
+      "webhookId": "4188fba5-c412-45f5-a9d5-8fa76153a51a",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "pedidos.more@diagonaleyewear.com",
+        "subject": "Marcolin MORE - Transformado",
+        "bodyContent": "={{ \n    'Este Email parte del email:\\n\\t- TITULO: ' + $('Disparador').item.json.subject +\n    '\\n\\t- FECHA: ' + \n    (() => {\n        // Obtener la fecha original en UTC\n        let fechaUTC = new Date($('Disparador').item.json.receivedDateTime);\n\n        // Crear una nueva fecha en la zona horaria de Madrid\n        let fechaMadrid = new Intl.DateTimeFormat(\"es-ES\", { \n            timeZone: \"Europe/Madrid\",\n            weekday: \"short\", \n            day: \"2-digit\", \n            month: \"2-digit\", \n            year: \"numeric\",\n            hour: \"2-digit\",\n            minute: \"2-digit\",\n            hour12: false \n        }).format(fechaUTC);\n\n        return fechaMadrid;\n    })() \n}}\n",
+        "additionalFields": {
+          "attachments": {
+            "attachments": [
+              {
+                "binaryPropertyName": "datoss"
+              },
+              {
+                "binaryPropertyName": "datass"
+              },
+              {
+                "binaryPropertyName": "datoss_1"
+              },
+              {
+                "binaryPropertyName": "datass_1"
+              },
+              {
+                "binaryPropertyName": "datoss_2"
+              },
+              {
+                "binaryPropertyName": "datass_2"
+              },
+              {
+                "binaryPropertyName": "datoss_3"
+              },
+              {
+                "binaryPropertyName": "datass_3"
+              },
+              {
+                "binaryPropertyName": "datoss_4"
+              },
+              {
+                "binaryPropertyName": "datass_4"
+              },
+              {
+                "binaryPropertyName": "datoss_5"
+              },
+              {
+                "binaryPropertyName": "datass_5"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        1776,
+        1072
+      ],
+      "id": "01d81a76-9ef9-4d1b-aec6-51ca048b84f6",
+      "name": "Outlook 12 Adj",
+      "webhookId": "4188fba5-c412-45f5-a9d5-8fa76153a51a",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "try {\n  // 1. Verificar que exista un archivo binario en la entrada\n  if (!items[0] || !items[0].binary) {\n    throw new Error('No se encontró ningún dato binario en la entrada.');\n  }\n  const binaryKeys = Object.keys(items[0].binary);\n  if (binaryKeys.length === 0) {\n    throw new Error('El elemento de entrada no contiene datos binarios.');\n  }\n  const binaryPropertyName = binaryKeys[0];  // nombre de la propiedad binaria (ej: 'data')\n\n  // 2. Obtener el contenido binario (Buffer) del CSV\n  const fileBuffer = await this.helpers.getBinaryDataBuffer(0, binaryPropertyName);\n\n  // 3. Convertir el contenido binario a texto (asumiendo codificación UTF-8)\n  let content = fileBuffer.toString('utf8');\n\n  // 4. Reemplazar saltos de línea '\\n' por '\\r\\n' en todo el texto\n  //    - Primero normalizamos cualquier secuencia '\\r\\n' existente a un único '\\n'\n  content = content.replace(/\\r\\n/g, '\\n');\n  //    - Luego reemplazamos **todas** las ocurrencias de '\\n' por '\\r\\n'\n  content = content.replace(/\\n/g, '\\r\\n');\n\n  // 5. Convertir el texto modificado de vuelta a formato binario (Buffer)\n  const newFileBuffer = Buffer.from(content, 'utf8');\n\n  // 6. Preparar el nuevo nombre de archivo con el prefijo \"fixed_\"\n  const originalFileName = items[0].binary[binaryPropertyName].fileName || 'archivo.csv';\n  //const fixedFileName = 'T' + originalFileName;\n  const fixedFileName = originalFileName;\n\n  // 7. Conservar el tipo MIME original si existe, o usar 'text/csv' por defecto\n  const mimeType = items[0].binary[binaryPropertyName].mimeType || 'text/csv';\n\n  // 8. Construir el objeto binario de salida con el contenido corregido\n  const newBinaryData = {\n    data: newFileBuffer.toString('base64'),  // n8n requiere los datos binarios en base64\n    fileName: fixedFileName,\n    mimeType: mimeType\n  };\n\n  // 9. Devolver el archivo corregido en la estructura adecuada\n  return [{\n    json: {},  // Puede incluir datos JSON adicionales si es necesario\n    binary: {\n      [binaryPropertyName]: newBinaryData\n    }\n  }];\n\n} catch (error) {\n  // Manejo de errores: lanzar un error descriptivo si algo falla\n  throw new Error('Error procesando el archivo CSV: ' + error.message);\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2256,
+        -128
+      ],
+      "id": "eabf90c8-1532-4c10-b56f-6c6563163c00",
+      "name": "Cambio de \\n a \\r\\n"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        672,
+        368
+      ],
+      "id": "fe224aba-5e95-420c-926f-df05c811332e",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "toRecipients": "fernando.coladas@diagonaleyewear.com",
+        "subject": "=Error en  {{ $workflow.name }}",
+        "bodyContent": "=Error en el Flow {{ $workflow.name }}\n",
+        "additionalFields": {
+          "importance": "High",
+          "bodyContentType": "html"
+        }
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        944,
+        368
+      ],
+      "id": "4b24fbd8-946c-484f-822c-defd26dcb4f2",
+      "name": "Microsoft Outlook YO1",
+      "webhookId": "03cc6dcc-baf3-4d37-aa5b-8fc45ac8c213",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "pYYEG4JQJz9XIx0O",
+          "name": "Pedidos More"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Disparador": {
+      "main": [
+        [
+          {
+            "node": "Mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Adjuntos": {
+      "main": [
+        [
+          {
+            "node": "Adjunto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mensaje": {
+      "main": [
+        [
+          {
+            "node": "Adjuntos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Adjunto": {
+      "main": [
+        [
+          {
+            "node": "Bucle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Bucle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bucle": {
+      "main": [
+        [
+          {
+            "node": "Aggregate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "a txt",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Outlook 2 Adj",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Outlook 4 Adj",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Outlook 6 Adj",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Outlook 8 Adj",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Outlook 10 Adj1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Outlook 12 Adj",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outlook 2 Adj": {
+      "main": [
+        [
+          {
+            "node": "Marcar Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outlook 4 Adj": {
+      "main": [
+        [
+          {
+            "node": "Marcar Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outlook 6 Adj": {
+      "main": [
+        [
+          {
+            "node": "Marcar Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outlook 8 Adj": {
+      "main": [
+        [
+          {
+            "node": "Marcar Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "a txt": {
+      "main": [
+        [
+          {
+            "node": "Eliminar cabecera",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eliminar cabecera": {
+      "main": [
+        [
+          {
+            "node": "Editor Campos1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Editor Campos1": {
+      "main": [
+        [
+          {
+            "node": "Gestión completa",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gestión completa": {
+      "main": [
+        [
+          {
+            "node": "a csv",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "a csv": {
+      "main": [
+        [
+          {
+            "node": "Cambio de \\n a \\r\\n",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outlook 10 Adj1": {
+      "main": [
+        [
+          {
+            "node": "Marcar Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Outlook 12 Adj": {
+      "main": [
+        [
+          {
+            "node": "Marcar Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cambio de \\n a \\r\\n": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Microsoft Outlook YO1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "63a86343-6650-40fa-8d06-78ef13660be5",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "120691cb4e9d47fe0c3cd6c4103c5a9375ddfe62a1ab3d292d00a951acd1e11b"
+  },
+  "nodeGroups": [],
+  "id": "N8ZBd0ilUHCXeHDW",
+  "tags": [
+    {
+      "updatedAt": "2026-03-06T16:14:32.556Z",
+      "createdAt": "2026-03-06T16:14:32.556Z",
+      "id": "eIpUFAY15eY4oPtB",
+      "name": "Diagonal Eyewear"
+    }
+  ]
+}

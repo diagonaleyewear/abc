@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+from image_repository import ImageRepository, IMAGE_REPOSITORY_ROOT_ENV, repository_root
 from datetime import date, datetime, timedelta
 import hmac
 import json
@@ -13,10 +14,12 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, URL
 from streamlit_cookies_controller import CookieController
 
 from db_loader import load_odoo_dataframe
+from adyen_reconciliation_ui import render_reconciliation_page
+from kering_images_ui import render_kering_page, render_kering_settings
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
@@ -36,22 +39,22 @@ from graph_mail_downloader import (
     download_luxoptica_mail_attachments,
     load_m365_config,
     _refresh_pending_market_images,
+    _model_from_image_name,
     send_alert_email,
     validate_m365_config,
 )
 from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
 from check_pedidos_vigilados import find_matching_orders
 from order_alerts import (
+    LEGACY_NOTIFICATIONS_FILE,
+    RESULT_LABELS,
+    SOURCE_AUTO,
+    SOURCE_MANUAL,
     OrderAlertStore,
-    build_alert_email_html,
+    alert_recipients,
+    dispatch_order_alerts,
     import_legacy_notification_file,
-)
-from abcd_snapshots import (
-    build_abcd_report_export_df,
-    current_week_start as _current_week_start,
-    list_abcd_snapshot_dates,
-    load_abcd_weekly_snapshot,
-    save_abcd_weekly_snapshot,
+    scheduler_state,
 )
 from auth_session import (
     AuthStateStore,
@@ -60,14 +63,23 @@ from auth_session import (
     login_bucket_keys,
     verify_auth_token,
 )
+from abcd_snapshots import (
+    ABCD_SNAPSHOT_TABLE,
+    build_abcd_report_excel_df,
+    build_abcd_report_export_df,
+    current_week_start as _current_week_start,
+    ensure_abcd_snapshot_table as _ensure_abcd_snapshot_table,
+    list_abcd_snapshot_dates,
+    load_abcd_weekly_snapshot,
+    save_abcd_weekly_snapshot,
+)
 
 # ==============================================================================
 # CONFIG
 # ==============================================================================
 
-APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.6"
-APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
+APP_TITLE = "Cloud"
+APP_ICON = Path(__file__).resolve().parent / "logo" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
 AUTH_REMEMBER_DAYS_ENV = "AUTH_REMEMBER_DAYS"
@@ -93,7 +105,7 @@ M365_TENANT_ID_ENV = "M365_TENANT_ID"
 M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
-M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
+M365_DOWNLOAD_ROOT_ENV = IMAGE_REPOSITORY_ROOT_ENV
 MASTERDATA_DICTIONARY_FILE = Path(
     os.getenv(
         "MASTERDATA_DICTIONARY_PATH",
@@ -120,9 +132,6 @@ MASTERDATA_DOWNLOAD_COLUMNS = [
     "PVO",
     "PVP",
 ]
-ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
-ALERT_RECIPIENT_EMAIL_DEFAULT = "roberto@diagonaleyewear.com"
-ALERT_RECIPIENT_EMAILS_EXTRA = ["virginia.nunez@diagonaleyewear.com"]
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -139,9 +148,15 @@ st.set_page_config(
 def get_db_engine():
     """Obtiene conexión a BD (cacheada)"""
     config = load_db_config()
-    return create_engine(
-        f"postgresql://{config.user}:{config.password}@{config.host}:{config.port}/{config.database}"
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=config.user,
+        password=config.password,
+        host=config.host,
+        port=config.port,
+        database=config.database,
     )
+    return create_engine(url)
 
 @st.cache_data(ttl=300)  # Cache por 5 minutos
 def load_data_cached():
@@ -243,15 +258,6 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
-def build_abcd_report_excel_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica cabeceras solicitadas para la exportación Excel ABCD."""
-    return build_abcd_report_export_df(df).rename(
-        columns={
-            "Modelo": "NOMBRE",
-            "Cód Barras": "SKU",
-        }
-    )
-
 def normalize_result_export_schema(df: pd.DataFrame) -> pd.DataFrame:
     """Garantiza el esquema final del fichero transformado para preview y descarga."""
     target_columns = [
@@ -349,14 +355,15 @@ def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
 
 
 def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
-    pending_path = images_root / ".market_pending.json"
+    from repository_storage import state_root
+    pending_path = state_root(images_root) / ".market_pending.json"
     if not pending_path.exists():
         return []
 
     try:
         payload = json.loads(pending_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"No se pueden leer los pendientes {pending_path}") from error
 
     if not isinstance(payload, dict):
         return []
@@ -366,13 +373,9 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
         if not isinstance(entry, dict):
             continue
         source = Path(source_name)
-        try:
-            relative_parts = source.relative_to(images_root).parts
-        except ValueError:
-            relative_parts = source.parts
         rows.append(
             {
-                "Modelo": relative_parts[0] if relative_parts else "",
+                "Modelo": _model_from_image_name(source.name),
                 "EAN": str(entry.get("ean", "")),
                 "Archivo": source.name,
                 "Mercados pendientes": ", ".join(entry.get("missing_markets", [])),
@@ -382,36 +385,12 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
     return rows
 
 
-@st.cache_data(ttl=30)
 def _load_image_catalog(images_root: Path) -> pd.DataFrame:
-    image_extensions = {".jpg", ".jpeg", ".png"}
-    rows: list[dict[str, object]] = []
-    if not images_root.exists():
-        return pd.DataFrame(columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"])
-
-    for image_path in images_root.rglob("*"):
-        if not image_path.is_file() or image_path.suffix.lower() not in image_extensions:
-            continue
-        relative = image_path.relative_to(images_root)
-        if len(relative.parts) < 3:
-            continue
-        model, ean = relative.parts[:2]
-        market = relative.parts[2] if relative.parts[2] in {"Farfetch", "Miinto"} else "Original"
-        rows.append(
-            {
-                "Modelo": model,
-                "EAN": ean,
-                "Mercado": market,
-                "Archivo": image_path.name,
-                "Ruta": str(image_path),
-                "Descargada": image_path.stat().st_mtime,
-                "Fecha": datetime.fromtimestamp(image_path.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
-            }
-        )
-
+    rows = ImageRepository(images_root).catalog_rows()
     catalog = pd.DataFrame(
         rows,
-        columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"],
+        columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha",
+                 "Origen", "Proveedor", "Vista", "Checksum", "RecordId"],
     )
     return catalog.sort_values("Descargada", ascending=False).reset_index(drop=True)
 
@@ -428,6 +407,10 @@ def generate_luxoptica_request_files(
 ) -> list[Path]:
     """Genera archivos txt para solicitud de imágenes con lotes de EAN."""
     products = _extract_luxoptica_products(df)
+    repository = ImageRepository()
+    products = [product for product in products if repository.pending_views(
+        product["ean"], ("frontal", "lateral", "perspectiva")
+    )]
     if max_total_eans is not None and max_total_eans > 0:
         products = products[:max_total_eans]
     if not products:
@@ -708,6 +691,14 @@ def _get_cookie_controller() -> CookieController:
     return st.session_state["_cookie_controller"]
 
 
+def _remove_auth_cookie() -> None:
+    try:
+        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+    except KeyError as exc:
+        if exc.args != (AUTH_COOKIE_NAME,):
+            raise
+
+
 def _render_login() -> None:
     st.title(APP_TITLE)
     st.subheader("Acceso restringido")
@@ -796,7 +787,7 @@ def _render_login() -> None:
                     AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
                 )
             else:
-                _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+                _remove_auth_cookie()
             st.rerun()
         st.error("Usuario o contraseña incorrectos")
 
@@ -834,7 +825,7 @@ def require_authentication() -> None:
         st.session_state.pop("auth_session_id", None)
         st.session_state.pop("auth_session_expires_at", None)
         st.session_state.pop("auth_credential_fingerprint", None)
-        _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+        _remove_auth_cookie()
 
     if users:
         token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
@@ -946,7 +937,7 @@ def render_sidebar_shell(section_name: str) -> None:
             st.session_state.pop("auth_role", None)
             st.session_state.pop("auth_session_id", None)
             st.session_state.pop("auth_session_expires_at", None)
-            _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+            _remove_auth_cookie()
             st.rerun()
         st.divider()
         st.markdown("### Información")
@@ -958,41 +949,29 @@ def render_sidebar_shell(section_name: str) -> None:
             - Área Masterdata para transformación y validación previa a Odoo.
             """
         )
-        st.caption(f"Versión {APP_VERSION}")
+        st.caption("Cloud · Catálogo, imágenes y automatizaciones")
 
 
 def render_footer() -> None:
-    st.divider()
-    st.markdown(
-        f"""
-        <div style='text-align: center; color: #888; margin-top: 2rem;'>
-        <small>Diagonal Eyewear | Plataforma ABC y Masterdata | v{APP_VERSION}</small>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    from build_info import render_build_footer
+    render_build_footer()
 
 
 def render_home_page() -> None:
+    from cloud_dashboard import render_dashboard
     render_sidebar_shell("Inicio")
-    st.title(APP_TITLE)
-    st.subheader("Portal interno")
-    st.write("Selecciona una de las dos áreas principales.")
+    pages = {"master": MASTER_IMPORT_PAGE, "dictionary": MASTER_DICTIONARY_PAGE}
+    if st.session_state.get("auth_role") == "admin":
+        pages.update(images=LUXOPTICA_IMAGES_PAGE, luxpending=LUXOPTICA_PENDING_PAGE,
+                     kering=KERING_IMAGES_PAGE, alerts=ALERTA_PEDIDOS_PAGE,
+                     abchistory=ABC_HISTORY_PAGE, config=SETTINGS_PAGE)
+    render_dashboard(pages)
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("### Área ABC")
-        st.write("Análisis ABCD, búsqueda, reportes y detalle de producto.")
-        st.page_link(ABC_HOME_PAGE, label="Entrar en Análisis ABC", use_container_width=True)
-    with col2:
-        st.markdown("### Área Masterdata")
-        st.write("Transformación de Luxottica, advertencias, descargas y dry-run Odoo.")
-        st.page_link(MASTER_IMPORT_PAGE, label="Entrar en Master Data", use_container_width=True)
-    with col3:
-        st.markdown("### Configuración")
-        st.write("Guardar claves y credenciales de integración en el entorno local.")
-        st.page_link(SETTINGS_PAGE, label="Entrar en Configuración", use_container_width=True)
 
+def render_odoo_reconciliation_page() -> None:
+    render_sidebar_shell("Conciliación Odoo")
+    require_admin_access()
+    render_reconciliation_page()
     render_footer()
 
 
@@ -1000,6 +979,8 @@ def render_settings_page() -> None:
     render_sidebar_shell("Configuración")
     require_admin_access()
     st.title("Configuración")
+    render_kering_settings(get_db_engine)
+    st.divider()
     st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
 
     current_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
@@ -1010,7 +991,7 @@ def render_settings_page() -> None:
     current_client_id = _read_env_setting(M365_CLIENT_ID_ENV)
     current_client_secret = _read_env_setting(M365_CLIENT_SECRET_ENV)
     current_mailbox = _read_env_setting(M365_MAILBOX_ENV, "ruben.cebreiros@diagonaleyewear.com")
-    current_download_root = _read_env_setting(M365_DOWNLOAD_ROOT_ENV, "docs/Luxoptica/descargas")
+    current_download_root = str(repository_root())
 
     with st.form("settings_form", clear_on_submit=False):
         st.subheader("Essilor Luxottica")
@@ -1033,7 +1014,8 @@ def render_settings_page() -> None:
             placeholder="Deja vacío para conservar el actual",
         )
         mailbox_value = st.text_input("Mailbox objetivo", value=current_mailbox)
-        download_root_value = st.text_input("Carpeta destino descargas", value=current_download_root)
+        st.text_input("Repositorio comun (IMAGE_REPOSITORY_ROOT)", value=current_download_root, disabled=True)
+        st.caption("Cambiar en el entorno de todos los servicios tras verificar la migración y reiniciarlos.")
 
         submitted = st.form_submit_button("Guardar configuración", type="primary")
 
@@ -1045,7 +1027,6 @@ def render_settings_page() -> None:
             M365_TENANT_ID_ENV: tenant_id_value.strip(),
             M365_CLIENT_ID_ENV: client_id_value.strip(),
             M365_MAILBOX_ENV: mailbox_value.strip(),
-            M365_DOWNLOAD_ROOT_ENV: download_root_value.strip(),
         }
         keep_existing_password = not password_value.strip() and bool(current_password)
         keep_existing_client_secret = not client_secret_value.strip() and bool(current_client_secret)
@@ -1430,8 +1411,12 @@ def render_abc_page(abc_page: str | None = None) -> None:
 
 def render_luxoptica_pending_panel() -> None:
     st.subheader("Imágenes pendientes de procesar")
-    images_root = Path(__file__).resolve().parent / "repo" / "images"
-    pending_rows = _load_market_pending_rows(images_root)
+    images_root = repository_root()
+    try:
+        pending_rows = _load_market_pending_rows(images_root)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
     if not pending_rows:
         st.success("No hay imágenes pendientes de procesar.")
         return
@@ -1478,9 +1463,6 @@ def render_luxoptica_pending_panel() -> None:
     )
     selected_row = pending_df.loc[pending_df["Archivo"] == selected_image_name].iloc[0]
     selected_path = Path(str(selected_row["Ruta"]))
-    if not selected_path.is_file() and len(selected_path.parts) >= 3:
-        selected_path = images_root.joinpath(*selected_path.parts[-3:])
-
     if selected_path.is_file():
         st.image(
             str(selected_path),
@@ -1500,8 +1482,26 @@ def render_luxoptica_images_page() -> None:
     st.title("Imágenes")
     st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
 
-    images_root = Path(__file__).resolve().parent / "repo" / "images"
-    image_catalog = _load_image_catalog(images_root)
+    from kering_images_ui import visible_previews, visible_access, original_for_display, service
+    refresh = st.button("Actualizar imagenes", key="image_gallery_refresh")
+    try:
+        repository = service().store.repository
+        if refresh or "image_gallery_records" not in st.session_state:
+            st.session_state["image_gallery_records"] = repository.catalog_records()
+        records = st.session_state["image_gallery_records"]
+        rows = repository.catalog_rows(records)
+    except (OSError, ValueError, RuntimeError) as error:
+        st.error(f"Repositorio no disponible: {error}")
+        return
+    if refresh:
+        st.session_state.pop("image_gallery_zip", None)
+        st.session_state.pop("luxoptica_selected_image", None)
+        st.session_state.pop("luxoptica_selected_bytes", None)
+    # Querying the local catalog never resolves or stats individual NAS paths.
+    image_catalog = pd.DataFrame(rows, columns=[
+        "Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha",
+        "Origen", "Proveedor", "Vista", "Checksum", "RecordId",
+    ]).sort_values("Descargada", ascending=False).reset_index(drop=True)
 
     st.subheader("Visor de imágenes")
     search_ean = st.text_input(
@@ -1526,6 +1526,24 @@ def render_luxoptica_images_page() -> None:
     if filtered_catalog.empty:
         st.info("No hay imágenes que coincidan con la búsqueda.")
     else:
+        zip_key = (tuple(filtered_catalog["RecordId"]), tuple(filtered_catalog["Checksum"]), market_filter)
+        prepared = st.session_state.get("image_gallery_zip")
+        if prepared and prepared["key"] != zip_key:
+            st.session_state.pop("image_gallery_zip", None)
+            prepared = None
+        if st.button("Preparar ZIP de imagenes", key="image_repository_prepare_zip"):
+            try:
+                selected_zip = repository.zip_eans(
+                    filtered_catalog["EAN"].unique().tolist(),
+                    market=None if market_filter == "Todos" else "" if market_filter == "Original" else market_filter,
+                )
+                prepared = {"key": zip_key, "bytes": selected_zip}
+                st.session_state["image_gallery_zip"] = prepared
+            except (OSError, ValueError) as error:
+                st.error(f"No se puede preparar el ZIP: {error}")
+        if prepared:
+            st.download_button("ZIP de imágenes", prepared["bytes"], file_name="imagenes-ean.zip",
+                               mime="application/zip", key="image_repository_zip")
         st.caption(
             f"{len(filtered_catalog):,} imágenes | "
             f"{filtered_catalog['EAN'].nunique():,} EAN | "
@@ -1553,10 +1571,20 @@ def render_luxoptica_images_page() -> None:
 
         start = (int(current_page) - 1) * page_size
         page_catalog = filtered_catalog.iloc[start : start + page_size]
+        by_id = {record.id: record for record in records}
+        visible = [by_id[int(row["RecordId"])] for _, row in page_catalog.iterrows()]
+        access = visible_access(repository, visible, "image_gallery_access", refresh=refresh,
+                                selection=(search_ean, market_filter, current_page))
+        previews = visible_previews(repository, visible, access)
         thumbnail_columns = st.columns(4)
         for position, (row_index, image_row) in enumerate(page_catalog.iterrows()):
             with thumbnail_columns[position % 4]:
-                st.image(image_row["Ruta"], width="stretch")
+                record = by_id[int(image_row["RecordId"])]
+                preview = previews[record.id]
+                if isinstance(preview, bytes):
+                    st.image(preview, width="stretch")
+                else:
+                    st.warning(f"No se puede mostrar {record.name}: {preview}")
                 st.caption(
                     f"{image_row['EAN']} · {image_row['Mercado']}\n"
                     f"{image_row['Archivo']} · {image_row['Fecha']}"
@@ -1565,17 +1593,31 @@ def render_luxoptica_images_page() -> None:
                     "Ver imagen",
                     key=f"luxoptica_view_{row_index}",
                     width="stretch",
+                    disabled=not isinstance(preview, bytes),
                 ):
-                    st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
+                    try:
+                        st.session_state["luxoptica_selected_bytes"] = original_for_display(repository, record)
+                        st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
+                        st.session_state["luxoptica_selected_checksum"] = record.checksum
+                    except (OSError, ValueError) as error:
+                        st.error(f"No se puede abrir la imagen: {error}")
                     st.rerun()
 
         selected_path = st.session_state.get("luxoptica_selected_image")
-        if selected_path and selected_path in set(filtered_catalog["Ruta"]):
+        if selected_path and selected_path in set(page_catalog["Ruta"]):
             selected_row = filtered_catalog[filtered_catalog["Ruta"] == selected_path].iloc[0]
+            selected_record = by_id[int(selected_row["RecordId"])]
+            if (not isinstance(previews[selected_record.id], bytes) or
+                    access[selected_record.id] is None or
+                    st.session_state.get("luxoptica_selected_checksum") != selected_record.checksum):
+                st.session_state.pop("luxoptica_selected_image", None)
+                st.session_state.pop("luxoptica_selected_bytes", None)
+                st.warning("Original cambiado o inaccesible; vuelva a abrir la imagen.")
+                return
             st.markdown("#### Imagen ampliada")
             viewer_col, details_col = st.columns([2, 1])
             with viewer_col:
-                st.image(selected_path, caption=selected_row["Archivo"], width="stretch")
+                st.image(st.session_state["luxoptica_selected_bytes"], caption=selected_row["Archivo"], width="stretch")
             with details_col:
                 st.write(f"**Modelo:** {selected_row['Modelo']}")
                 st.write(f"**EAN:** {selected_row['EAN']}")
@@ -1585,7 +1627,7 @@ def render_luxoptica_images_page() -> None:
 
         st.markdown("#### Estructura encontrada")
         st.dataframe(
-            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha"]],
+            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha", "Proveedor", "Vista"]],
             hide_index=True,
             width="stretch",
         )
@@ -1742,7 +1784,6 @@ def render_master_page(master_page: str | None = None) -> None:
             request_email = st.text_input("Email para la solicitud", value=default_email, key="luxoptica_request_email_input")
             st.caption("Se generan lotes de 250 EAN máximos por archivo, sin prefijo.")
 
-            eans_available = len(_extract_clean_eans(export_df))
             col_gen_a, col_gen_b = st.columns(2)
 
             with col_gen_a:
@@ -1769,7 +1810,9 @@ def render_master_page(master_page: str | None = None) -> None:
                 )
                 st.session_state["luxoptica_request_email"] = request_email.strip() or default_email
                 st.session_state["luxoptica_generated_files"] = [str(p) for p in generated_files]
-                st.session_state["luxoptica_generated_total_eans"] = min(eans_available, limit) if limit else eans_available
+                st.session_state["luxoptica_generated_total_eans"] = sum(
+                    len(path.read_text(encoding="utf-8").splitlines()) for path in generated_files
+                )
                 st.session_state["luxoptica_processed_files"] = []
 
                 if generated_files:
@@ -1780,7 +1823,7 @@ def render_master_page(master_page: str | None = None) -> None:
                     else:
                         st.success(f"Generados {len(generated_files)} archivo(s) en docs/Luxoptica.")
                 else:
-                    st.warning("No se encontraron EAN válidos para generar archivos.")
+                    st.info("No hay EAN con vistas pendientes para generar archivos.")
 
             generated_files_raw = st.session_state.get("luxoptica_generated_files", [])
             if generated_files_raw:
@@ -2058,6 +2101,65 @@ def render_master_dictionary_page_route() -> None:
     render_master_dictionary_page()
 
 
+def _format_alert_timestamp(value: int | None) -> str:
+    return datetime.fromtimestamp(int(value)).strftime("%d/%m/%Y %H:%M:%S") if value else "—"
+
+
+def _render_order_alert_service_status() -> None:
+    st.subheader("Envío automático")
+    try:
+        status = OrderAlertStore().get_status(SOURCE_AUTO)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se puede leer el registro de alertas: {exc}")
+        return
+
+    state = scheduler_state(status)
+    if state == "never":
+        st.warning(
+            "El servicio automático (contenedor `abcd-order-alerts`) no ha registrado ninguna ejecución. "
+            "Hasta que arranque, las alertas solo se envían con «Comprobar ahora»."
+        )
+        return
+
+    interval_minutes = max(1, int(status.get("interval_seconds") or 300) // 60)
+    result_label = RESULT_LABELS.get(status.get("last_check_result") or "", "—")
+    last_error_at = status.get("last_error_at")
+    last_check_failed = bool(last_error_at) and int(last_error_at) >= int(status.get("last_check_at") or 0)
+    if state == "stopped":
+        st.error(
+            f"Servicio automático DETENIDO desde {_format_alert_timestamp(status.get('stopped_at'))}. "
+            "No se están comprobando pedidos."
+        )
+    elif state == "stale":
+        st.error(
+            f"Servicio automático sin actividad desde {_format_alert_timestamp(status.get('heartbeat_at'))}: "
+            "proceso detenido o bloqueado. No se están comprobando pedidos."
+        )
+    elif last_check_failed:
+        st.warning(f"Servicio activo (cada {interval_minutes} min), pero la última comprobación falló: {result_label}.")
+    else:
+        st.success(f"Servicio activo (cada {interval_minutes} min). Último resultado: {result_label}.")
+
+    col_check, col_sent, col_error = st.columns(3)
+    col_check.markdown(
+        f"**Última comprobación**  \n{_format_alert_timestamp(status.get('last_check_at'))}  \n"
+        f"{result_label}. {status.get('last_check_detail') or ''}"
+    )
+    col_sent.markdown(
+        f"**Último envío**  \n{_format_alert_timestamp(status.get('last_sent_at'))}  \n"
+        + (f"{status.get('last_sent_count')} pedido(s)" if status.get("last_sent_at") else "Sin envíos")
+    )
+    col_error.markdown(
+        f"**Último error**  \n{_format_alert_timestamp(last_error_at)}  \n"
+        f"{status.get('last_error') or 'Sin errores'}"
+    )
+    st.caption(
+        "El envío automático busca solo pedidos confirmados y pendientes (estado 'sale', sin facturar del todo "
+        "o con líneas sin entregar) de la ventana ALERTA_PEDIDOS_DIAS_ATRAS (180 días por defecto). "
+        "Comparte con «Comprobar ahora» la lista de clientes y el registro de pedidos ya notificados."
+    )
+
+
 def render_alerta_pedidos_page() -> None:
     render_sidebar_shell("Alerta Pedidos")
     require_admin_access()
@@ -2114,6 +2216,9 @@ def render_alerta_pedidos_page() -> None:
                 st.rerun()
 
     st.divider()
+    _render_order_alert_service_status()
+
+    st.divider()
     st.subheader("Comprobar pedidos")
 
     col_desde, col_hasta, col_estado = st.columns([1, 1, 1])
@@ -2148,37 +2253,42 @@ def render_alerta_pedidos_page() -> None:
                     st.dataframe(resultados, use_container_width=True, hide_index=True)
 
                     alert_store = OrderAlertStore()
-                    legacy_notifications = (
-                        Path(__file__).resolve().parent / "alerta_pedidos_notificados.json"
-                    )
-                    import_legacy_notification_file(alert_store, legacy_notifications)
-                    batch = alert_store.claim_orders(resultados["pedido_id"].tolist())
-                    nuevos = resultados[resultados["pedido_id"].isin(batch.order_ids)]
-                    if nuevos.empty:
-                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
-                    else:
-                        destinatario = _read_env_setting(
-                            ALERT_RECIPIENT_EMAIL_ENV,
-                            ALERT_RECIPIENT_EMAIL_DEFAULT,
+                    import_legacy_notification_file(alert_store, LEGACY_NOTIFICATIONS_FILE)
+                    load_env_file()
+                    destinatarios = alert_recipients()
+                    with st.spinner(f"Comprobando registro y enviando alerta a {', '.join(destinatarios)}..."):
+                        # Acción explícita: sin límite de intentos para poder reintentar envíos agotados.
+                        dispatch = dispatch_order_alerts(
+                            resultados.to_dict(orient="records"),
+                            alert_store,
+                            send_alert_email,
+                            destinatarios,
                         )
-                        destinatarios = list(dict.fromkeys([destinatario, *ALERT_RECIPIENT_EMAILS_EXTRA]))
-                        with st.spinner(f"Enviando alerta por email a {', '.join(destinatarios)}..."):
-                            try:
-                                send_alert_email(
-                                    subject=f"Alerta de pedidos vigilados ({len(nuevos)})",
-                                    html_body=build_alert_email_html(nuevos.to_dict(orient="records")),
-                                    to_address=destinatarios,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                alert_store.mark_failed(batch.batch_id, str(exc))
-                                st.error(f"No se pudo enviar el email de alerta: {exc}")
-                            else:
-                                alert_store.mark_sent(batch.batch_id, ", ".join(destinatarios))
-                                st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
+                    if dispatch.error:
+                        alert_store.record_check(
+                            SOURCE_MANUAL, "error_envio", error=dispatch.error
+                        )
+                        st.error(f"No se pudo enviar el email de alerta: {dispatch.error}")
+                    elif dispatch.sent:
+                        alert_store.record_check(
+                            SOURCE_MANUAL, "enviado", sent_count=len(dispatch.new_rows)
+                        )
+                        st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
+                    else:
+                        alert_store.record_check(SOURCE_MANUAL, "ya_notificados")
+                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
 
     render_footer()
 
 
+def render_kering_images_page() -> None:
+    render_sidebar_shell("Imagenes Kering")
+    require_admin_access()
+    render_kering_page(get_db_engine)
+    render_footer()
+
+
+KERING_IMAGES_PAGE = st.Page(render_kering_images_page, title="Imágenes Kering", url_path="imagenes-kering")
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
@@ -2192,6 +2302,8 @@ LUXOPTICA_IMAGES_PAGE = st.Page(render_luxoptica_images_page, title="Imágenes",
 LUXOPTICA_PENDING_PAGE = st.Page(render_luxoptica_pending_page, title="Pendiente Luxoptica", icon="⏳", url_path="pendiente-luxoptica")
 ALERTA_PEDIDOS_PAGE = st.Page(render_alerta_pedidos_page, title="Alerta Pedidos", icon="🔔", url_path="alerta-pedidos")
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
+ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", url_path="conciliacion-odoo")
+reconciliation_navigation = {"Conciliación": [ODOO_RECONCILIATION_PAGE]} if st.session_state.get("auth_role") == "admin" else {}
 
 navigation = st.navigation(
     (
@@ -2210,12 +2322,17 @@ navigation = st.navigation(
                 ABC_DETAIL_PAGE,
             ],
             "Master Data": [MASTER_IMPORT_PAGE, MASTER_DICTIONARY_PAGE, MASTER_DRYRUN_PAGE],
-            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE],
+            "Repositorio de imágenes": [LUXOPTICA_IMAGES_PAGE, LUXOPTICA_PENDING_PAGE, KERING_IMAGES_PAGE],
             "Alertas": [ALERTA_PEDIDOS_PAGE],
+            **reconciliation_navigation,
             "Configuración": [SETTINGS_PAGE],
         }
     ),
     position="sidebar",
 )
 
+from kering_images_ui import page_transition
+page_transition(st.session_state, navigation.url_path)
+from cloud_dashboard import dashboard_transition
+dashboard_transition(st.session_state, navigation.url_path)
 navigation.run()
