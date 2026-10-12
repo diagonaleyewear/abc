@@ -67,9 +67,13 @@ from abcd_snapshots import (
     ABCD_SNAPSHOT_TABLE,
     build_abcd_report_excel_df,
     build_abcd_report_export_df,
+    build_snapshot_parameters,
     current_week_start as _current_week_start,
+    engine_source_version,
     ensure_abcd_snapshot_table as _ensure_abcd_snapshot_table,
+    list_abcd_snapshot_refs,
     list_abcd_snapshot_dates,
+    load_abcd_snapshot_by_id,
     load_abcd_weekly_snapshot,
     save_abcd_weekly_snapshot,
 )
@@ -793,6 +797,7 @@ def _render_login() -> None:
 
     st.stop()
 
+
 def require_authentication() -> None:
     """Bloquea la app hasta que el usuario se autentique (incluye sesión recordada por cookie)."""
     users = _get_auth_users()
@@ -1281,37 +1286,63 @@ def render_abc_page(abc_page: str | None = None) -> None:
         current_snapshot_date = _current_week_start()
         st.info(f"Semana actual: {current_snapshot_date.strftime('%d/%m/%Y')}")
 
-        if st.button("Guardar / actualizar foto de esta semana", type="primary"):
+        if st.button("Guardar nueva foto de esta semana", type="primary"):
             with st.spinner("Calculando ABCD y guardando foto semanal..."):
                 df = load_data_cached()
-                df_classified = run_abcd_engine(df.copy())
+                reference_date = pd.Timestamp.today().normalize()
+                snapshot_parameters = build_snapshot_parameters(reference_date)
+                df_classified = run_abcd_engine(df.copy(), reference_date=reference_date)
                 if ('EAN' not in df_classified.columns or df_classified['EAN'].isna().all()) and 'Cód Barras' in df_classified.columns:
                     df_classified['EAN'] = df_classified['Cód Barras']
-                saved_date = save_abcd_weekly_snapshot(engine, df_classified)
-            st.success(f"Foto semanal guardada: {saved_date.strftime('%d/%m/%Y')}")
+                saved_date = save_abcd_weekly_snapshot(
+                    engine,
+                    df_classified,
+                    run_at=datetime.now().astimezone(),
+                    engine_version=engine_source_version(),
+                    parameters=snapshot_parameters,
+                )
+            st.success(f"Nueva foto semanal guardada: {saved_date.strftime('%d/%m/%Y')}")
 
         try:
-            snapshot_dates = list_abcd_snapshot_dates(engine)
+            snapshot_refs = list_abcd_snapshot_refs(engine)
         except Exception as exc:
             st.error(f"No se pudo cargar el histórico ABCD: {exc}")
             render_footer()
             return
 
-        if not snapshot_dates:
+        if not snapshot_refs:
             st.warning("Todavía no hay fotos semanales guardadas.")
             render_footer()
             return
 
-        selected_date = st.selectbox(
-            "Fecha de foto:",
-            snapshot_dates,
-            format_func=lambda value: value.strftime("%d/%m/%Y"),
+        selected_snapshot = st.selectbox(
+            "Captura:",
+            snapshot_refs,
+            format_func=lambda item: (
+                f"{item.snapshot_date:%d/%m/%Y} · {item.run_at:%H:%M:%S %Z} · #{item.snapshot_id}"
+            ),
         )
-        snapshot_df = load_abcd_weekly_snapshot(engine, selected_date)
+        try:
+            snapshot_df, snapshot_metadata = load_abcd_snapshot_by_id(
+                engine,
+                selected_snapshot.snapshot_id,
+            )
+        except Exception as exc:
+            st.error(f"No se pudo verificar la integridad de la captura: {exc}")
+            render_footer()
+            return
         if snapshot_df.empty:
             st.warning("La foto seleccionada no contiene datos.")
             render_footer()
             return
+
+        if snapshot_metadata:
+            integrity_label = "verificada" if snapshot_metadata.data_sha256 else "legacy, no verificable"
+            st.caption(
+                f"Capturada: {snapshot_metadata.run_at:%d/%m/%Y %H:%M:%S %Z} · "
+                f"Motor: {snapshot_metadata.engine_version} · Integridad: {integrity_label}"
+            )
+            st.json(snapshot_metadata.parameters)
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -1336,7 +1367,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
         st.subheader("Detalle de la foto")
         st.dataframe(snapshot_df, use_container_width=True, hide_index=True)
 
-        timestamp = selected_date.strftime('%Y%m%d')
+        timestamp = selected_snapshot.snapshot_date.strftime('%Y%m%d')
         col_csv, col_excel = st.columns(2)
         with col_csv:
             st.download_button(

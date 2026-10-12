@@ -3,15 +3,22 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
+import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 
 from abcd_snapshots import (
     ABCD_SNAPSHOT_TABLE,
     build_abcd_report_export_df,
+    build_snapshot_parameters,
     current_week_start,
+    engine_source_version,
     ensure_abcd_snapshot_table,
+    load_abcd_snapshot_by_id,
     load_abcd_weekly_snapshot,
+    save_abcd_snapshot,
     save_abcd_weekly_snapshot,
 )
 from db_config import load_db_config
@@ -42,18 +49,29 @@ def main() -> int:
 def _run_snapshot(receipt) -> int:
     engine = get_db_engine()
     df = load_odoo_dataframe()
-    df_classified = run_abcd_engine(df.copy())
+    reference_date = pd.Timestamp.today().normalize()
+    snapshot_parameters = build_snapshot_parameters(reference_date)
+    df_classified = run_abcd_engine(df.copy(), reference_date=reference_date)
     if ("EAN" not in df_classified.columns or df_classified["EAN"].isna().all()) and "Cód Barras" in df_classified.columns:
         df_classified["EAN"] = df_classified["Cód Barras"]
 
-    snapshot_date = save_abcd_weekly_snapshot(engine, df_classified)
-    snapshot_df = load_abcd_weekly_snapshot(engine, snapshot_date)
+    snapshot_reference = save_abcd_snapshot(
+        engine,
+        df_classified,
+        run_at=datetime.now().astimezone(),
+        engine_version=engine_source_version(),
+        parameters=snapshot_parameters,
+    )
+    snapshot_df, _ = load_abcd_snapshot_by_id(engine, snapshot_reference.snapshot_id)
     if len(snapshot_df) != len(df_classified):
         raise RuntimeError(
             f"Snapshot inconsistente: {len(snapshot_df)} guardados vs {len(df_classified)} calculados"
         )
 
-    print(f"Snapshot ABCD guardado: {snapshot_date} | productos={len(snapshot_df)}")
+    print(
+        f"Snapshot ABCD guardado: {snapshot_reference.snapshot_date} "
+        f"| id={snapshot_reference.snapshot_id} | productos={len(snapshot_df)}"
+    )
     receipt["counts"] = {"Productos": len(snapshot_df)}
     return 0
 
