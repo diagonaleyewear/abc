@@ -236,6 +236,10 @@ class ImageRepository:
             excluded_staging_path((self.root / row["path"]).resolve().relative_to(self.root))]
 
     def verified_bytes(self, record: ImageRecord) -> bytes:
+        check_image_root(self.root)
+        current = self.resolve(record.path.relative_to(self.root).as_posix())
+        if current != record.path:
+            raise ValueError("ruta_original_modificada")
         content = record.path.read_bytes()
         if hashlib.sha256(content).hexdigest() != record.checksum:
             raise ValueError(f"checksum_incorrecto: {record.path}")
@@ -262,11 +266,9 @@ class ImageRepository:
         valid = self.valid_views(ean)
         return tuple(view for view in required if view not in valid)
 
-    def catalog_rows(self) -> list[dict]:
+    def catalog_rows(self, records: list[ImageRecord] | None = None) -> list[dict]:
         rows = []
-        for record in self.records():
-            if not record.path.is_file():
-                continue
+        for record in self.catalog_records() if records is None else records:
             timestamp = datetime.fromisoformat(record.date).timestamp()
             rows.append({
                 "Modelo": record.metadata.get("modelo", ""), "EAN": record.ean,
@@ -275,8 +277,44 @@ class ImageRepository:
                 "Fecha": datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M"),
                 "Origen": record.origin, "Proveedor": record.provider, "Vista": record.view,
                 "Checksum": record.checksum,
+                "RecordId": record.id,
             })
         return rows
+
+    def catalog_records(self, ean: str | None = None, *, record_id: int | None = None,
+                        record_ids: list[int] | None = None) -> list[ImageRecord]:
+        """Local listing only; resolve/access/integrity belong to visible validation."""
+        if ean is not None:
+            validate_ean(ean)
+        clauses, parameters = [], []
+        if ean is not None:
+            clauses.append("a.ean=?")
+            parameters.append(ean)
+        if record_id is not None:
+            clauses.append("r.id=?")
+            parameters.append(record_id)
+        if record_ids is not None:
+            if not record_ids:
+                return []
+            clauses.append("r.id IN (" + ",".join("?" for _ in record_ids) + ")")
+            parameters.extend(record_ids)
+        with self.connect() as connection:
+            rows = connection.execute("""
+                SELECT r.*, a.ean, a.checksum, a.pixels, a.path FROM representations r
+                JOIN assets a ON a.id=r.asset_id
+            """ + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY r.id",
+                parameters).fetchall()
+        records = []
+        for row in rows:
+            relative = Path(row["path"])
+            if relative.is_absolute() or ".." in relative.parts or excluded_staging_path(relative):
+                LOGGER.warning("Ruta de catalogo excluida: %s", relative)
+                continue
+            records.append(ImageRecord(
+                row["id"], row["ean"], row["checksum"], row["pixels"], self.root / relative,
+                row["provider"], row["origin"], row["view"], row["market"], row["name"],
+                row["date"], json.loads(row["metadata"])))
+        return records
 
     def save(self, ean: str, name: str, content: bytes, *, provider: str, origin: str,
              view: str = "unknown", market: str = "", date: str | None = None,
