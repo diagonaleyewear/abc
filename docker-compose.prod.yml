@@ -38,11 +38,12 @@ services:
       - /tmp
       - /root/.streamlit
 
-    # Persistencia de la lista de vigilancia y del registro de alertas ya enviadas
-    # (el resto del filesystem es read_only)
+    # Persistencia de la lista de vigilancia y del registro de alertas (ambos en ./masterdata_data,
+    # compartido con abcd-order-alerts). El resto del filesystem es read_only; los JSON legacy solo se leen.
+    # Con cap_drop ALL el root del contenedor no salta permisos: ./masterdata_data debe ser de root (uid 0).
     volumes:
-      - ./watchlist_clientes.json:/app/watchlist_clientes.json
-      - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json
+      - ./watchlist_clientes.json:/app/watchlist_clientes.json:ro
+      - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json:ro
       - ./masterdata_data:/app/data
 
   abcd-luxoptica-monitor:
@@ -50,6 +51,25 @@ services:
     restart: always
     healthcheck:
       disable: true
+
+  abcd-kering-scheduler:
+    image: ${ABCD_IMAGE_REF:-registry.diagonaleyewear.net/abcd-control:latest}
+    restart: always
+
+  abcd-order-alerts:
+    image: ${ABCD_IMAGE_REF:-registry.diagonaleyewear.net/abcd-control:latest}
+    restart: always
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "10"
+        labels: "service=abcd-order-alerts"
 
   # Opcional: Reverse proxy Nginx integrado
   # nginx:
@@ -74,5 +94,4 @@ services:
   #     - prometheus_data:/prometheus
   #   restart: always
 
-volumes:
-  # prometheus_data: {}
+volumes: {}

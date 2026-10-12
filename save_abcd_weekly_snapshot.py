@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 
 from abcd_snapshots import (
+    ABCD_SNAPSHOT_TABLE,
     build_abcd_report_export_df,
     build_snapshot_parameters,
     current_week_start,
@@ -40,6 +41,12 @@ def get_db_engine():
 
 
 def main() -> int:
+    from process_activity import record_process
+    with record_process("abc-snapshot") as receipt:
+        return _run_snapshot(receipt)
+
+
+def _run_snapshot(receipt) -> int:
     engine = get_db_engine()
     df = load_odoo_dataframe()
     reference_date = pd.Timestamp.today().normalize()
@@ -65,6 +72,7 @@ def main() -> int:
         f"Snapshot ABCD guardado: {snapshot_reference.snapshot_date} "
         f"| id={snapshot_reference.snapshot_id} | productos={len(snapshot_df)}"
     )
+    receipt["counts"] = {"Productos": len(snapshot_df)}
     return 0
 
 

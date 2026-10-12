@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 import pandas as pd
 import sys
+from image_repository import ImageRepository
 
 def generate_luxoptica_request_50():
     """Genera archivo de solicitud con 50 EAN."""
@@ -57,6 +58,9 @@ def generate_luxoptica_request_50():
     # Extraer UPC válidos
     upc_list = df[upc_col].dropna().astype(str).str.strip()
     upc_list = [upc for upc in upc_list if upc and upc != ""]
+    repository = ImageRepository()
+    upc_list = [ean for ean in dict.fromkeys(upc_list)
+                if repository.pending_views(ean, ("frontal", "lateral", "perspectiva"))]
     
     if len(upc_list) < 50:
         print(f"⚠️  Solo hay {len(upc_list)} UPC disponibles (se esperaban 50)")

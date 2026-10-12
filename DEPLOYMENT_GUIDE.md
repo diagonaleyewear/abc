@@ -1,5 +1,10 @@
 # 🚀 Deployment a Cloud - Instrucciones
 
+> Antes de reconstruir una imagen desde fuentes, configure la
+> [identidad real del build Cloud](docs/CLOUD_HOME.md#identidad-del-artefacto).
+> Los ejemplos históricos no aportan los nuevos argumentos obligatorios.
+> El cambio de la PR #39 no autoriza despliegue, automatización ni migración.
+
 ## ⭐ OPCIÓN RECOMENDADA: Docker + Apache2 + ISPConfig
 
 **Si tienes ISPConfig, esto es lo más simple y seguro.** Ver [DEPLOYMENT_ISPCONFIG.md](DEPLOYMENT_ISPCONFIG.md)
