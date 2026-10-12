@@ -34,7 +34,7 @@ autorizadas siguen en sus pantallas actuales, con sus permisos y bloqueos.
 | Luxoptica correo/imágenes | Mismo diario, clave luxoptica-mail | Incluye invocaciones manuales y del monitor del descargador existente; no confundirlas con la programación del monitor. |
 | Luxoptica solicitudes | Mismo diario, clave luxoptica-upload | Resultado autorizado del uploader existente. Éxito de solicitud **no significa** haber recibido imágenes. |
 | Sincronización NAS | Mismo diario, clave nas-sync | Sólo la réplica explícita existente registra verificación y cantidad de archivos. No hay programador NAS implementado; no se deduce uno. |
-| Snapshot ABC semanal | Mismo diario, clave abc-snapshot | Operación CLI existente, productos guardados/verificados. No se consulta PostgreSQL desde el inicio ni se deduce periodicidad por el nombre. |
+| Snapshot ABC semanal | Mismo diario, clave abc-snapshot | Capturas con ID y fecha/hora, versión del motor, parámetros y SHA-256; los datos legacy se conservan como no verificables. Una captura alterada se bloquea y las anteriores siguen disponibles. No se consulta PostgreSQL desde el inicio ni se deduce periodicidad por el nombre. |
 
 `PROCESS_ACTIVITY_PATH` apunta en Compose a `/app/data/process_activity.sqlite3`,
 compartido por aplicación y monitor; localmente su valor por defecto es
