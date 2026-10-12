@@ -1,5 +1,8 @@
 from datetime import date
 
+import ast
+from pathlib import Path
+
 import pandas as pd
 
 from abcd_snapshots import (
@@ -86,10 +89,17 @@ def test_snapshot_round_trip_keeps_existing_payload_and_date() -> None:
 
 def test_ui_and_cli_import_the_shared_snapshot_service() -> None:
     import abcd_snapshots
-    import app_enhanced
     import save_abcd_weekly_snapshot as cli
 
-    assert app_enhanced.build_abcd_report_export_df is abcd_snapshots.build_abcd_report_export_df
-    assert app_enhanced.save_abcd_weekly_snapshot is abcd_snapshots.save_abcd_weekly_snapshot
+    app_tree = ast.parse(Path("app_enhanced.py").read_text(encoding="utf-8"))
+    app_snapshot_imports = {
+        alias.name
+        for node in app_tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "abcd_snapshots"
+        for alias in node.names
+    }
+
+    assert "build_abcd_report_export_df" in app_snapshot_imports
+    assert "save_abcd_weekly_snapshot" in app_snapshot_imports
     assert cli.build_abcd_report_export_df is abcd_snapshots.build_abcd_report_export_df
     assert cli.save_abcd_weekly_snapshot is abcd_snapshots.save_abcd_weekly_snapshot
