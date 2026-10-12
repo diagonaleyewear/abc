@@ -176,6 +176,59 @@ y estado local reconciliado; validar salud/galeria/ZIP/checksums antes de admisi
 Los contenedores originales ofrecen retorno inmediato SOLO si se acredita
 ausencia de nuevas escrituras; hoy esa condicion NO se cumple.
 
+### Limpieza directa autorizada (2026-10-12), sin nueva migracion/despliegue
+
+Se ejecuto limpieza con los servicios activos del artefacto057ca07 y barrera
+de escritores coordinada para evitar borrar archivos recien creados:
+`ImageRepository.maintenance_lock` + lock de work + pausa simultanea de
+los cuatro servicios Cloud solo durante el sellado y validacion de referencias.
+No se toco la ruta activa de imagenes (`/mnt/cloud-imagenes/images`) ni el
+estado activo (`/opt/cloud-image-production/run-20261011T180000Z/`) fuera de
+actualizaciones controladas de referencias de backups de migracion.
+
+Antes de borrar se consolido una recuperacion LOCAL unica verificada por checksum
+en `/opt/cloud-image-production/run-20261011T180000Z/masterdata/recovery-20261012`
+(`2107` blobs, `13.916.823.536` bytes), incluyendo SQLite, configuracion y claves.
+Todos los blobs se releyeron en ejercicio de recuperacion por chunks (incluyendo
+ZIP multi-GB) y las cinco SQLite se comprobaron con integrity_check/FK.
+No se uso ni activo Fotos remoto.
+
+Limpieza eliminada por rutas exactas inventariadas (sin borrados generales):
+- staging NAS (`/mnt/cloud-imagenes/staging/{source,images,backups,recovery,work}`)
+- copias de captura/ensayo y temporales asociados ya consolidados
+- backups redundantes referenciados en `.migration` despues de reubicar recibos
+
+Resultado de borrado: `34.704` archivos, `155.627.729.660` bytes logicos
+en recibo de eliminacion. Diferencia de capacidad medida:
+- NAS disponible `+155.683.913.728` bytes
+- Disco local `-20.758.528` bytes (sobrecoste minimo del paquete recovery)
+
+Deduplicacion aplicada solo por checksum con referencias actualizadas antes:
+`14` rutas convertidas a hardlink del blob canonico (mismo nombre/variante/
+procedencia y checksum), `11.973.015` bytes logicos deduplicados.
+No se renombro ningun archivo ni se inventaron vistas/EAN.
+
+Auditoria de huerfanos:
+- comprobadas referencias en catalogo, pedidos(`order_eans`), historial Kering
+  (`runs/attempts/images`) y estados pendientes locales de procesos.
+- directorios EAN sin justificar: `0` (no se eliminaron EAN por inferencia).
+- ficheros no demostrablemente huerfanos retenidos: locks `.mail.lock`,
+  `.market.lock`, `.migration.lock`.
+- ambiguos/no reutilizables conservados segun politica.
+
+Excepciones conservadas:
+- `/local/state` (legacy staging local) retenido por permisos root
+  (`directory removal permission denied`), sin elevacion de privilegios.
+- originales root bajo `/opt/abcd-control/*` conservados intactos.
+
+Comprobaciones funcionales post-limpieza:
+- busqueda/galeria/ZIP/historial correctos
+- catalogo: assets2011, representations4602, events4603, migrations3981,
+  order_eans63
+- galeria4602, ZIP2347, EAN273; checksums intactos
+- historial Kering vigente: runs4, attempts6, images159
+- salud servicios: Cloud/alertas healthy; monitor y scheduler running
+
 ### Pendientes, sin omitir incidencias
 
 153claves ambiguas de manifiestos sin archivos afectados en esta captura,
@@ -186,4 +239,4 @@ captura, pero NO contienen automaticamente nuevas escrituras posteriores.
 Preparar backup independiente recurrente/replica solo con autorizacion posterior.
 NFS hard ante caida real puede bloquear IO: guardas impiden fallback local,
 no garantizan un timeout de kernel. No se repitio un fallo fisico de NAS.
-No se fusiono ninguna PR ni se borraron originales/staging; no hubo cambios Odoo.
+No se fusiono ninguna PR ni se borraron originales productivos; no hubo cambios Odoo.
