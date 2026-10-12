@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 import tempfile
-import base64
 import json
 import os
 import re
+import time
 import zipfile
-from typing import Any
+from typing import Any, Callable
 from collections.abc import Iterable
 from urllib.parse import unquote, urlparse
 
@@ -33,6 +35,8 @@ M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
 M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
+GRAPH_MAX_ATTEMPTS = 4
+GRAPH_MAX_PAGES = 1000
 
 
 @dataclass
@@ -85,9 +89,116 @@ def _graph_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
+def _retry_delay(response: requests.Response, attempt: int) -> float:
+    retry_after = response.headers.get("Retry-After", "")
+    try:
+        return min(max(float(retry_after), 0), 60)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(retry_after)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return min(max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0), 60)
+        except (TypeError, ValueError, OverflowError):
+            return float(min(2**attempt, 30))
+
+
+def _sleep_with_checkpoints(seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while True:
+        checkpoint()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1, remaining))
+
+
+def _request_with_retries(
+    request_method: Callable[..., requests.Response],
+    url: str,
+    **kwargs: Any,
+) -> requests.Response:
+    for attempt in range(GRAPH_MAX_ATTEMPTS):
+        checkpoint()
+        try:
+            response = request_method(url, **kwargs)
+        except requests.RequestException:
+            if attempt + 1 >= GRAPH_MAX_ATTEMPTS:
+                raise
+            _sleep_with_checkpoints(min(2**attempt, 30))
+            continue
+
+        if response.status_code in {408, 429, 500, 502, 503, 504}:
+            if attempt + 1 >= GRAPH_MAX_ATTEMPTS:
+                try:
+                    response.raise_for_status()
+                finally:
+                    response.close()
+            delay = _retry_delay(response, attempt)
+            response.close()
+            _sleep_with_checkpoints(delay)
+            continue
+
+        try:
+            response.raise_for_status()
+        except requests.HTTPError:
+            response.close()
+            raise
+        return response
+
+    raise RuntimeError("Se agotaron los reintentos de la solicitud HTTP")
+
+
+def _validate_graph_next_link(url: str) -> None:
+    parsed = urlparse(url)
+    if (parsed.scheme != "https" or parsed.hostname != "graph.microsoft.com"
+            or parsed.port not in (None, 443) or parsed.username or parsed.password):
+        raise ValueError("Microsoft Graph devolvió un @odata.nextLink fuera del host permitido")
+
+
+def _list_graph_collection(
+    token: str,
+    first_url: str,
+    timeout: int = 30,
+) -> list[dict[str, Any]]:
+    headers = _graph_headers(token)
+    values: list[dict[str, Any]] = []
+    visited_urls: set[str] = set()
+    next_url: str | None = first_url
+
+    while next_url:
+        checkpoint()
+        _validate_graph_next_link(next_url)
+        if next_url in visited_urls:
+            raise RuntimeError("Microsoft Graph devolvió un ciclo de paginación")
+        if len(visited_urls) >= GRAPH_MAX_PAGES:
+            raise RuntimeError("Microsoft Graph excedió el máximo de páginas permitido")
+        visited_urls.add(next_url)
+
+        with closing(_request_with_retries(
+            requests.get,
+            next_url,
+            headers=headers,
+            timeout=request_timeout(timeout),
+        )) as response:
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("La respuesta de Microsoft Graph tiene un formato inválido")
+        page_values = payload.get("value", [])
+        if not isinstance(page_values, list):
+            raise RuntimeError("La colección de Microsoft Graph tiene un formato inválido")
+        values.extend(page_values)
+        next_url = payload.get("@odata.nextLink")
+        if next_url is not None and not isinstance(next_url, str):
+            raise RuntimeError("Microsoft Graph devolvió un @odata.nextLink inválido")
+
+    return values
+
+
 def _get_access_token(config: M365Config) -> str:
     checkpoint()
-    with closing(requests.post(
+    with closing(_request_with_retries(
+        requests.post,
         _token_url(config.tenant_id),
         data={
             "client_id": config.client_id,
@@ -114,16 +225,15 @@ def _inbox_messages_url(mailbox: str, top: int) -> str:
 
 
 def _list_inbox_messages(token: str, mailbox: str, top: int) -> list[dict[str, Any]]:
-    checkpoint()
-    with closing(requests.get(_inbox_messages_url(mailbox, top), headers=_graph_headers(token),
-                              timeout=request_timeout(30))) as response:
-        response.raise_for_status()
-        payload = response.json()
-    return payload.get("value", [])
+    return _list_graph_collection(token, _inbox_messages_url(mailbox, top))
 
 
 def _attachments_url(mailbox: str, message_id: str) -> str:
-    return f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments?$top=200"
+    fields = "id,name,isInline,size"
+    return (
+        f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}/attachments"
+        f"?$select={fields}&$top=200"
+    )
 
 
 def _attachment_value_url(mailbox: str, message_id: str, attachment_id: str) -> str:
@@ -135,19 +245,17 @@ def _message_body_url(mailbox: str, message_id: str) -> str:
 
 
 def _list_attachments(token: str, mailbox: str, message_id: str) -> list[dict[str, Any]]:
-    checkpoint()
-    with closing(requests.get(_attachments_url(mailbox, message_id), headers=_graph_headers(token),
-                              timeout=request_timeout(30))) as response:
-        response.raise_for_status()
-        payload = response.json()
-    return payload.get("value", [])
+    return _list_graph_collection(token, _attachments_url(mailbox, message_id))
 
 
 def _get_message_body(token: str, mailbox: str, message_id: str) -> str:
     checkpoint()
-    with closing(requests.get(_message_body_url(mailbox, message_id), headers=_graph_headers(token),
-                              timeout=request_timeout(30))) as response:
-        response.raise_for_status()
+    with closing(_request_with_retries(
+        requests.get,
+        _message_body_url(mailbox, message_id),
+        headers=_graph_headers(token),
+        timeout=request_timeout(30),
+    )) as response:
         return response.json().get("body", {}).get("content", "")
 
 
@@ -183,7 +291,8 @@ def send_alert_email(
 
 
 def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
-    with closing(requests.patch(
+    with closing(_request_with_retries(
+        requests.patch,
         f"https://graph.microsoft.com/v1.0/users/{mailbox}/messages/{message_id}",
         headers={**_graph_headers(token), "Content-Type": "application/json"},
         json={"isRead": True},
@@ -193,39 +302,63 @@ def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
 
 
 def _find_download_links(body: str) -> list[str]:
-    import re
-    from html import unescape
+    class AnchorParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.text_parts: list[str] = []
+            self.text_length = 0
+            self.open_anchors: list[tuple[str, int]] = []
+            self.links: list[tuple[str, int, int]] = []
 
-    html = unescape(body or "")
-    links: list[tuple[str, str, str]] = []
-    anchor_pattern = re.compile(
-        r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>.*?</a>",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    for match in anchor_pattern.finditer(html):
-        before = re.sub(r"<[^>]+>", " ", html[max(0, match.start() - 350) : match.start()]).lower()
-        after = re.sub(r"<[^>]+>", " ", html[match.end() : match.end() + 140]).lower()
-        links.append((match.group(1), before, after))
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag.lower() == "a":
+                href = next((value for key, value in attrs if key.lower() == "href"), None)
+                if href:
+                    self.open_anchors.append((href, self.text_length))
 
+        def handle_data(self, data: str) -> None:
+            self.text_parts.append(data)
+            self.text_length += len(data)
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() == "a" and self.open_anchors:
+                href, start = self.open_anchors.pop()
+                self.links.append((href, start, self.text_length))
+
+    parser = AnchorParser()
+    parser.feed(body or "")
+    plain_text = "".join(parser.text_parts).lower()
+    links = [
+        (
+            href,
+            plain_text[max(0, start - 350):start],
+            plain_text[start:end],
+            plain_text[end:end + 140],
+        )
+        for href, start, end in parser.links
+    ]
     image_links = [
         href
-        for href, before, after in links
+        for href, before, anchor_text, _after in links
         if ("descargar las imágenes" in before or "download the images" in before)
-        and "informe" not in after
-        and "report" not in after
+        and "informe" not in f"{anchor_text} {href}".lower()
+        and "report" not in f"{anchor_text} {href}".lower()
     ]
     if image_links:
         return image_links
-    return [href for href, _, _ in links]
+    return [href for href, _, _, _ in links]
 
 
 def _load_state(state_file: Path) -> dict[str, Any]:
     if not state_file.exists():
         return {"processed_message_ids": []}
     try:
-        return json.loads(state_file.read_text(encoding="utf-8"))
+        payload = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"No se puede leer el estado {state_file}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"El estado de descarga tiene un formato inválido: {state_file}")
+    return payload
 
 
 def _save_state(state_file: Path, state: dict[str, Any]) -> None:
@@ -460,27 +593,51 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     eans_by_image_key = _load_eans_by_image_key()
     matched_eans = set(eans_by_image_key.values())
     market_ids_by_ean = _get_market_ids_by_ean(matched_eans)
+    max_entries = positive_setting("GRAPH_IMAGE_MAX_ZIP_ENTRIES", 50000)
+    max_entry_bytes = positive_setting("GRAPH_IMAGE_MAX_ENTRY_BYTES", 30 * 1024**2)
+    max_total_bytes = positive_setting("GRAPH_IMAGE_MAX_ZIP_UNPACKED_BYTES", 1024**3)
+    max_compression_ratio = positive_setting("GRAPH_IMAGE_MAX_COMPRESSION_RATIO", 1000)
 
     with zipfile.ZipFile(archive_path) as archive:
-        if len(archive.infolist()) > positive_setting("GRAPH_IMAGE_MAX_ZIP_ENTRIES", 50000):
+        members = archive.infolist()
+        if len(members) > max_entries:
             raise ValueError("ZIP supera GRAPH_IMAGE_MAX_ZIP_ENTRIES; archivo conservado")
-        for member in archive.infolist():
+        declared_total = 0
+        extracted_total = 0
+        for member in members:
             checkpoint()
             if member.is_dir():
                 continue
+            if member.file_size < 0 or member.compress_size < 0:
+                raise ValueError(f"Metadatos ZIP inválidos: {member.filename}")
+            declared_total += member.file_size
+            if declared_total > max_total_bytes:
+                raise ValueError("ZIP supera GRAPH_IMAGE_MAX_ZIP_UNPACKED_BYTES; archivo conservado")
+            if member.file_size / max(member.compress_size, 1) > max_compression_ratio:
+                raise ValueError(f"Ratio de compresión ZIP excesivo: {member.filename}")
 
             file_name = _sanitize_filename(Path(member.filename.replace("\\", "/")).name)
             if Path(file_name).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
                 continue
-            if member.file_size > positive_setting("GRAPH_IMAGE_MAX_ENTRY_BYTES", 30 * 1024**2):
+            if member.file_size > max_entry_bytes:
                 raise ValueError("Imagen ZIP supera GRAPH_IMAGE_MAX_ENTRY_BYTES; archivo conservado")
             image_key = _image_model_color_key(file_name)
             ean = eans_by_image_key.get(image_key) if image_key else None
             if ean is None:
                 raise ValueError(f"EAN no identificado para {file_name}; ZIP conservado en {archive_path}")
             view = _market_view_from_image_name(file_name) or "unknown"
+            content = bytearray()
+            with archive.open(member) as source:
+                while chunk := source.read(1024 * 1024):
+                    checkpoint()
+                    content.extend(chunk)
+                    extracted_total += len(chunk)
+                    if len(content) > max_entry_bytes or extracted_total > max_total_bytes:
+                        raise ValueError("El ZIP excedió los límites durante la extracción; archivo conservado")
+            if len(content) != member.file_size:
+                raise ValueError(f"Tamaño ZIP no coincide con metadatos: {member.filename}")
             record, _ = repository.save(
-                ean, file_name, archive.read(member), provider="Luxoptica",
+                ean, file_name, bytes(content), provider="Luxoptica",
                 origin=f"ZIP:{archive_path.name}:{member.filename}", view=view,
                 metadata={"modelo": _model_from_image_name(file_name)}, allow_invalid=True,
             )
@@ -532,8 +689,13 @@ def _save_streamed_attachment(chunks: Iterable[bytes], target_dir: Path, file_na
 
 def _download_zip_link(url: str, target_dir: Path) -> Path | None:
     checkpoint()
-    with requests.get(url, allow_redirects=True, stream=True, timeout=request_timeout(120)) as response:
-        response.raise_for_status()
+    with closing(_request_with_retries(
+        requests.get,
+        url,
+        allow_redirects=True,
+        stream=True,
+        timeout=request_timeout(120),
+    )) as response:
         final_path = unquote(urlparse(response.url).path)
         if not final_path.lower().endswith(".zip"):
             return None
@@ -555,13 +717,13 @@ def download_luxoptica_mail_attachments(
     top_messages: int = 100,
 ) -> DownloadSummary:
     root = repository_root()
-    from repository_storage import check_image_root
+    from repository_storage import check_image_root, state_root
     from process_activity import record_process
     with record_process("luxoptica-mail") as receipt:
         check_image_root(root)
         root.mkdir(parents=True, exist_ok=True)
         checkpoint()
-        with acquire(FileLock(root / ".mail.lock", timeout=120)), incoming_lock(root):
+        with acquire(FileLock(state_root(root) / ".mail.lock", timeout=120)), incoming_lock(root):
             summary = _download_luxoptica_mail_attachments(sender_hint, subject_hint, lookback_days, top_messages)
             receipt["counts"] = {"Correos revisados": summary.messages_scanned,
                                  "Adjuntos descargados": summary.attachments_downloaded}
@@ -702,20 +864,22 @@ def _download_luxoptica_mail_attachments(
             if not att_id:
                 continue
 
-            if att.get("contentBytes"):
-                if len(att["contentBytes"]) > 4 * ((archive_limit() + 2) // 3):
+            target_dir = work_root(root) / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / lote_folder
+            with closing(_request_with_retries(
+                requests.get,
+                _attachment_value_url(config.mailbox, message_id, att_id),
+                headers=_graph_headers(token),
+                timeout=request_timeout(60),
+                stream=True,
+            )) as value_resp:
+                content_length = int(value_resp.headers.get("content-length", "0") or 0)
+                if content_length > archive_limit():
                     raise ValueError("Adjunto supera GRAPH_IMAGE_MAX_ARCHIVE_BYTES")
-                saved = _save_attachment_bytes(base64.b64decode(att["contentBytes"]), root,
-                                               received_at, lote_folder, file_name)
-            else:
-                target_dir = work_root(root) / received_at.astimezone(timezone.utc).strftime("%Y-%m-%d") / lote_folder
-                with requests.get(
-                    _attachment_value_url(config.mailbox, message_id, att_id),
-                    headers=_graph_headers(token),
-                    timeout=request_timeout(60), stream=True,
-                ) as value_resp:
-                    value_resp.raise_for_status()
-                    saved = _save_streamed_attachment(value_resp.iter_content(1024 * 1024), target_dir, file_name)
+                saved = _save_streamed_attachment(
+                    value_resp.iter_content(1024 * 1024),
+                    target_dir,
+                    file_name,
+                )
             saved_paths.append(str(saved))
             attachments_downloaded += 1
 

@@ -1,6 +1,5 @@
 """Offline monitor lifecycle probes; synthetic state only, no provider access."""
 import argparse
-import base64
 from contextlib import contextmanager, closing
 from datetime import datetime, timezone
 from io import BytesIO
@@ -63,8 +62,7 @@ def install_synthetic(root: Path, scenario: str):
     graph._list_inbox_messages = inbox
     graph._list_attachments = lambda *args: [
         {"id": "synthetic-attachment", "name": "MODEL__COLOR_000A.png",
-         "@odata.type": "#microsoft.graph.fileAttachment",
-         **({} if scenario == "download" else {"contentBytes": base64.b64encode(content).decode()})}]
+         "@odata.type": "#microsoft.graph.fileAttachment"}]
 
     def mark_read(*args):
         with (root / "acknowledged").open("a") as stream:
@@ -76,10 +74,16 @@ def install_synthetic(root: Path, scenario: str):
     graph._mark_message_read = mark_read
 
     class Response:
+        status_code = 200
+        headers = {"content-length": str(len(content))}
+
         def __enter__(self):
             return self
 
         def __exit__(self, *args):
+            self.close()
+
+        def close(self):
             (root / "response-closed").touch()
 
         def raise_for_status(self):
@@ -87,13 +91,13 @@ def install_synthetic(root: Path, scenario: str):
 
         def iter_content(self, size):
             yield content[:16]
-            if not restarting:
+            if scenario == "download" and not restarting:
                 (root / "ready").touch()
                 wait_file(root / "release")
             yield content[16:]
 
     def offline_get(*args, **kwargs):
-        if scenario != "download":
+        if scenario not in {"download", "sqlite", "nfs"}:
             raise AssertionError("Unexpected network call in offline probe")
         assert kwargs["stream"] and kwargs["timeout"] == 5
         return Response()
