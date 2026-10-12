@@ -32,11 +32,22 @@ su nombre y extension en metadatos y exportaciones, sin otra copia fisica.
 
 ## Configuracion y operaciones
 
-`IMAGE_REPOSITORY_ROOT` es la unica raiz de fotografias, catalogo y bloqueos.
+`IMAGE_REPOSITORY_ROOT` es la unica raiz de fotografias y bloqueos compartidos.
 Por defecto es `repo/images` relativo al proyecto (no al directorio de trabajo).
 En Cloud usar un volumen persistente comun, montado en **app, monitor Graph y
 programador Kering**. `KERING_DATA_ROOT` conserva configuracion e historial, no
 fotografias nuevas. `M365_DOWNLOAD_ROOT` deja de controlar fotografias.
+
+Para almacenamiento separado, `IMAGE_REPOSITORY_STATE_ROOT` contiene catalogo
+SQLite y estado de correo/mercados, temporales de recepcion, planes y recibos,
+en volumen local persistente. `IMAGE_REPOSITORY_BACKUP_ROOT` conserva backups
+de imagenes y archivos comprimidos en una ubicacion independiente; los backups
+de bases de datos/configuracion/metadatos siguen bajo estado local. Sin esas
+variables se conserva el layout local anterior. Con NFS se exige fuente exacta
+en `IMAGE_REPOSITORY_NFS_SOURCE` y, para backups remotos,
+`IMAGE_REPOSITORY_BACKUP_NFS_SOURCE`; ausencia/montaje incorrecto bloquean acceso
+sin crear fallback local. Preparacion y limites:
+[Synology NFS](../deployment/nfs/README.md).
 
 El catalogo registra EAN, proveedor, origen, vista canonica, mercado, fecha UTC,
 SHA-256, huella visual, nombre solicitado y ruta relativa; las asociaciones
@@ -48,8 +59,8 @@ Los originales menores tambien se conservan, pero no acreditan completitud.
 Bloqueos de fichero compartidos por EAN cubren consulta, descarga y escritura.
 SQLite usa transacciones durables; los bytes se escriben antes de publicar
 metadatos. Todas las herramientas deben usar la misma raiz y sus bloqueos.
-No soportar SQLite/bloqueos en un NAS que no garantice locking y atomic replace:
-usar disco persistente local como autoridad y NAS como replica verificada.
+SQLite activo nunca se admite sobre NFS. Los locks de bytes permanecen junto a
+las imagenes para coordinar escritores; NFS debe acreditar locking y rename.
 
 ### Granularidad Luxoptica comprobada
 
@@ -107,13 +118,18 @@ al inventario con un JSON revisado, no editar el plan:
 }
 ```
 
+Los planes nuevos v2 firman tambien las raices independientes de estado y
+backups. Los planes v1 siguen validos para su layout original, no para cambiar
+la ubicacion mediante variables de entorno; repetir inventario antes del corte.
 Los recibos contienen la ruta efectiva si ya existian contenidos en destino.
 `.migration/<plan>/originals` conserva **todos** los archivos inventariados,
 incluidos JSON, ZIP, informes, configuracion e historial SQLite, sin cambiar
 bytes. No exponer esta carpeta por HTTP: puede contener metadatos privados o
 configuracion cifrada. La recuperacion reconstruye cada origen bajo su ID
 estable (hash de su ruta), comprueba todos los checksums y nunca sobrescribe
-originales. Una replica NAS incluye catalogo, imagenes, planes y backups.
+originales. En layout legacy una replica incluye catalogo, imagenes, planes y
+backups. En layout separado `sync-nas` legacy se bloquea expresamente; verificar
+y recuperar usan estado local y backup independiente firmados en el plan.
 
 Validacion offline:
 
@@ -149,8 +165,12 @@ creo el destino. Estas cantidades no describen el volumen de produccion.
    Recuperar estado de correo migrado antes de reactivar Graph. El historial
    Kering sigue en su raiz persistente original. Los pendientes se recalculan
    desde representaciones, no desde rutas antiguas.
-7. Replicar al NAS mediante copia verificada del catalogo y archivos. Revisar
-   jobs externos para que lean `<raiz>/<EAN>` y no rutas por proveedor/modelo.
+7. En el layout legacy, replicar al NAS mediante copia verificada del catalogo
+   y archivos. En el layout NFS separado, el catalogo operativo permanece local
+   y `sync-nas` legacy esta bloqueado: usar backups independientes y el ensayo
+   de recuperacion de `deployment/nfs/README.md`, nunca copiar la exportacion
+   de imagenes sobre si misma. Revisar jobs externos para que lean `<raiz>/<EAN>`
+   y no rutas por proveedor/modelo.
 8. Reactivar procesos y validar en piloto. Rollback: pausar, volver a codigo/
    configuracion anteriores y usar originales intactos o la recuperacion
    verificada. **Esta herramienta nunca elimina originales**. Retirada posterior

@@ -667,7 +667,7 @@ def test_atomic_write_failure_recovers_without_orphan(tmp_path, monkeypatch):
     import image_repository
     store = ImageStore(tmp_path)
     writer = image_repository.atomic_write
-    def interrupted(path, content):
+    def interrupted(path, content, **kwargs):
         raise OSError("offline interrupted write")
     monkeypatch.setattr(image_repository, "atomic_write", interrupted)
     assert process_ean(store, FakePortal(), "0001")["reason"] == "imagen_invalida"

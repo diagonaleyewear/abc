@@ -277,10 +277,10 @@ def test_migration_collision_between_providers_and_resumption(tmp_path, monkeypa
     plan = migration.inventory([("Luxoptica", a.parent), ("Other", b.parent)], repository_root())
     assert sum(entry["conflict"] for entry in plan["entries"]) == 1
     copier = migration.copy_verified
-    def interrupted(source, destination, expected):
+    def interrupted(source, destination, expected, **kwargs):
         if source == b / "frontal.png":
             raise OSError("simulated stop")
-        copier(source, destination, expected)
+        copier(source, destination, expected, **kwargs)
     monkeypatch.setattr(migration, "copy_verified", interrupted)
     with pytest.raises(OSError):
         migration.apply(plan)

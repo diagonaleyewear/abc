@@ -1,4 +1,5 @@
 import re
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 from datetime import date, timedelta
@@ -205,26 +206,42 @@ def test_manual_and_automatic_runs_share_deduplication(store) -> None:
     assert len(manual_sender.calls) == 1
 
 
-def test_simultaneous_manual_and_automatic_runs_send_once(tmp_path) -> None:
-    database = tmp_path / "data" / "order_alerts.sqlite3"
-    sender = FakeSender(delay=0.2)
+def _simultaneous_alert_runs(database, sender):
     barrier = threading.Barrier(2)
 
     def manual():
         barrier.wait()
-        dispatch_order_alerts(_orders(7).to_dict(orient="records"), OrderAlertStore(database), sender, ["a@example.test"])
+        return dispatch_order_alerts(
+            _orders(7).to_dict(orient="records"), OrderAlertStore(database), sender, ["a@example.test"])
 
     def automatic():
         barrier.wait()
-        _auto_check(OrderAlertStore(database), lambda **_: _orders(7), sender)
+        return _auto_check(OrderAlertStore(database), lambda **_: _orders(7), sender)
 
-    threads = [threading.Thread(target=manual), threading.Thread(target=automatic)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(10)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(manual), executor.submit(automatic)]
+        return [future.result(timeout=10) for future in futures]
 
+
+def test_simultaneous_manual_and_automatic_runs_send_once(tmp_path) -> None:
+    database = tmp_path / "data" / "order_alerts.sqlite3"
+    sender = FakeSender(delay=0.2)
+    results = _simultaneous_alert_runs(database, sender)
+
+    assert len(results) == 2
     assert sender.sent_orders() == ["S00007"]
+
+
+def test_concurrent_initialization_error_is_not_success(tmp_path, monkeypatch) -> None:
+    import sqlite3
+    import sys
+
+    def locked_store(_database):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sys.modules[__name__], "OrderAlertStore", locked_store)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        _simultaneous_alert_runs(tmp_path / "alerts.sqlite3", FakeSender())
 
 
 def test_notifications_status_and_watchlist_survive_restart(tmp_path) -> None:

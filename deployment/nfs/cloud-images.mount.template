@@ -1,0 +1,14 @@
+[Unit]
+Description=Synology image files (no SQLite)
+Wants=network-online.target
+After=network-online.target
+
+[Mount]
+What=192.168.1.32:/volume1/cloud-imagenes
+Where=/mnt/cloud-imagenes
+Type=nfs
+Options=vers=4.1,proto=tcp,hard,timeo=600,retrans=2,sec=sys,nosuid,nodev,noexec
+TimeoutSec=60
+
+[Install]
+WantedBy=multi-user.target

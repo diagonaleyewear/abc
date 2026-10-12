@@ -472,7 +472,8 @@ def _extract_clean_eans(df: pd.DataFrame) -> list[str]:
 
 
 def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
-    pending_path = images_root / ".market_pending.json"
+    from repository_storage import state_root
+    pending_path = state_root(images_root) / ".market_pending.json"
     if not pending_path.exists():
         return []
 
@@ -501,15 +502,12 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
     return rows
 
 
-@st.cache_data(ttl=30)
 def _load_image_catalog(images_root: Path) -> pd.DataFrame:
-    if not images_root.exists():
-        return pd.DataFrame(columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"])
     rows = ImageRepository(images_root).catalog_rows()
     catalog = pd.DataFrame(
         rows,
         columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha",
-                 "Origen", "Proveedor", "Vista", "Checksum"],
+                 "Origen", "Proveedor", "Vista", "Checksum", "RecordId"],
     )
     return catalog.sort_values("Descargada", ascending=False).reset_index(drop=True)
 
@@ -1601,8 +1599,26 @@ def render_luxoptica_images_page() -> None:
     st.title("Imágenes")
     st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
 
-    images_root = repository_root()
-    image_catalog = _load_image_catalog(images_root)
+    from kering_images_ui import visible_previews, visible_access, original_for_display, service
+    refresh = st.button("Actualizar imagenes", key="image_gallery_refresh")
+    try:
+        repository = service().store.repository
+        if refresh or "image_gallery_records" not in st.session_state:
+            st.session_state["image_gallery_records"] = repository.catalog_records()
+        records = st.session_state["image_gallery_records"]
+        rows = repository.catalog_rows(records)
+    except (OSError, ValueError, RuntimeError) as error:
+        st.error(f"Repositorio no disponible: {error}")
+        return
+    if refresh:
+        st.session_state.pop("image_gallery_zip", None)
+        st.session_state.pop("luxoptica_selected_image", None)
+        st.session_state.pop("luxoptica_selected_bytes", None)
+    # Querying the local catalog never resolves or stats individual NAS paths.
+    image_catalog = pd.DataFrame(rows, columns=[
+        "Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha",
+        "Origen", "Proveedor", "Vista", "Checksum", "RecordId",
+    ]).sort_values("Descargada", ascending=False).reset_index(drop=True)
 
     st.subheader("Visor de imágenes")
     search_ean = st.text_input(
@@ -1627,15 +1643,23 @@ def render_luxoptica_images_page() -> None:
     if filtered_catalog.empty:
         st.info("No hay imágenes que coincidan con la búsqueda.")
     else:
-        try:
-            selected_zip = ImageRepository(images_root).zip_eans(
-                filtered_catalog["EAN"].unique().tolist(),
-                market=None if market_filter == "Todos" else "" if market_filter == "Original" else market_filter,
-            )
-        except (OSError, ValueError) as error:
-            st.error(f"No se puede preparar el ZIP: {error}")
-        else:
-            st.download_button("ZIP de imágenes", selected_zip, file_name="imagenes-ean.zip",
+        zip_key = (tuple(filtered_catalog["RecordId"]), tuple(filtered_catalog["Checksum"]), market_filter)
+        prepared = st.session_state.get("image_gallery_zip")
+        if prepared and prepared["key"] != zip_key:
+            st.session_state.pop("image_gallery_zip", None)
+            prepared = None
+        if st.button("Preparar ZIP de imagenes", key="image_repository_prepare_zip"):
+            try:
+                selected_zip = repository.zip_eans(
+                    filtered_catalog["EAN"].unique().tolist(),
+                    market=None if market_filter == "Todos" else "" if market_filter == "Original" else market_filter,
+                )
+                prepared = {"key": zip_key, "bytes": selected_zip}
+                st.session_state["image_gallery_zip"] = prepared
+            except (OSError, ValueError) as error:
+                st.error(f"No se puede preparar el ZIP: {error}")
+        if prepared:
+            st.download_button("ZIP de imágenes", prepared["bytes"], file_name="imagenes-ean.zip",
                                mime="application/zip", key="image_repository_zip")
         st.caption(
             f"{len(filtered_catalog):,} imágenes | "
@@ -1664,10 +1688,20 @@ def render_luxoptica_images_page() -> None:
 
         start = (int(current_page) - 1) * page_size
         page_catalog = filtered_catalog.iloc[start : start + page_size]
+        by_id = {record.id: record for record in records}
+        visible = [by_id[int(row["RecordId"])] for _, row in page_catalog.iterrows()]
+        access = visible_access(repository, visible, "image_gallery_access", refresh=refresh,
+                                selection=(search_ean, market_filter, current_page))
+        previews = visible_previews(repository, visible, access)
         thumbnail_columns = st.columns(4)
         for position, (row_index, image_row) in enumerate(page_catalog.iterrows()):
             with thumbnail_columns[position % 4]:
-                st.image(image_row["Ruta"], width="stretch")
+                record = by_id[int(image_row["RecordId"])]
+                preview = previews[record.id]
+                if isinstance(preview, bytes):
+                    st.image(preview, width="stretch")
+                else:
+                    st.warning(f"No se puede mostrar {record.name}: {preview}")
                 st.caption(
                     f"{image_row['EAN']} · {image_row['Mercado']}\n"
                     f"{image_row['Archivo']} · {image_row['Fecha']}"
@@ -1676,17 +1710,31 @@ def render_luxoptica_images_page() -> None:
                     "Ver imagen",
                     key=f"luxoptica_view_{row_index}",
                     width="stretch",
+                    disabled=not isinstance(preview, bytes),
                 ):
-                    st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
+                    try:
+                        st.session_state["luxoptica_selected_bytes"] = original_for_display(repository, record)
+                        st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
+                        st.session_state["luxoptica_selected_checksum"] = record.checksum
+                    except (OSError, ValueError) as error:
+                        st.error(f"No se puede abrir la imagen: {error}")
                     st.rerun()
 
         selected_path = st.session_state.get("luxoptica_selected_image")
-        if selected_path and selected_path in set(filtered_catalog["Ruta"]):
+        if selected_path and selected_path in set(page_catalog["Ruta"]):
             selected_row = filtered_catalog[filtered_catalog["Ruta"] == selected_path].iloc[0]
+            selected_record = by_id[int(selected_row["RecordId"])]
+            if (not isinstance(previews[selected_record.id], bytes) or
+                    access[selected_record.id] is None or
+                    st.session_state.get("luxoptica_selected_checksum") != selected_record.checksum):
+                st.session_state.pop("luxoptica_selected_image", None)
+                st.session_state.pop("luxoptica_selected_bytes", None)
+                st.warning("Original cambiado o inaccesible; vuelva a abrir la imagen.")
+                return
             st.markdown("#### Imagen ampliada")
             viewer_col, details_col = st.columns([2, 1])
             with viewer_col:
-                st.image(selected_path, caption=selected_row["Archivo"], width="stretch")
+                st.image(st.session_state["luxoptica_selected_bytes"], caption=selected_row["Archivo"], width="stretch")
             with details_col:
                 st.write(f"**Modelo:** {selected_row['Modelo']}")
                 st.write(f"**EAN:** {selected_row['EAN']}")

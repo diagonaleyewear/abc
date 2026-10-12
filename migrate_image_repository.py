@@ -6,11 +6,16 @@ from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 from PIL import Image
 
 from filelock import FileLock
+from repository_storage import (
+    state_root, backup_root, require_local, check_image_root, check_backup_root,
+    check_migration_target, check_staging_role, staging_root,
+)
 
 from graph_mail_downloader import (
     _image_model_color_key, _load_eans_by_image_key, _market_view_from_image_name,
@@ -25,6 +30,7 @@ from image_repository import (
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".img"}
+IMAGE_ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 
 
 def source_orders(root: Path) -> list[dict]:
@@ -38,6 +44,7 @@ def source_orders(root: Path) -> list[dict]:
 
 
 def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | None = None) -> dict:
+    check_migration_target(target)
     target = target.resolve()
     entries: list[dict] = []
     orders: list[dict] = []
@@ -48,25 +55,43 @@ def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | Non
     content_paths: dict[tuple[str, str], str] = {}
     existing: dict[tuple[str, str], str] = {}
     # Read-only: inventory must not create a catalog or destination.
-    if (target / ".catalog.sqlite3").exists():
-        with closing(sqlite3.connect((target / ".catalog.sqlite3").as_uri() + "?mode=ro", uri=True)) as connection:
+    storage = {"state_root": str(state_root(target)), "backup_root": str(backup_root(target))}
+    database = Path(storage["state_root"]) / ".catalog.sqlite3"
+    if database.exists():
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
             for ean, path, digest in connection.execute("SELECT ean,path,checksum FROM assets"):
                 existing[(ean, Path(path).name)] = digest
                 content_paths[(ean, digest)] = path
     roots = []
     for provider, source in sources:
+        staged = staging_root()
+        if staged is not None:
+            check_staging_role(staged / "source", "source")
+            absolute = source.absolute()
+            if absolute.resolve() != absolute or not (
+                    absolute == staged / "source" or staged / "source" in absolute.parents):
+                raise ValueError("Origen de ensayo debe estar en source congelada")
         source = source.resolve()
         if not source.is_dir():
             raise ValueError(f"No existe origen: {source}")
         if source == target or source in target.parents or target in source.parents:
             raise ValueError("Inventario requiere origen y destino separados")
+        for destination_root in {Path(value) for value in storage.values()}:
+            if source == destination_root or source in destination_root.parents or destination_root in source.parents:
+                raise ValueError("Estado y backups deben estar separados de los origenes")
         if any(source == root or source in root.parents or root in source.parents for root in roots):
             raise ValueError("Los origenes no pueden solaparse")
         roots.append(source)
         source_id = hashlib.sha256(str(source).encode()).hexdigest()
         if provider == "Kering":
             orders.extend(source_orders(source))
-        for path in sorted(source.rglob("*")):
+        paths = []
+        for directory, directories, filenames in os.walk(source, followlinks=False):
+            directories[:] = [name for name in directories if name != "staging"]
+            paths.extend(Path(directory) / name for name in filenames)
+            paths.extend(Path(directory) / name for name in directories
+                         if (Path(directory) / name).is_symlink())
+        for path in sorted(paths):
             if not path.is_file():
                 continue
             if path.is_symlink() or source not in path.resolve().parents:
@@ -131,21 +156,42 @@ def inventory(sources: list[tuple[str, Path]], target: Path, mapping: dict | Non
                 "metadata": info.get("metadata", {"modelo": _model_from_image_name(path.name)}),
                 "orders": info.get("orders", []),
             })
-    body = {"version": 1, "target": str(target), "entries": entries, "orders": orders, "blockers": blockers}
+    body = {"version": 2, "target": str(target), "storage": storage,
+            "entries": entries, "orders": orders, "blockers": blockers}
     plan_id = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
     return {**body, "id": plan_id}
 
 
 def check_plan(plan: dict) -> None:
+    check_migration_target(Path(plan["target"]))
     body = {key: value for key, value in plan.items() if key != "id"}
-    if plan.get("version") != 1 or hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest() != plan["id"]:
+    if plan.get("version") not in {1, 2} or hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest() != plan["id"]:
         raise ValueError("Plan modificado; repetir inventario y simulacion")
     if plan["blockers"]:
         raise ValueError("Inventario bloqueado: " + "; ".join(plan["blockers"]))
 
 
-def legacy_root(repository: ImageRepository, plan: dict) -> Path:
-    return repository.root / ".migration" / plan["id"] / "originals"
+def external_backup(entry: dict, plan: dict) -> bool:
+    return entry["image"] or (
+        plan["version"] >= 2 and Path(entry["name"]).suffix.lower() in IMAGE_ARCHIVE_EXTENSIONS)
+
+
+def legacy_root(repository: ImageRepository, plan: dict, entry: dict) -> Path:
+    root = repository.backup_root if external_backup(entry, plan) else repository.state_root
+    return root / ".migration" / plan["id"] / "originals"
+
+
+def plan_storage(plan: dict) -> tuple[Path, Path]:
+    images = Path(plan["target"]).resolve()
+    configured = plan.get("storage")
+    if configured is None:
+        if state_root(images) != images or backup_root(images) != images:
+            raise ValueError("Plan antiguo sin raices de estado/backups; repetir inventario")
+        return images, images
+    state = Path(configured["state_root"]).resolve()
+    backups = Path(configured["backup_root"]).resolve()
+    require_local(state)
+    return state, backups
 
 
 def apply(plan: dict) -> dict:
@@ -156,11 +202,15 @@ def apply(plan: dict) -> dict:
     for entry in plan["entries"]:
         if checksum(Path(entry["source"])) != entry["checksum"]:
             raise ValueError(f"Origen modificado; repetir inventario: {entry['source']}")
-    repository = ImageRepository(Path(plan["target"]))
+    state, backups = plan_storage(plan)
+    check_backup_root(Path(plan["target"]).resolve(), backups)
+    repository = ImageRepository(Path(plan["target"]), state=state, backups=backups)
     with FileLock(repository.root / ".migration.lock", timeout=120):
         for entry in plan["entries"]:
-            backup = legacy_root(repository, plan) / entry["backup"]
-            copy_verified(Path(entry["source"]), backup, entry["checksum"])
+            check_backup_root(repository.root, repository.backup_root)
+            backup = legacy_root(repository, plan, entry) / entry["backup"]
+            copy_verified(Path(entry["source"]), backup, entry["checksum"],
+                          guard=lambda: check_backup_root(repository.root, repository.backup_root))
             destination = None
             if entry["image"]:
                 record, _ = repository.save(
@@ -174,25 +224,26 @@ def apply(plan: dict) -> dict:
             with repository.maintenance_lock(), repository.connect() as connection:
                 connection.execute("INSERT OR REPLACE INTO migrations VALUES(?,?,?,?,?)",
                     (plan["id"], entry["source"], entry["checksum"],
-                     backup.relative_to(repository.root).as_posix(), destination))
+                     backup.relative_to(repository.backup_root if external_backup(entry, plan) else repository.state_root).as_posix(),
+                     destination))
         for order in plan["orders"]:
             repository.associate_order(order["source"], order["order_id"],
                 [line["ean"] for line in order["snapshot"]["lines"] if line["ean"]])
         _merge_mail_state(repository, plan)
         _merge_pending(repository)
-        atomic_write(repository.root / ".migration" / plan["id"] / "plan.json",
+        atomic_write(repository.state_root / ".migration" / plan["id"] / "plan.json",
                      json.dumps(plan, ensure_ascii=False, indent=2).encode("utf-8"))
     return verify(plan)
 
 
 def _merge_mail_state(repository: ImageRepository, plan: dict) -> None:
     with FileLock(repository.root / ".mail.lock", timeout=120):
-        state_file = repository.root / ".mail_download_state.json"
+        state_file = repository.state_root / ".mail_download_state.json"
         state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
         ids = set(state.get("processed_message_ids", []))
         for entry in plan["entries"]:
             if entry["name"] == ".mail_download_state.json":
-                old = json.loads((legacy_root(repository, plan) / entry["backup"]).read_text(encoding="utf-8"))
+                old = json.loads((legacy_root(repository, plan, entry) / entry["backup"]).read_text(encoding="utf-8"))
                 ids.update(old.get("processed_message_ids", []))
         state["processed_message_ids"] = sorted(ids)
         atomic_write(state_file, json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"))
@@ -210,14 +261,22 @@ def _merge_pending(repository: ImageRepository) -> None:
             missing = [market for market in ("Farfetch", "Miinto") if market not in markets]
             if missing:
                 pending[str(record.path)] = {"ean": record.ean, "missing_markets": missing}
-        atomic_write(repository.root / ".market_pending.json",
+        atomic_write(repository.state_root / ".market_pending.json",
                      json.dumps(pending, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
 def verify(plan: dict, repository: Path | None = None) -> dict:
     check_plan(plan)
     root = (repository or Path(plan["target"])).resolve()
-    database = root / ".catalog.sqlite3"
+    state, backups = plan_storage(plan)
+    if repository is not None:
+        if state != Path(plan["target"]).resolve() or backups != Path(plan["target"]).resolve():
+            raise ValueError("Replica legacy no admite plan con almacenamiento separado")
+        state = backups = root
+    check_image_root(root)
+    if repository is None:
+        check_backup_root(root, backups)
+    database = state / ".catalog.sqlite3"
     with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise ValueError("Catalogo no integro")
@@ -232,11 +291,11 @@ def verify(plan: dict, repository: Path | None = None) -> dict:
         receipt = receipts.get(entry["source"])
         if not receipt or receipt[2] != entry["checksum"]:
             raise ValueError(f"Entrada sin migrar: {entry['source']}")
-        for relative in [receipt[3], receipt[4]]:
+        for base, relative in [(backups if external_backup(entry, plan) else state, receipt[3]), (root, receipt[4])]:
             if relative is None:
                 continue
-            path = (root / relative).resolve()
-            if root not in path.parents or checksum(path) != entry["checksum"]:
+            path = (base / relative).resolve()
+            if base not in path.parents or checksum(path) != entry["checksum"]:
                 raise ValueError(f"Verificacion fallida: {path}")
         for order_id in entry["orders"]:
             if (entry["provider"], str(order_id), entry["ean"]) not in links:
@@ -257,16 +316,20 @@ def verify(plan: dict, repository: Path | None = None) -> dict:
 
 
 def recover(plan: dict, target: Path, repository: Path | None = None) -> dict:
+    check_migration_target(target, "recovery")
     verify(plan, repository)
     root = (repository or Path(plan["target"])).resolve()
+    state, backups = plan_storage(plan)
+    if repository is not None:
+        state = backups = root
     target = target.resolve()
     source_roots = {Path(entry["source_root"]) for entry in plan["entries"]}
-    if target == root or root in target.parents or target in root.parents or any(
+    if any(target == base or base in target.parents or target in base.parents for base in {root, state, backups}) or any(
         target == source or source in target.parents or target in source.parents for source in source_roots
     ):
         raise ValueError("Recuperar en directorio separado, nunca sobre originales o repositorio")
     for entry in plan["entries"]:
-        backup = root / ".migration" / plan["id"] / "originals" / entry["backup"]
+        backup = (backups if external_backup(entry, plan) else state) / ".migration" / plan["id"] / "originals" / entry["backup"]
         copy_verified(backup, target / entry["backup"], entry["checksum"])
     return {"recovered": len(plan["entries"]), "target": str(target)}
 

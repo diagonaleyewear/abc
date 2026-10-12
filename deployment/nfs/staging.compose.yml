@@ -1,0 +1,43 @@
+# Staging only. Bind the exact existing export so mount guards can verify its identity.
+services:
+  image-storage-staging:
+    image: ${STAGING_IMAGE:?Set verified build artifact}
+    user: "1037:100"
+    environment:
+      HOME: /home/cloud-images
+      IMAGE_REPOSITORY_STAGING_ROOT: /nas/staging
+      IMAGE_REPOSITORY_STAGING_MOUNT_ROOT: /nas
+      IMAGE_REPOSITORY_ROOT: /nas/staging/images
+      IMAGE_REPOSITORY_NFS_SOURCE: 192.168.1.32:/volume1/cloud-imagenes
+      IMAGE_REPOSITORY_STATE_ROOT: /staging/state
+      IMAGE_REPOSITORY_BACKUP_ROOT: /nas/staging/backups
+      IMAGE_REPOSITORY_BACKUP_NFS_SOURCE: 192.168.1.32:/volume1/cloud-imagenes
+      IMAGE_REPOSITORY_WORK_ROOT: /nas/staging/work
+      IMAGE_REPOSITORY_WORK_NFS_SOURCE: 192.168.1.32:/volume1/cloud-imagenes
+      IMAGE_REPOSITORY_WORK_MOUNT_ROOT: /nas
+      IMAGE_REPOSITORY_WORK_RESERVE_BYTES: "2147483648"
+      GRAPH_IMAGE_MAX_ARCHIVE_BYTES: "8589934592"
+    network_mode: none
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=536870912,mode=1777"]
+    volumes:
+      - type: bind
+        source: /mnt/cloud-imagenes
+        target: /nas
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/cloud-image-staging/state
+        target: /staging/state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STAGING_HISTORY_SNAPSHOT:-/opt/cloud-image-staging/state/frozen/Kering/history.sqlite3}
+        target: ${STAGING_HISTORY_TARGET:-/nas/staging/source/Kering/history.sqlite3}
+        read_only: true
+        bind:
+          create_host_path: false
+    command: ["python", "-c", "from image_repository import ImageRepository; r=ImageRepository(); print('Staging storage gates passed')"]

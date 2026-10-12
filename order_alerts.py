@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import closing, contextmanager
 from html import escape
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -10,9 +12,14 @@ import time
 import uuid
 from typing import Any, Callable, Iterable, Sequence
 
+from filelock import FileLock
+
 
 ORDER_ALERT_STATE_PATH_ENV = "ORDER_ALERT_STATE_PATH"
 ORDER_ALERT_LEASE_SECONDS = 600
+SQLITE_INITIALIZATION_TIMEOUT = 10.0
+SQLITE_BUSY_TIMEOUT = 10.0
+LOGGER = logging.getLogger(__name__)
 LEGACY_NOTIFICATIONS_FILE = Path(__file__).resolve().parent / "alerta_pedidos_notificados.json"
 
 ALERT_RECIPIENT_EMAIL_ENV = "ALERT_RECIPIENT_EMAIL"
@@ -159,48 +166,83 @@ class OrderAlertStore:
     """Shared durable claims for manual and scheduled order-alert email sends."""
 
     def __init__(self, database_path: Path | str | None = None) -> None:
-        self.database_path = Path(database_path or default_order_alert_store_path())
+        self.database_path = Path(database_path or default_order_alert_store_path()).resolve()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
+        deadline = time.monotonic() + SQLITE_INITIALIZATION_TIMEOUT
+        last_busy: sqlite3.OperationalError | None = None
+        # Initialization lock is separate from transactional claims; never hold it during email sends.
+        with FileLock(str(self.database_path) + ".init.lock", timeout=SQLITE_INITIALIZATION_TIMEOUT):
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if last_busy is not None:
+                        raise last_busy
+                    raise TimeoutError("Order alert SQLite initialization deadline exceeded")
+                try:
+                    with self._connect(timeout=min(0.1, remaining)) as connection:
+                        if connection.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+                            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                            if mode != "wal":
+                                raise RuntimeError(f"Order alert SQLite journal mode is {mode}, not WAL")
+                        self._initialize_schema(connection)
+                    break
+                except sqlite3.OperationalError as error:
+                    code = getattr(error, "sqlite_errorcode", 0) & 0xff
+                    if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                        raise
+                    last_busy = error
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    LOGGER.warning("Order alert SQLite initialization busy; bounded retry: %s", error)
+                    time.sleep(min(0.05, remaining))
+
+    @contextmanager
+    def _connect(self, timeout: float = SQLITE_BUSY_TIMEOUT):
+        with closing(sqlite3.connect(self.database_path, timeout=timeout)) as connection:
             connection.execute("PRAGMA synchronous=FULL")
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS order_notifications (
-                    order_id INTEGER PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    batch_id TEXT,
-                    claimed_until INTEGER,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    recipient TEXT,
-                    updated_at INTEGER NOT NULL,
-                    sent_at INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS order_notifications_batch_idx
-                    ON order_notifications (batch_id, status);
-                CREATE TABLE IF NOT EXISTS order_alert_status (
-                    source TEXT PRIMARY KEY,
-                    started_at INTEGER,
-                    stopped_at INTEGER,
-                    heartbeat_at INTEGER,
-                    interval_seconds INTEGER,
-                    last_check_at INTEGER,
-                    last_check_result TEXT,
-                    last_check_detail TEXT,
-                    last_sent_at INTEGER,
-                    last_sent_count INTEGER,
-                    last_error_at INTEGER,
-                    last_error TEXT,
-                    updated_at INTEGER NOT NULL
-                );
-                """
-            )
+            with connection:
+                yield connection
+
+    @staticmethod
+    def _initialize_schema(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS order_notifications (
+                order_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                batch_id TEXT,
+                claimed_until INTEGER,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                recipient TEXT,
+                updated_at INTEGER NOT NULL,
+                sent_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS order_notifications_batch_idx
+                ON order_notifications (batch_id, status);
+            CREATE TABLE IF NOT EXISTS order_alert_status (
+                source TEXT PRIMARY KEY,
+                started_at INTEGER,
+                stopped_at INTEGER,
+                heartbeat_at INTEGER,
+                interval_seconds INTEGER,
+                last_check_at INTEGER,
+                last_check_result TEXT,
+                last_check_detail TEXT,
+                last_sent_at INTEGER,
+                last_sent_count INTEGER,
+                last_error_at INTEGER,
+                last_error TEXT,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
 
     def import_legacy_sent(self, order_ids: Iterable[int], now: int | None = None) -> None:
         timestamp = int(time.time()) if now is None else int(now)
         values = [(int(order_id), timestamp) for order_id in order_ids]
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.executemany(
                 """
@@ -221,7 +263,7 @@ class OrderAlertStore:
         timestamp = int(time.time()) if now is None else int(now)
         batch_id = uuid.uuid4().hex
         claimed: list[int] = []
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for order_id in dict.fromkeys(int(value) for value in order_ids):
                 row = connection.execute(
@@ -258,7 +300,7 @@ class OrderAlertStore:
 
     def mark_sent(self, batch_id: str, recipient: str, now: int | None = None) -> None:
         timestamp = int(time.time()) if now is None else int(now)
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -272,7 +314,7 @@ class OrderAlertStore:
 
     def mark_failed(self, batch_id: str, error: str, now: int | None = None) -> None:
         timestamp = int(time.time()) if now is None else int(now)
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -294,7 +336,7 @@ class OrderAlertStore:
         if not ids:
             return ()
         placeholders = ",".join("?" for _ in ids)
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 f"""
                 SELECT order_id FROM order_notifications
@@ -310,7 +352,7 @@ class OrderAlertStore:
 
     def _update_status(self, source: str, values: dict[str, Any], now: int) -> None:
         assignments = ", ".join(f"{column} = ?" for column in values)
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "INSERT OR IGNORE INTO order_alert_status (source, updated_at) VALUES (?, ?)",
@@ -360,7 +402,7 @@ class OrderAlertStore:
         self._update_status(source, values, timestamp)
 
     def get_status(self, source: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.database_path, timeout=10) as connection:
+        with self._connect() as connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute(
                 "SELECT * FROM order_alert_status WHERE source = ?",

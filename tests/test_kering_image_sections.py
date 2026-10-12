@@ -262,7 +262,7 @@ def test_search_leading_zeros_and_zip_cache_invalidation(monkeypatch, tmp_path):
     assert EAN in app.selectbox[0].value
     app.text_input(key="kering_image_query").set_value(EAN.lstrip('0')).run()
     assert any("Sin imagenes" in item.value for item in app.info)
-    # A valid cached ZIP is not rebuilt on rerender; corruption invalidates it.
+    # A prepared ZIP is a snapshot; external changes require manual refresh.
     builder = Mock(wraps=ui.prepare_order_zip)
     planner = Mock(wraps=ui.order_export_plan)
     monkeypatch.setattr(ui, "prepare_order_zip", builder)
@@ -278,8 +278,8 @@ def test_search_leading_zeros_and_zip_cache_invalidation(monkeypatch, tmp_path):
     app.run()
     assert builder.call_count == planner.call_count == 1
     record.path.write_bytes(b"corrupt")
-    app.run()
-    assert builder.call_count == 1 and planner.call_count == 2
+    app.button(key="refresh-zip-test").click().run()
+    assert builder.call_count == 1 and planner.call_count == 1
     assert not app.get("download_button")
 
 

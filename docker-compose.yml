@@ -132,6 +132,8 @@ services:
       - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       - ./luxoptica_data:/app/docs/Luxoptica
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 40s
     healthcheck:
       disable: true
     networks:

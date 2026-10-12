@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 import json
-from io import BytesIO
-from pathlib import Path
-from PIL import Image, ImageOps
+from PIL import Image
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -19,6 +17,8 @@ from kering_portal import KeringPortal
 from kering_jobs import prepare_selection, make_loader, schedule_status
 from image_repository import ImageRepository
 from image_exports import order_export_plan, prepare_order_zip, repository_signature
+from image_thumbnails import ThumbnailCache, validate_visible
+from repository_storage import check_image_root
 
 
 SAVE_ICON = ":material/save:"
@@ -290,6 +290,11 @@ def page_transition(state, route):
     previous = state.get("image_page_route")
     if route != previous:
         state["image_page_route"] = route
+        for key in list(state):
+            if key.endswith(("-access", "-records")) or key in {
+                    "image_gallery_access", "luxoptica_selected_image", "luxoptica_selected_bytes",
+                    "image_gallery_zip", "image_gallery_records"}:
+                state.pop(key, None)
         if route == "imagenes-kering":
             state.pop("kering_orders_loaded", None)
 
@@ -531,7 +536,7 @@ def render_attempt(engine, config, store, row):
 
 def render_product(store, ean, result, prefix="product"):
     st.subheader(ean)
-    valid = store.valid_views(ean)
+    valid = {record.view for record in store.repository.catalog_records(ean) if record.pixels}
     reason = result.get("reason", "")
     if reason == "vistas_sin_identificar":
         st.info("Fotos adquiridas; no hay senales suficientes para acreditar las vistas. Revision pendiente.")
@@ -561,34 +566,48 @@ def gallery_rows() -> list[dict]:
 
 
 def render_order_zip(store, order, key):
-    try:
-        plan = cached_export_plan(store.repository, order)
-    except (OSError, ValueError) as error:
-        st.error(str(error))
-        return
-    missing = [product["ean"] for product in plan.manifest["products"] if not product["files"]]
-    st.caption(f"{len(plan.files)} fotos exportables | EAN sin fotos: {', '.join(missing) or 'ninguno'}")
-    if plan.manifest["partial"]:
-        st.warning("Contenido parcial: faltan vistas requeridas o hay lineas sin EAN.")
-        st.write({p["ean"]: p["missing_views"] for p in plan.manifest["products"] if p["missing_views"]})
-    partial_allowed = (st.checkbox("Permitir exportacion parcial", key=f"partial-{key}")
-                       if plan.manifest["partial"] else True)
+    if st.button("Actualizar fotos para ZIP", key=f"refresh-zip-{key}"):
+        st.session_state.pop("kering_prepared_zip", None)
+    products = {}
+    catalog_records = []
+    count = 0
+    for ean in dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]):
+        records = store.repository.catalog_records(ean)
+        catalog_records.extend(records)
+        count += len({(record.name, record.checksum) for record in records})
+        views = {record.view for record in records if record.pixels}
+        products[ean] = [view for view in VIEWS if view not in views]
+    partial = any(products.values()) or any(not line["ean"] for line in order["lines"])
+    st.caption(f"{count} fotos registradas; integridad y contenido se comprueban al preparar ZIP.")
+    if partial:
+        st.warning("Contenido parcial segun catalogo: faltan vistas requeridas o hay lineas sin EAN.")
+        st.write({ean: missing for ean, missing in products.items() if missing})
+    partial_allowed = st.checkbox("Permitir exportacion parcial", key=f"partial-{key}")
     cached = st.session_state.get("kering_prepared_zip")
-    if cached and cached["order_id"] == order["id"] and cached["signature"] != plan.signature:
+    catalog_signature = json.dumps([
+        order, [(r.id, r.ean, r.checksum, r.pixels, str(r.path), r.provider, r.origin,
+                 r.view, r.market, r.name, r.date, r.metadata) for r in catalog_records]
+    ], sort_keys=True)
+    if cached and cached["order_id"] == order["id"] and cached["catalog_signature"] != catalog_signature:
         st.session_state.pop("kering_prepared_zip", None)
         cached = None
-    if st.button(f"Preparar {len(plan.files)} fotos · ZIP", key=f"prepare-{key}",
-                 disabled=not plan.files or not partial_allowed, icon=":material/folder_zip:"):
+    if st.button(f"Preparar {count} fotos · ZIP", key=f"prepare-{key}",
+                 disabled=not count or (partial and not partial_allowed), icon=":material/folder_zip:"):
         try:
+            plan = cached_export_plan(store.repository, order)
+            if plan.manifest["partial"] and not partial_allowed:
+                st.warning("La verificacion detecto contenido parcial; permita exportacion parcial.")
+                return
             with prepare_order_zip(store.repository, order, plan) as export:
                 cached = {"signature": plan.signature, "bytes": export.stream.read(), "name": plan.filename,
-                          "order_id": order["id"]}
+                          "order_id": order["id"], "count": len(plan.files), "partial": plan.manifest["partial"],
+                          "catalog_signature": catalog_signature}
             st.session_state["kering_prepared_zip"] = cached
             st.success("ZIP preparado con fotos actuales y manifiesto.")
         except (OSError, ValueError) as error:
             st.error(f"No se pudo preparar el ZIP: {error}")
-    if cached and cached["signature"] == plan.signature and partial_allowed:
-        st.download_button(f"Descargar {len(plan.files)} fotos · ZIP", cached["bytes"],
+    if cached and cached["order_id"] == order["id"] and (not cached["partial"] or partial_allowed):
+        st.download_button(f"Descargar {cached['count']} fotos · ZIP", cached["bytes"],
                            file_name=cached["name"], mime="application/zip", key=f"download-{key}")
 
 
@@ -603,26 +622,66 @@ def cached_export_plan(repository, order):
     return plans[signature]
 
 
-@st.cache_data(max_entries=64, show_spinner=False)
-def thumbnail(path, signature):
-    with Image.open(Path(path)) as image:
-        image = ImageOps.exif_transpose(image)
-        image.thumbnail((360, 240))
-        buffer = BytesIO()
-        image.convert("RGB").save(buffer, format="JPEG")
-        return buffer.getvalue()
+def thumbnail(repository, record, access, cache=None):
+    return (cache or ThumbnailCache(repository)).get(record, access)
+
+
+def original_for_display(repository, record):
+    current = repository.catalog_records(record_id=record.id)
+    if not current or current[0] != record:
+        raise ValueError("Imagen eliminada o modificada en el catalogo")
+    return repository.verified_bytes(record)
+
+
+def visible_previews(repository, records, access):
+    previews = {}
+    try:
+        with ThumbnailCache(repository).batch(records) as cache:
+            for record in records:
+                try:
+                    previews[record.id] = thumbnail(repository, record, access[record.id], cache)
+                except (OSError, ValueError, RuntimeError, SyntaxError, Image.DecompressionBombError) as error:
+                    previews[record.id] = str(error)
+    except (OSError, ValueError, RuntimeError) as error:
+        previews = {record.id: str(error) for record in records}
+    return previews
+
+
+def visible_access(repository, records, key, *, refresh=False, selection=()):
+    try:
+        check_image_root(repository.root)
+    except (OSError, ValueError, RuntimeError) as error:
+        st.error(f"Repositorio no disponible: {error}")
+        return {record.id: None for record in records}
+    signature = (tuple((r.id, r.checksum, str(r.path), r.date) for r in records), selection)
+    previous = st.session_state.get(key)
+    if refresh or previous is None or previous["signature"] != signature:
+        previous = {"signature": signature, "access": validate_visible(repository, records)}
+        st.session_state[key] = previous
+    return previous["access"]
 
 
 def render_gallery(repository, ean, prefix="product"):
-    records = repository.records(ean)
+    refresh = st.button("Actualizar fotos", key=f"{prefix}-{ean}-refresh")
+    if refresh:
+        st.session_state.pop("kering_prepared_zip", None)
+    records_key = f"{prefix}-{ean}-records"
+    try:
+        if refresh or records_key not in st.session_state:
+            st.session_state[records_key] = repository.catalog_records(ean)
+        records = st.session_state[records_key]
+    except (OSError, ValueError, RuntimeError) as error:
+        st.error(f"Repositorio no disponible: {error}")
+        return
     origins = st.multiselect("Origen", sorted({r.provider for r in records}), key=f"{prefix}-{ean}-origins")
     views = st.multiselect("Vista", sorted({r.view for r in records}), key=f"{prefix}-{ean}-views")
     markets = st.multiselect("Mercado", sorted({r.market or "Original" for r in records}),
                              key=f"{prefix}-{ean}-markets")
     filtered = [r for r in records if (not origins or r.provider in origins)
                 and (not views or r.view in views) and (not markets or (r.market or "Original") in markets)]
-    covered = cached_export_plan(repository, {"id": ean, "name": ean, "lines": [{"ean": ean}]}).manifest["products"][0]
-    st.caption(f"{len(filtered)} fotos | Pendientes: {', '.join(covered['missing_views']) or 'ninguna'}")
+    covered = {r.view for r in records if r.pixels}
+    missing = [view for view in VIEWS if view not in covered]
+    st.caption(f"{len(filtered)} fotos | Vistas sin registrar: {', '.join(missing) or 'ninguna'}")
     if not filtered:
         st.info("Sin fotos para estos filtros.")
         return
@@ -630,23 +689,24 @@ def render_gallery(repository, ean, prefix="product"):
     page = st.number_input("Pagina de fotos", min_value=1, max_value=pages, value=1,
                            key=f"{prefix}-{ean}-page-{pages}")
     columns = st.columns(3)
-    for index, record in enumerate(filtered[(page - 1) * 12:page * 12]):
+    visible = filtered[(page - 1) * 12:page * 12]
+    access = visible_access(repository, visible, f"{prefix}-{ean}-access", refresh=refresh,
+                            selection=(tuple(origins), tuple(views), tuple(markets), page))
+    previews = visible_previews(repository, visible, access)
+    for index, record in enumerate(visible):
         with columns[index % 3]:
-            if record.path.is_file():
-                try:
-                    stat = record.path.stat()
-                    st.image(thumbnail(str(record.path), (stat.st_mtime_ns, stat.st_size)),
-                             caption=f"{record.name} · {record.provider} · {record.view} · {record.market or 'Original'}",
-                             width="stretch")
-                except (OSError, ValueError, Image.DecompressionBombError):
-                    st.warning(f"No se puede mostrar {record.name}")
+            preview = previews[record.id]
+            if isinstance(preview, bytes):
+                st.image(preview,
+                         caption=f"{record.name} · {record.provider} · {record.view} · {record.market or 'Original'}",
+                         width="stretch")
             else:
-                st.warning(f"Archivo ausente: {record.name}")
+                st.warning(f"No se puede mostrar {record.name}: {preview}")
     selected = st.selectbox("Ampliar foto", filtered, format_func=lambda r: f"{r.name} · {r.provider} · {r.market}",
                             key=f"{prefix}-{ean}-enlarge")
     if st.button("Ampliar", key=f"{prefix}-{ean}-show"):
         try:
-            st.image(str(selected.path), caption=selected.name, width="stretch")
+            st.image(original_for_display(repository, selected), caption=selected.name, width="stretch")
             st.caption(f"Origen: {selected.origin} | Vista: {selected.view} | Mercado: {selected.market or 'Original'}")
         except (OSError, ValueError):
             st.error("No se puede abrir esta imagen.")
@@ -662,6 +722,7 @@ def render_gallery(repository, ean, prefix="product"):
                 try:
                     repository.review_view(selected.id, review, reviewer=st.session_state.get("auth_user", "admin"),
                                            reason=reason)
+                    st.session_state.pop(records_key, None)
                     st.success("Clasificacion revisada; archivo y nombre conservados. Historial registrado.")
                     st.rerun()
                 except (OSError, ValueError):
@@ -690,7 +751,14 @@ def render_image_search(store):
         eans = list(dict.fromkeys(line["ean"] for line in order["lines"] if line["ean"]))
         names = {line["ean"]: line.get("product_name", "") for line in order["lines"]}
     else:
-        records = store.repository.records()
+        try:
+            if mode == "EAN exacto" and query.isascii() and query.isdigit() and len(query) <= 20:
+                records = store.repository.catalog_records(query)
+            else:
+                records = store.repository.catalog_records()
+        except (OSError, ValueError, RuntimeError) as error:
+            st.error(f"Repositorio no disponible: {error}")
+            return
         eans = sorted({record.ean for record in records if record.ean == query}) \
             if mode == "EAN exacto" else sorted({record.ean for record in records
             if query.casefold() in str(record.metadata.get("modelo", "")).casefold() or
@@ -701,6 +769,4 @@ def render_image_search(store):
         return
     ean = st.selectbox("Producto / EAN", eans, format_func=lambda value: f"{names.get(value, '')} · {value}")
     st.caption("La consulta directa del repositorio no restringe la antiguedad de las fotos.")
-    missing = cached_export_plan(store.repository, {"id": ean, "name": ean, "lines": [{"ean": ean}]}).manifest["products"][0]["missing_views"]
-    st.write(f"Vistas pendientes: {', '.join(missing) or 'ninguna'}")
     render_gallery(store.repository, ean, "search")

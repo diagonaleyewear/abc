@@ -9,10 +9,11 @@ from datetime import datetime
 import json
 import sys
 from image_repository import ImageRepository, repository_root
+from repository_storage import state_root
 
 def check_download_state():
     """Revisa el archivo de estado de descargas."""
-    state_file = repository_root() / ".mail_download_state.json"
+    state_file = state_root(repository_root()) / ".mail_download_state.json"
     
     print("\n" + "=" * 80)
     print("MONITOREO: Estado de Descargas Automáticas")
@@ -165,7 +166,7 @@ def main():
     if all_ok:
         print(f"\n🎉 TODO ESTÁ LISTO")
         print(f"\n   El sistema descargará automáticamente las imágenes cuando Luxoptica responda.")
-        print(f"   Revisar: {repository_root() / '.mail_download_state.json'}")
+        print(f"   Revisar: {state_root(repository_root()) / '.mail_download_state.json'}")
         return 0
     else:
         print(f"\n⚠️  Hay items que revisar")

@@ -1,0 +1,12 @@
+# Independent preparation tool. Never used to recreate active Cloud services.
+FROM cloud-nfs-isolation:cloud1037
+USER 0:0
+RUN apt-get update && apt-get install -y --no-install-recommends rsync \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY repository_storage.py ./
+COPY scripts/nfs_repository_guard.py scripts/verify_staging_exports.py scripts/precopy_staging.py ./scripts/
+COPY deployment/nfs/staging-layout.tsv ./deployment/nfs/
+ENV PYTHONPATH=/app
+USER 1037:100
+ENTRYPOINT ["python", "-m", "scripts.precopy_staging"]

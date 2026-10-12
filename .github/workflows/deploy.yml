@@ -10,6 +10,7 @@ on:
       - main
       - master
       - 'copilot/**'
+      - 'prep/synology-nfs-images'
 
 concurrency:
   group: abcd-control-deploy-${{ github.ref }}
@@ -100,7 +101,7 @@ jobs:
           test "$(docker inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$EXPECTED_VERSION"
           docker run --rm --network none -e EXPECTED_COMMIT -e EXPECTED_BUILD -e EXPECTED_PUBLISHED -e EXPECTED_VERSION "$IMAGE" python -c "
           import os
-          import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, image_exports, luxoptica_auto_upload
+          import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, image_exports, luxoptica_auto_upload, repository_storage
           from build_info import load_build_info
           info = load_build_info()
           assert info['commit'] == os.environ['EXPECTED_COMMIT']
@@ -110,9 +111,58 @@ jobs:
           assert cloud_dashboard.LOGO.is_file()
           print('Artifact identity and runtime imports verified; network disabled')
           "
+          VOLUME="cloud-identity-smoke-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker volume create "$VOLUME" >/dev/null
+          MONITOR_CONTAINERS=()
+          cleanup_smoke() {
+            for NAME in "${MONITOR_CONTAINERS[@]}"; do
+              if docker inspect "$NAME" >/dev/null 2>&1; then
+                docker rm -f "$NAME" >/dev/null || echo "ERROR cleaning isolated container $NAME" >&2
+              fi
+            done
+            docker volume rm "$VOLUME" >/dev/null || echo "ERROR cleaning isolated smoke volume" >&2
+          }
+          trap cleanup_smoke EXIT
+          docker run --rm --network none --read-only --user 0:0 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            "$IMAGE" sh -c 'mkdir /smoke/state; chown 1037:100 /smoke/state; chmod 0700 /smoke/state'
+          docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
+            --mount "type=volume,source=$VOLUME,target=/smoke" -e CLOUD_SMOKE_DIRECTORY=/smoke/state \
+            -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_image_storage.py
+          docker run --rm --network none --read-only --user 1037:100 --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:size=536870912,mode=1777 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            -e CLOUD_SMOKE_DIRECTORY=/smoke/state -e HOME=/home/cloud-images -e PYTHONPATH=/app \
+            "$IMAGE" python scripts/smoke_image_thumbnails.py
+          docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
+            --mount "type=volume,source=$VOLUME,target=/smoke" -e HOME=/home/cloud-images -e PYTHONPATH=/app \
+            "$IMAGE" python scripts/smoke_luxoptica_stop.py --directory /smoke/state/monitor-stop
+          for SCENARIO in idle download sqlite nfs; do
+            NAME="cloud-monitor-pid1-${{ github.run_id }}-$SCENARIO"
+            MONITOR_CONTAINERS+=("$NAME")
+            DIRECTORY="/smoke/state/pid1-$SCENARIO"
+            docker create --name "$NAME" --network none --read-only --user 1037:100 --cap-drop ALL \
+              --no-healthcheck --tmpfs /tmp:size=536870912,mode=1777 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e HOME=/home/cloud-images \
+              -e PYTHONPATH=/app/scripts/monitor_stop_fixture:/app \
+              -e MONITOR_SMOKE_DIRECTORY="$DIRECTORY" -e MONITOR_SMOKE_SCENARIO="$SCENARIO" \
+              "$IMAGE" python poll_luxoptica_mail.py --interval-minutes 10 --sender-hint luxottica \
+              --subject-hint image --lookback-days 30 --top-messages 100 >/dev/null
+            docker start "$NAME" >/dev/null
+            docker run --rm --network none --read-only --user 1037:100 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e PYTHONPATH=/app "$IMAGE" \
+              python scripts/smoke_luxoptica_stop.py --directory "$DIRECTORY" --wait-ready
+            docker kill --signal TERM "$NAME" >/dev/null
+            docker run --rm --network none --read-only --user 1037:100 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e PYTHONPATH=/app "$IMAGE" \
+              python scripts/smoke_luxoptica_stop.py --directory "$DIRECTORY" --release
+            test "$(timeout 15 docker wait "$NAME")" = 0
+            docker logs "$NAME"
+            docker rm "$NAME" >/dev/null
+          done
+          docker run --rm --network none --read-only --user 1038:100 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            "$IMAGE" python -c "import os; assert all(not os.access('/smoke/state', mode) for mode in (os.R_OK, os.W_OK, os.X_OK)); print('Other UID in users GID100 denied local state')"
 
       - name: Validate Secrets
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CLOUD_AUTO_DEPLOY == 'true'
         run: |
           if [ -z "${{ secrets.SERVER_HOST }}" ]; then
             echo "❌ ERROR: SERVER_HOST secret no configurado"
@@ -133,7 +183,7 @@ jobs:
           echo "✅ Todos los secrets están configurados"
 
       - name: Deploy to Server
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CLOUD_AUTO_DEPLOY == 'true'
         uses: appleboy/ssh-action@master
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -215,8 +265,28 @@ jobs:
       - name: Run offline tests
         run: python -m pytest -q tests test_transform_luxottica_masterdata.py test_validate_masterdata_odoo_dryrun.py
 
+      - name: Benchmark synthetic thumbnail cold and hot reads
+        run: |
+          python -m scripts.benchmark_image_thumbnails \
+            --directory "$GITHUB_WORKSPACE/.thumbnail-benchmark" \
+            --output "$RUNNER_TEMP/thumbnail-benchmark.json"
+
+      - name: Retain synthetic benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbnail-benchmark-synthetic
+          path: ${{ runner.temp }}/thumbnail-benchmark.json
+
       - name: Lint with flake8
         run: |
+          flake8 image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py tests/test_image_work_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/nfs_isolated_probe.py scripts/audit_image_identity.py tests/test_image_service_identity.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/verify_staging_exports.py scripts/test_staging_storage.py tests/test_staging_exports.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/report_migration_review.py scripts/snapshot_sqlite_copy.py tests/test_migration_review.py tests/test_sqlite_snapshot_copy.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 tests/test_staging_precopy_protocol.py tests/test_order_alert_service.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 order_alerts.py scripts/smoke_order_alerts.py tests/test_order_alert_initialization.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/precopy_staging.py tests/test_live_precopy.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py tests/test_cloud_dashboard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 graph_mail_downloader.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -226,6 +296,12 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py
+          sh -n deployment/nfs/remove-failed-staging-units.sh
+          sh -n deployment/nfs/validate-isolated-nfs.sh
+          python -m py_compile scripts/verify_staging_exports.py scripts/test_staging_storage.py
+          python -m py_compile scripts/report_migration_review.py scripts/snapshot_sqlite_copy.py
+          python -m py_compile repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py
           python -m py_compile cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py
           python -m py_compile image_naming.py image_exports.py image_repository.py migrate_image_repository.py graph_mail_downloader.py kering_media.py tests/test_kering_image_sections.py
           python -m py_compile kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py

@@ -60,7 +60,8 @@ def main():
             print(f"\n⏳ No hay imágenes aún (esperando respuesta de Luxoptica)")
         
         print(f"\n📊 Próxima ejecución: Programada automáticamente cada hora")
-        print(f"   Log de estado: {config.download_root / '.mail_download_state.json'}")
+        from repository_storage import state_root
+        print(f"   Log de estado: {state_root(config.download_root) / '.mail_download_state.json'}")
         
         return 0
         
