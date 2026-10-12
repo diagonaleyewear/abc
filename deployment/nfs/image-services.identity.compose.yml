@@ -1,0 +1,15 @@
+# Preparation override only; never apply to active containers before storage/ACL validation.
+x-cloud-image-identity: &cloud-image-identity
+  user: "1037:100"
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  environment:
+    HOME: /home/cloud-images
+
+services:
+  abcd-app:
+    <<: *cloud-image-identity
+  abcd-luxoptica-monitor:
+    <<: *cloud-image-identity
+  abcd-kering-scheduler:
+    <<: *cloud-image-identity

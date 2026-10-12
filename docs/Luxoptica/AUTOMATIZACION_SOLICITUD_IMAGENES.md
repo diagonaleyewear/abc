@@ -1,5 +1,13 @@
 # Automatizacion Solicitud de Imagenes Luxoptica
 
+## Cambio de almacenamiento por EAN
+
+Las rutas por fecha/lote de las secciones siguientes son historicas.
+Las fotografias nuevas y las galerias usan `IMAGE_REPOSITORY_ROOT/<EAN>`.
+Los ZIP recibidos se conservan en `.incoming`, separados del catalogo.
+`M365_DOWNLOAD_ROOT` ya no selecciona una raiz de fotografias distinta.
+Antes del corte, seguir el [plan de migracion](../IMAGE_REPOSITORY.md).
+
 ## Objetivo
 Automatizar el flujo completo desde MASTERDATA hasta la recepcion y descarga de imagenes de producto por lotes.
 

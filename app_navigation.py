@@ -21,8 +21,14 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
                 pages["abc_detail"],
             ],
             "Master Data": [pages["master_import"], pages["master_dictionary"], pages["master_dryrun"]],
-            "Repositorio de imágenes": [pages["luxoptica_images"], pages["luxoptica_pending"]],
+            "Repositorio de imágenes": [
+                pages["luxoptica_images"],
+                pages["luxoptica_pending"],
+                pages["kering_images"],
+            ],
             "Alertas": [pages["alerts"]],
-            "Configuración": [pages["settings"]],
         }
+        if "reconciliation" in pages:
+            groups["Conciliación"] = [pages["reconciliation"]]
+        groups["Configuración"] = [pages["settings"]]
     return st_module.navigation(groups, position="sidebar")

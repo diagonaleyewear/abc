@@ -9,6 +9,8 @@ from datetime import datetime
 import sys
 import time
 import re
+from tempfile import TemporaryDirectory
+from image_repository import ImageRepository
 
 def upload_to_luxoptica(
     url: str = "https://portal.luxottica.com/",
@@ -18,6 +20,58 @@ def upload_to_luxoptica(
     email_destino: str = "images@diagonaleyewear.com",
     headless: bool = False,
     keep_browser_open: bool = False,
+) -> tuple[bool, str]:
+    from process_activity import record_process
+    with record_process("luxoptica-upload") as receipt:
+        result = _prepare_luxoptica_upload(url, username, password, ean_file, email_destino,
+                                          headless, keep_browser_open)
+        receipt["result"] = "Correcto" if result[0] else "Error"
+        return result
+
+
+def _prepare_luxoptica_upload(
+    url: str = "https://portal.luxottica.com/",
+    username: str = "",
+    password: str = "",
+    ean_file: Path | None = None,
+    email_destino: str = "images@diagonaleyewear.com",
+    headless: bool = False,
+    keep_browser_open: bool = False,
+) -> tuple[bool, str]:
+    if ean_file is None:
+        files = sorted((Path(__file__).resolve().parent / "docs" / "Luxoptica").glob(
+            "upc-products-images-request-*.txt"), reverse=True)
+        if not files:
+            return False, "No se encontro fichero de EAN en docs/Luxoptica/"
+        ean_file = files[0]
+    if not ean_file.is_file():
+        return False, f"Fichero no existe: {ean_file}"
+    try:
+        eans = list(dict.fromkeys(ean.strip() for ean in ean_file.read_text(encoding="utf-8").splitlines()
+                                  if ean.strip()))
+        if not eans:
+            return False, "El fichero de solicitud no contiene EAN"
+        repository = ImageRepository()
+        pending = [ean for ean in eans if repository.pending_views(ean, ("frontal", "lateral", "perspectiva"))]
+    except (OSError, ValueError) as error:
+        return False, f"No se pudo consultar el repositorio de imagenes: {error}"
+    if not pending:
+        return True, "Todas las vistas ya disponibles; solicitud reutilizada sin acceso al portal."
+    with TemporaryDirectory(prefix="luxoptica-request-") as directory:
+        request = Path(directory) / ean_file.name
+        request.write_text("\n".join(pending) + "\n", encoding="utf-8")
+        return _upload_to_luxoptica(url, username, password, request, email_destino,
+                                   headless, keep_browser_open)
+
+
+def _upload_to_luxoptica(
+    url: str,
+    username: str,
+    password: str,
+    ean_file: Path,
+    email_destino: str,
+    headless: bool,
+    keep_browser_open: bool,
 ) -> tuple[bool, str]:
     """
     Automatiza la subida de fichero a Luxoptica.

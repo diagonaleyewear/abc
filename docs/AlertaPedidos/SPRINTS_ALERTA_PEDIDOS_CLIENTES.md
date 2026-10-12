@@ -128,25 +128,129 @@ Criterio DoD:
 - Email recibido correctamente en un envio de prueba con datos reales.
 
 ## Sprint 4 - Programacion via cron (0.5-1 dia)
-✅ IMPLEMENTADO
+⚠️ SUSTITUIDO por el servicio `abcd-order-alerts` (ver Sprint 5)
 
-Objetivo: automatizar la comprobacion periodica sin intervencion manual.
+El cron del host nunca se llegó a instalar desde el despliegue (`deploy.yml` solo programa
+la foto semanal), por lo que las alertas solo salían con «Comprobar ahora». El despliegue
+retira ahora cualquier línea de crontab que invoque `run_alerta_pedidos.py` para que cron
+y servicio no se ejecuten a la vez.
+
+Objetivo original: automatizar la comprobacion periodica sin intervencion manual.
 
 Tareas:
 - Script standalone `run_alerta_pedidos.py` (equivalente a
   `poll_luxoptica_mail.py` / `scheduler_luxoptica.py`) que ejecuta la misma
   logica de los Sprints 2-3 (solo pedidos "Pendientes").
-- Registro de pedidos ya notificados en `alerta_pedidos_notificados.json`
-  para evitar alertas duplicadas en ejecuciones sucesivas del cron.
-- Programacion: 2 ejecuciones diarias (07:45 y 12:00) via crontab del host,
-  invocando el script dentro del contenedor Docker (`docker compose exec`).
+- Registro de pedidos ya notificados (hoy en SQLite compartido, issue #19;
+  `alerta_pedidos_notificados.json` solo se importa como legacy).
 
-Entregable:
-- Script ejecutable de forma independiente (`run_alerta_pedidos.py`).
-- Volumen Docker para persistir `alerta_pedidos_notificados.json`.
-- Entradas de crontab documentadas en el README de despliegue.
+## Sprint 5 - Servicio Docker de alertas automáticas - IMPLEMENTADO
 
-Criterio DoD:
-- Ejecucion programada detecta y notifica solo pedidos nuevos desde la
-  ultima ejecucion.
+Contenedor independiente `abcd-order-alerts` (misma imagen que la app) que ejecuta
+`python run_alerta_pedidos.py --loop`. No depende de que nadie tenga la app abierta.
+
+### Reglas de negocio (sin cambios)
+
+| Aspecto | Automático (`abcd-order-alerts`) | Manual («Comprobar ahora») |
+|---|---|---|
+| Estado del pedido | **Solo pendientes**: `state = 'sale'` y (no facturado del todo o con líneas sin entregar). Es `PENDING_CONDITION` de `check_pedidos_vigilados.py`. | Selector Pendientes/Todos |
+| Ventana de fechas | Últimos `ALERTA_PEDIDOS_DIAS_ATRAS` días (180 por defecto) hasta hoy | Desde/Hasta de la UI (30 días por defecto) |
+| Coincidencia | Nombre exacto de cliente o dirección de entrega | Igual |
+| Destinatarios | `ALERT_RECIPIENT_EMAIL` (por defecto roberto@) + virginia.nunez@ | Igual (`order_alerts.alert_recipients`) |
+| Lista de clientes | `WATCHLIST_PATH` (`/app/data/watchlist_clientes.json`) | Igual |
+| Registro de notificados | `ORDER_ALERT_STATE_PATH` (`/app/data/order_alerts.sqlite3`) | Igual |
+| Reintentos de envío | Máx. `ALERTA_PEDIDOS_MAX_INTENTOS_ENVIO` (5) por pedido | Sin límite (acción explícita) |
+
+El automático **no** busca borradores ni pedidos ya facturados y entregados. Cambiar esa
+regla requiere aprobación explícita.
+
+### Deduplicación compartida (issue #19)
+
+- Manual y automático usan `order_alerts.dispatch_order_alerts` sobre el mismo SQLite.
+- Cada pedido se reserva en una transacción `BEGIN IMMEDIATE` (lease de 10 min): dos
+  ejecuciones simultáneas no envían el mismo pedido.
+- Solo se marca `sent` tras una respuesta 2xx de Graph `sendMail`. Un fallo lo deja `failed`
+  con el error y es reintentable. Un timeout ambiguo se trata como fallo: puede repetirse
+  un email, pero nunca se marca como notificado un pedido no confirmado.
+- Tras `ALERTA_PEDIDOS_MAX_INTENTOS_ENVIO` fallos el automático deja de reintentarlo y lo
+  muestra como error; «Comprobar ahora» puede reenviarlo.
+
+### Configuración
+
+| Variable | Defecto | Uso |
+|---|---|---|
+| `ALERTA_PEDIDOS_INTERVALO_MINUTOS` | 5 | Intervalo entre comprobaciones (mín. 1) |
+| `ALERTA_PEDIDOS_DIAS_ATRAS` | 180 | Ventana de búsqueda del automático |
+| `ALERTA_PEDIDOS_REINTENTOS_CONSULTA` | 3 | Intentos de consulta a Odoo por ciclo (esperas 10 s y 30 s) |
+| `ALERTA_PEDIDOS_MAX_INTENTOS_ENVIO` | 5 | Intentos automáticos de envío por pedido |
+| `DB_*`, `M365_*`, `ALERT_RECIPIENT_EMAIL` | — | Mismas variables (anclas YAML) que `abcd-app` |
+
+### Resiliencia
+
+- `restart: unless-stopped` (`always` en producción): arranca con Docker tras reiniciar el
+  servidor. Requiere `systemctl enable docker` en el host.
+- Un error de Odoo, Graph o inesperado se registra y el bucle sigue en el siguiente ciclo.
+- `SIGTERM` (`docker compose stop`) detiene el bucle de inmediato y registra la parada.
+- Healthcheck `python run_alerta_pedidos.py --healthcheck`: unhealthy si no hay latido en
+  `2 × intervalo + 5 min`. Odoo caído **no** marca unhealthy (el proceso sigue vivo).
+
+### Pantalla «Alerta Pedidos»
+
+La sección «Envío automático» muestra última comprobación, último envío y último error, y
+distingue:
+- **Activo** – latido reciente; p. ej. «Sin pedidos pendientes» o «Sin pedidos nuevos».
+- **Activo con error** – la última comprobación falló (Odoo/Graph).
+- **Detenido** – parada ordenada registrada (`docker compose stop`).
+- **Sin actividad** – sin latido reciente: proceso caído o bloqueado.
+- **Nunca iniciado** – el servicio no se ha desplegado.
+
+### Persistencia y permisos en producción
+
+- Lista de clientes y registro SQLite viven en `./masterdata_data` → `/app/data`, montado en
+  `abcd-app` y `abcd-order-alerts`. Está en `.gitignore`, por lo que el `git reset --hard`
+  del despliegue ya no pisa la lista editada desde la app.
+- `./watchlist_clientes.json` y `./alerta_pedidos_notificados.json` se montan `:ro` solo
+  para migrar: mientras no exista `/app/data/watchlist_clientes.json` se lee el legacy; el
+  primer guardado desde la app crea el nuevo fichero (escritura atómica).
+- El servicio corre con `read_only: true`, `tmpfs /tmp` y `no-new-privileges`; en producción
+  además `cap_drop: ALL`. Sin `CAP_DAC_OVERRIDE`, root del contenedor solo escribe si
+  `./masterdata_data` es de root:
+  ```bash
+  sudo chown -R root:root /opt/abcd-control/masterdata_data
+  sudo chmod 750 /opt/abcd-control/masterdata_data
+  ```
+- Si el volumen no es escribible el servicio sale con código 2 y el mensaje
+  «no se puede usar el registro persistente…» en los logs.
+
+**Antes del primer despliegue**, si se editó la lista en el servidor, copiarla al volumen:
+```bash
+cd /opt/abcd-control
+[ -f masterdata_data/watchlist_clientes.json ] || sudo cp watchlist_clientes.json masterdata_data/
+```
+
+### Operación
+
+```bash
+cd /opt/abcd-control
+docker compose up -d abcd-order-alerts                 # arrancar / actualizar
+docker compose ps abcd-order-alerts                    # estado y health
+docker compose logs -f --tail=100 abcd-order-alerts    # un registro por ciclo
+docker compose exec abcd-order-alerts python run_alerta_pedidos.py --healthcheck
+docker inspect --format '{{json .State.Health}}' abcd-order-alerts
+docker compose restart abcd-order-alerts
+docker compose stop abcd-order-alerts                  # la UI mostrará «Detenido»
+crontab -l | grep run_alerta_pedidos || echo "sin cron legacy"
+```
+
+Ejemplos de log:
+```
+[2026-10-02 09:00:00] Servicio de alertas iniciado. Intervalo: 300s.
+[2026-10-02 09:00:01] Comprobación: sin_pedidos. 0 pedidos pendientes (últimos 180 días)
+[2026-10-02 09:05:02] Comprobación: enviado. 3 pendiente(s) (últimos 180 días), 1 nuevo(s)
+[2026-10-02 09:10:31] Comprobación: error_consulta. 5 cliente(s) vigilado(s). ERROR: Consulta Odoo tras 3 intento(s): ...
+```
+
+`python run_alerta_pedidos.py` sin argumentos sigue ejecutando una única comprobación, pero
+se omite si el servicio tiene latido reciente (usar `--force` solo para diagnóstico; la
+deduplicación sigue aplicándose).
 

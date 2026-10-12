@@ -1,0 +1,18 @@
+[Unit]
+Description=Cloud image services gated by persistent Synology NFS
+Requires=docker.service mnt-cloud\x2dimagenes.mount
+After=docker.service network-online.target mnt-cloud\x2dimagenes.mount
+BindsTo=mnt-cloud\x2dimagenes.mount
+ConditionPathExists=/opt/cloud-image-production/active/compose.private.json
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/cloud-image-production
+ExecStart=/usr/bin/docker compose --project-name cloud-nas -f /opt/cloud-image-production/active/compose.private.json up -d --no-build --wait --wait-timeout 180
+ExecStop=/usr/bin/docker compose --project-name cloud-nas -f /opt/cloud-image-production/active/compose.private.json stop --timeout 40
+TimeoutStartSec=240
+TimeoutStopSec=240
+
+[Install]
+WantedBy=multi-user.target

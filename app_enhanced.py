@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
+from image_repository import IMAGE_REPOSITORY_ROOT_ENV, repository_root
 from datetime import date, datetime, timedelta
 import hmac
 import json
@@ -13,10 +14,12 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, URL
 from streamlit_cookies_controller import CookieController
 
 from db_loader import load_odoo_dataframe
+from adyen_reconciliation_ui import render_reconciliation_page
+from kering_images_ui import render_kering_page, render_kering_settings
 from engine import run_abcd_engine
 from db_config import load_db_config, load_env_file
 from transform_luxottica_masterdata import (
@@ -36,17 +39,22 @@ from graph_mail_downloader import (
     download_luxoptica_mail_attachments,
     load_m365_config,
     _refresh_pending_market_images,
+    _model_from_image_name,
+    send_alert_email,
     validate_m365_config,
 )
-from abcd_snapshots import (
-    build_abcd_report_export_df,
-    build_abcd_report_excel_df,
-    build_snapshot_parameters,
-    current_week_start as _current_week_start,
-    engine_source_version,
-    list_abcd_snapshot_refs,
-    load_abcd_snapshot_by_id,
-    save_abcd_weekly_snapshot,
+from watchlist_config import add_customer, load_watchlist, remove_customer, save_watchlist
+from check_pedidos_vigilados import find_matching_orders
+from order_alerts import (
+    LEGACY_NOTIFICATIONS_FILE,
+    RESULT_LABELS,
+    SOURCE_AUTO,
+    SOURCE_MANUAL,
+    OrderAlertStore,
+    alert_recipients,
+    dispatch_order_alerts,
+    import_legacy_notification_file,
+    scheduler_state,
 )
 from auth_session import (
     AuthStateStore,
@@ -66,14 +74,27 @@ from app_exports import (
 from app_navigation import build_navigation
 from app_pages.alerts import render_alerts_page
 from app_pages.luxoptica import render_images_page, render_pending_page
+from abcd_snapshots import (
+    ABCD_SNAPSHOT_TABLE,
+    build_abcd_report_excel_df,
+    build_abcd_report_export_df,
+    build_snapshot_parameters,
+    current_week_start as _current_week_start,
+    engine_source_version,
+    ensure_abcd_snapshot_table as _ensure_abcd_snapshot_table,
+    list_abcd_snapshot_refs,
+    list_abcd_snapshot_dates,
+    load_abcd_snapshot_by_id,
+    load_abcd_weekly_snapshot,
+    save_abcd_weekly_snapshot,
+)
 
 # ==============================================================================
 # CONFIG
 # ==============================================================================
 
-APP_TITLE = "Diagonal Eyewear"
-APP_VERSION = "1.0.6"
-APP_ICON = Path(__file__).resolve().parent / "assets" / "favicon.svg"
+APP_TITLE = "Cloud"
+APP_ICON = Path(__file__).resolve().parent / "logo" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
 AUTH_REMEMBER_DAYS_ENV = "AUTH_REMEMBER_DAYS"
@@ -99,7 +120,7 @@ M365_TENANT_ID_ENV = "M365_TENANT_ID"
 M365_CLIENT_ID_ENV = "M365_CLIENT_ID"
 M365_CLIENT_SECRET_ENV = "M365_CLIENT_SECRET"
 M365_MAILBOX_ENV = "M365_MAILBOX"
-M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
+M365_DOWNLOAD_ROOT_ENV = IMAGE_REPOSITORY_ROOT_ENV
 MASTERDATA_DICTIONARY_FILE = Path(
     os.getenv(
         "MASTERDATA_DICTIONARY_PATH",
@@ -142,9 +163,15 @@ st.set_page_config(
 def get_db_engine():
     """Obtiene conexión a BD (cacheada)"""
     config = load_db_config()
-    return create_engine(
-        f"postgresql://{config.user}:{config.password}@{config.host}:{config.port}/{config.database}"
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=config.user,
+        password=config.password,
+        host=config.host,
+        port=config.port,
+        database=config.database,
     )
+    return create_engine(url)
 
 @st.cache_data(ttl=300)  # Cache por 5 minutos
 def load_data_cached():
@@ -230,14 +257,15 @@ def render_master_dictionary_page() -> None:
 
 
 def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
-    pending_path = images_root / ".market_pending.json"
+    from repository_storage import state_root
+    pending_path = state_root(images_root) / ".market_pending.json"
     if not pending_path.exists():
         return []
 
     try:
         payload = json.loads(pending_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"No se pueden leer los pendientes {pending_path}") from error
 
     if not isinstance(payload, dict):
         return []
@@ -247,13 +275,9 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
         if not isinstance(entry, dict):
             continue
         source = Path(source_name)
-        try:
-            relative_parts = source.relative_to(images_root).parts
-        except ValueError:
-            relative_parts = source.parts
         rows.append(
             {
-                "Modelo": relative_parts[0] if relative_parts else "",
+                "Modelo": _model_from_image_name(source.name),
                 "EAN": str(entry.get("ean", "")),
                 "Archivo": source.name,
                 "Mercados pendientes": ", ".join(entry.get("missing_markets", [])),
@@ -261,40 +285,6 @@ def _load_market_pending_rows(images_root: Path) -> list[dict[str, object]]:
             }
         )
     return rows
-
-
-@st.cache_data(ttl=30)
-def _load_image_catalog(images_root: Path) -> pd.DataFrame:
-    image_extensions = {".jpg", ".jpeg", ".png"}
-    rows: list[dict[str, object]] = []
-    if not images_root.exists():
-        return pd.DataFrame(columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"])
-
-    for image_path in images_root.rglob("*"):
-        if not image_path.is_file() or image_path.suffix.lower() not in image_extensions:
-            continue
-        relative = image_path.relative_to(images_root)
-        if len(relative.parts) < 3:
-            continue
-        model, ean = relative.parts[:2]
-        market = relative.parts[2] if relative.parts[2] in {"Farfetch", "Miinto"} else "Original"
-        rows.append(
-            {
-                "Modelo": model,
-                "EAN": ean,
-                "Mercado": market,
-                "Archivo": image_path.name,
-                "Ruta": str(image_path),
-                "Descargada": image_path.stat().st_mtime,
-                "Fecha": datetime.fromtimestamp(image_path.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
-            }
-        )
-
-    catalog = pd.DataFrame(
-        rows,
-        columns=["Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha"],
-    )
-    return catalog.sort_values("Descargada", ascending=False).reset_index(drop=True)
 
 
 def _read_env_setting(key: str, default: str = "") -> str:
@@ -529,53 +519,12 @@ def _get_cookie_controller() -> CookieController:
     return st.session_state["_cookie_controller"]
 
 
-def _process_login(
-    username: str,
-    password: str,
-    remember: bool,
-    users: dict[str, dict[str, str]],
-    cookie_secret: str,
-    remember_days: int,
-) -> str:
-    attempt_keys = login_bucket_keys(username, getattr(st.context, "ip_address", None))
-    max_attempts = _get_auth_login_limit(
-        AUTH_LOGIN_MAX_ATTEMPTS_ENV,
-        AUTH_LOGIN_MAX_ATTEMPTS_DEFAULT,
-    )
-    window_seconds = _get_auth_login_limit(
-        AUTH_LOGIN_WINDOW_SECONDS_ENV,
-        AUTH_LOGIN_WINDOW_SECONDS_DEFAULT,
-    )
-    auth_store = _get_auth_state_store()
-    if not auth_store.allow_login_attempt(attempt_keys, max_attempts, window_seconds):
-        return "limited"
-
-    user_config = users.get(username)
-    if not user_config or not hmac.compare_digest(password, user_config["password"]):
-        return "invalid"
-
-    auth_store.reset_login_attempts(attempt_keys)
-    st.session_state["authenticated"] = True
-    st.session_state["auth_user"] = username
-    st.session_state["auth_role"] = user_config["role"]
-    st.session_state.pop("auth_session_id", None)
-    st.session_state.pop("auth_session_expires_at", None)
-    signing_key = derive_session_signing_key(cookie_secret, username, user_config["password"])
-    st.session_state["auth_credential_fingerprint"] = signing_key
-    existing_token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
-    existing_claims = verify_auth_token(existing_token, username, signing_key) if existing_token else None
-    if existing_claims:
-        auth_store.revoke_session(existing_claims.session_id, existing_claims.expires_at)
-    if remember:
-        token = _make_auth_token(username, cookie_secret, user_config["password"], remember_days)
-        claims = verify_auth_token(token, username, signing_key)
-        assert claims is not None
-        st.session_state["auth_session_id"] = claims.session_id
-        st.session_state["auth_session_expires_at"] = claims.expires_at
-        _get_cookie_controller().set(AUTH_COOKIE_NAME, token, max_age=remember_days * 86400)
-    else:
+def _remove_auth_cookie() -> None:
+    try:
         _get_cookie_controller().remove(AUTH_COOKIE_NAME)
-    return "success"
+    except KeyError as exc:
+        if exc.args != (AUTH_COOKIE_NAME,):
+            raise
 
 
 def _render_login() -> None:
@@ -600,7 +549,7 @@ def _render_login() -> None:
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Usuario")
         password = st.text_input("Contraseña", type="password")
-        remember = st.checkbox(
+        recordarme = st.checkbox(
             f"Recordarme durante {remember_days} días",
             value=can_remember,
             disabled=not can_remember,
@@ -608,84 +557,131 @@ def _render_login() -> None:
         submitted = st.form_submit_button("Entrar")
 
     if submitted:
-        outcome = _process_login(username, password, remember, users, cookie_secret, remember_days)
-        if outcome == "success":
-            st.rerun()
-        elif outcome == "limited":
+        remote_ip = getattr(st.context, "ip_address", None)
+        attempt_keys = login_bucket_keys(username, remote_ip)
+        max_attempts = _get_auth_login_limit(
+            AUTH_LOGIN_MAX_ATTEMPTS_ENV,
+            AUTH_LOGIN_MAX_ATTEMPTS_DEFAULT,
+        )
+        window_seconds = _get_auth_login_limit(
+            AUTH_LOGIN_WINDOW_SECONDS_ENV,
+            AUTH_LOGIN_WINDOW_SECONDS_DEFAULT,
+        )
+        if not _get_auth_state_store().allow_login_attempt(
+            attempt_keys,
+            max_attempts,
+            window_seconds,
+        ):
             st.error("Demasiados intentos. Espera antes de volver a intentarlo.")
-        else:
-            st.error("Usuario o contraseña incorrectos")
+            st.stop()
+
+        user_config = users.get(username)
+        if user_config and hmac.compare_digest(password, user_config["password"]):
+            _get_auth_state_store().reset_login_attempts(attempt_keys)
+            st.session_state["authenticated"] = True
+            st.session_state["auth_user"] = username
+            st.session_state["auth_role"] = user_config["role"]
+            st.session_state.pop("auth_session_id", None)
+            st.session_state.pop("auth_session_expires_at", None)
+            signing_key = derive_session_signing_key(
+                cookie_secret,
+                username,
+                user_config["password"],
+            )
+            st.session_state["auth_credential_fingerprint"] = signing_key
+            existing_token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
+            existing_claims = (
+                verify_auth_token(existing_token, username, signing_key)
+                if existing_token
+                else None
+            )
+            if existing_claims:
+                _get_auth_state_store().revoke_session(
+                    existing_claims.session_id,
+                    existing_claims.expires_at,
+                )
+            if recordarme:
+                token = _make_auth_token(
+                    username,
+                    cookie_secret,
+                    user_config["password"],
+                    remember_days,
+                )
+                claims = verify_auth_token(token, username, signing_key)
+                assert claims is not None
+                st.session_state["auth_session_id"] = claims.session_id
+                st.session_state["auth_session_expires_at"] = claims.expires_at
+                _get_cookie_controller().set(
+                    AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
+                )
+            else:
+                _remove_auth_cookie()
+            st.rerun()
+        st.error("Usuario o contraseña incorrectos")
 
     st.stop()
-
-
-def _clear_auth_session() -> None:
-    st.session_state["authenticated"] = False
-    for key in (
-        "auth_user",
-        "auth_role",
-        "auth_session_id",
-        "auth_session_expires_at",
-        "auth_credential_fingerprint",
-    ):
-        st.session_state.pop(key, None)
-    _get_cookie_controller().remove(AUTH_COOKIE_NAME)
-
-
-def _authenticated_session_is_valid(users: dict[str, dict[str, str]]) -> bool:
-    username = st.session_state.get("auth_user", "")
-    user_config = users.get(username)
-    if not user_config:
-        return False
-
-    secret = _get_auth_cookie_secret()
-    fingerprint = derive_session_signing_key(secret, username, user_config["password"])
-    if st.session_state.get("auth_role") != user_config["role"]:
-        return False
-    if not hmac.compare_digest(st.session_state.get("auth_credential_fingerprint", ""), fingerprint):
-        return False
-
-    expires_at = st.session_state.get("auth_session_expires_at")
-    if expires_at is not None and int(expires_at) < int(time.time()):
-        return False
-    session_id = st.session_state.get("auth_session_id")
-    return not session_id or not _get_auth_state_store().is_revoked(session_id)
-
-
-def _restore_remembered_session(users: dict[str, dict[str, str]]) -> bool:
-    secret = _get_auth_cookie_secret()
-    if not users or len(secret) < AUTH_COOKIE_SECRET_MIN_LENGTH:
-        return False
-    token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
-    if not token:
-        return False
-
-    for expected_user, user_config in users.items():
-        if not _verify_auth_token(token, expected_user, user_config["password"], secret):
-            continue
-        signing_key = derive_session_signing_key(secret, expected_user, user_config["password"])
-        claims = verify_auth_token(token, expected_user, signing_key)
-        if claims is None:
-            continue
-        st.session_state["authenticated"] = True
-        st.session_state["auth_user"] = expected_user
-        st.session_state["auth_role"] = user_config["role"]
-        st.session_state["auth_session_id"] = claims.session_id
-        st.session_state["auth_session_expires_at"] = claims.expires_at
-        st.session_state["auth_credential_fingerprint"] = signing_key
-        return True
-    return False
 
 
 def require_authentication() -> None:
     """Bloquea la app hasta que el usuario se autentique (incluye sesión recordada por cookie)."""
     users = _get_auth_users()
     if st.session_state.get("authenticated", False):
-        if _authenticated_session_is_valid(users):
+        expected_user = st.session_state.get("auth_user", "")
+        user_config = users.get(expected_user)
+        secret = _get_auth_cookie_secret()
+        current_fingerprint = (
+            derive_session_signing_key(secret, expected_user, user_config["password"])
+            if user_config
+            else ""
+        )
+        session_id = st.session_state.get("auth_session_id")
+        expires_at = st.session_state.get("auth_session_expires_at")
+        session_expired = expires_at is not None and int(expires_at) < int(time.time())
+        credentials_changed = (
+            not user_config
+            or st.session_state.get("auth_role") != user_config["role"]
+            or not hmac.compare_digest(
+                st.session_state.get("auth_credential_fingerprint", ""),
+                current_fingerprint,
+            )
+        )
+        session_revoked = bool(session_id and _get_auth_state_store().is_revoked(session_id))
+        if not credentials_changed and not session_expired and not session_revoked:
             return
-        _clear_auth_session()
-    if not _restore_remembered_session(users):
-        _render_login()
+        st.session_state["authenticated"] = False
+        st.session_state.pop("auth_user", None)
+        st.session_state.pop("auth_role", None)
+        st.session_state.pop("auth_session_id", None)
+        st.session_state.pop("auth_session_expires_at", None)
+        st.session_state.pop("auth_credential_fingerprint", None)
+        _remove_auth_cookie()
+
+    if users:
+        token = _get_cookie_controller().get(AUTH_COOKIE_NAME)
+        secret = _get_auth_cookie_secret()
+        for expected_user, user_config in users.items():
+            if token and len(secret) >= AUTH_COOKIE_SECRET_MIN_LENGTH and _verify_auth_token(
+                token,
+                expected_user,
+                user_config["password"],
+                secret,
+            ):
+                signing_key = derive_session_signing_key(
+                    secret,
+                    expected_user,
+                    user_config["password"],
+                )
+                claims = verify_auth_token(token, expected_user, signing_key)
+                assert claims is not None
+                st.session_state["authenticated"] = True
+                st.session_state["auth_user"] = expected_user
+                st.session_state["auth_role"] = user_config["role"]
+                st.session_state["auth_session_id"] = claims.session_id
+                st.session_state["auth_session_expires_at"] = claims.expires_at
+                st.session_state["auth_credential_fingerprint"] = signing_key
+                return
+
+    _render_login()
 
 
 def require_admin_access() -> None:
@@ -770,7 +766,7 @@ def render_sidebar_shell(section_name: str) -> None:
             st.session_state.pop("auth_role", None)
             st.session_state.pop("auth_session_id", None)
             st.session_state.pop("auth_session_expires_at", None)
-            _get_cookie_controller().remove(AUTH_COOKIE_NAME)
+            _remove_auth_cookie()
             st.rerun()
         st.divider()
         st.markdown("### Información")
@@ -782,41 +778,29 @@ def render_sidebar_shell(section_name: str) -> None:
             - Área Masterdata para transformación y validación previa a Odoo.
             """
         )
-        st.caption(f"Versión {APP_VERSION}")
+        st.caption("Cloud · Catálogo, imágenes y automatizaciones")
 
 
 def render_footer() -> None:
-    st.divider()
-    st.markdown(
-        f"""
-        <div style='text-align: center; color: #888; margin-top: 2rem;'>
-        <small>Diagonal Eyewear | Plataforma ABC y Masterdata | v{APP_VERSION}</small>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    from build_info import render_build_footer
+    render_build_footer()
 
 
 def render_home_page() -> None:
+    from cloud_dashboard import render_dashboard
     render_sidebar_shell("Inicio")
-    st.title(APP_TITLE)
-    st.subheader("Portal interno")
-    st.write("Selecciona una de las dos áreas principales.")
+    pages = {"master": MASTER_IMPORT_PAGE, "dictionary": MASTER_DICTIONARY_PAGE}
+    if st.session_state.get("auth_role") == "admin":
+        pages.update(images=LUXOPTICA_IMAGES_PAGE, luxpending=LUXOPTICA_PENDING_PAGE,
+                     kering=KERING_IMAGES_PAGE, alerts=ALERTA_PEDIDOS_PAGE,
+                     abchistory=ABC_HISTORY_PAGE, config=SETTINGS_PAGE)
+    render_dashboard(pages)
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("### Área ABC")
-        st.write("Análisis ABCD, búsqueda, reportes y detalle de producto.")
-        st.page_link(ABC_HOME_PAGE, label="Entrar en Análisis ABC", use_container_width=True)
-    with col2:
-        st.markdown("### Área Masterdata")
-        st.write("Transformación de Luxottica, advertencias, descargas y dry-run Odoo.")
-        st.page_link(MASTER_IMPORT_PAGE, label="Entrar en Master Data", use_container_width=True)
-    with col3:
-        st.markdown("### Configuración")
-        st.write("Guardar claves y credenciales de integración en el entorno local.")
-        st.page_link(SETTINGS_PAGE, label="Entrar en Configuración", use_container_width=True)
 
+def render_odoo_reconciliation_page() -> None:
+    render_sidebar_shell("Conciliación Odoo")
+    require_admin_access()
+    render_reconciliation_page()
     render_footer()
 
 
@@ -824,6 +808,8 @@ def render_settings_page() -> None:
     render_sidebar_shell("Configuración")
     require_admin_access()
     st.title("Configuración")
+    render_kering_settings(get_db_engine)
+    st.divider()
     st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
 
     current_url = _read_env_setting_any([LUXOPTICA_URL_ENV, LEGACY_ESSILOR_URL_ENV])
@@ -834,7 +820,7 @@ def render_settings_page() -> None:
     current_client_id = _read_env_setting(M365_CLIENT_ID_ENV)
     current_client_secret = _read_env_setting(M365_CLIENT_SECRET_ENV)
     current_mailbox = _read_env_setting(M365_MAILBOX_ENV, "ruben.cebreiros@diagonaleyewear.com")
-    current_download_root = _read_env_setting(M365_DOWNLOAD_ROOT_ENV, "docs/Luxoptica/descargas")
+    current_download_root = str(repository_root())
 
     with st.form("settings_form", clear_on_submit=False):
         st.subheader("Essilor Luxottica")
@@ -857,7 +843,8 @@ def render_settings_page() -> None:
             placeholder="Deja vacío para conservar el actual",
         )
         mailbox_value = st.text_input("Mailbox objetivo", value=current_mailbox)
-        download_root_value = st.text_input("Carpeta destino descargas", value=current_download_root)
+        st.text_input("Repositorio comun (IMAGE_REPOSITORY_ROOT)", value=current_download_root, disabled=True)
+        st.caption("Cambiar en el entorno de todos los servicios tras verificar la migración y reiniciarlos.")
 
         submitted = st.form_submit_button("Guardar configuración", type="primary")
 
@@ -869,7 +856,6 @@ def render_settings_page() -> None:
             M365_TENANT_ID_ENV: tenant_id_value.strip(),
             M365_CLIENT_ID_ENV: client_id_value.strip(),
             M365_MAILBOX_ENV: mailbox_value.strip(),
-            M365_DOWNLOAD_ROOT_ENV: download_root_value.strip(),
         }
         keep_existing_password = not password_value.strip() and bool(current_password)
         keep_existing_client_secret = not client_secret_value.strip() and bool(current_client_secret)
@@ -1280,8 +1266,12 @@ def render_abc_page(abc_page: str | None = None) -> None:
 
 def render_luxoptica_pending_panel() -> None:
     st.subheader("Imágenes pendientes de procesar")
-    images_root = Path(__file__).resolve().parent / "repo" / "images"
-    pending_rows = _load_market_pending_rows(images_root)
+    images_root = repository_root()
+    try:
+        pending_rows = _load_market_pending_rows(images_root)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
     if not pending_rows:
         st.success("No hay imágenes pendientes de procesar.")
         return
@@ -1328,9 +1318,6 @@ def render_luxoptica_pending_panel() -> None:
     )
     selected_row = pending_df.loc[pending_df["Archivo"] == selected_image_name].iloc[0]
     selected_path = Path(str(selected_row["Ruta"]))
-    if not selected_path.is_file() and len(selected_path.parts) >= 3:
-        selected_path = images_root.joinpath(*selected_path.parts[-3:])
-
     if selected_path.is_file():
         st.image(
             str(selected_path),
@@ -1342,6 +1329,174 @@ def render_luxoptica_pending_panel() -> None:
         )
     else:
         st.warning(f"No se encuentra el archivo en el servidor: {selected_path}")
+
+
+def render_luxoptica_images_page() -> None:
+    render_sidebar_shell("Repositorio de imágenes")
+    require_admin_access()
+    st.title("Imágenes")
+    st.caption("Explora las imágenes descargadas por modelo, EAN y mercado.")
+
+    from kering_images_ui import visible_previews, visible_access, original_for_display, service
+    refresh = st.button("Actualizar imagenes", key="image_gallery_refresh")
+    try:
+        repository = service().store.repository
+        if refresh or "image_gallery_records" not in st.session_state:
+            st.session_state["image_gallery_records"] = repository.catalog_records()
+        records = st.session_state["image_gallery_records"]
+        rows = repository.catalog_rows(records)
+    except (OSError, ValueError, RuntimeError) as error:
+        st.error(f"Repositorio no disponible: {error}")
+        return
+    if refresh:
+        st.session_state.pop("image_gallery_zip", None)
+        st.session_state.pop("luxoptica_selected_image", None)
+        st.session_state.pop("luxoptica_selected_bytes", None)
+    # Querying the local catalog never resolves or stats individual NAS paths.
+    image_catalog = pd.DataFrame(rows, columns=[
+        "Modelo", "EAN", "Mercado", "Archivo", "Ruta", "Descargada", "Fecha",
+        "Origen", "Proveedor", "Vista", "Checksum", "RecordId",
+    ]).sort_values("Descargada", ascending=False).reset_index(drop=True)
+
+    st.subheader("Visor de imágenes")
+    search_ean = st.text_input(
+        "Buscar por EAN",
+        placeholder="Introduce el EAN completo o una parte",
+        key="luxoptica_search_ean",
+    ).strip()
+    market_filter = st.selectbox(
+        "Mercado",
+        options=["Todos", "Original", "Farfetch", "Miinto"],
+        key="luxoptica_market_filter",
+    )
+
+    filtered_catalog = image_catalog
+    if search_ean:
+        filtered_catalog = filtered_catalog[
+            filtered_catalog["EAN"].str.contains(search_ean, case=False, na=False)
+        ]
+    if market_filter != "Todos":
+        filtered_catalog = filtered_catalog[filtered_catalog["Mercado"] == market_filter]
+
+    if filtered_catalog.empty:
+        st.info("No hay imágenes que coincidan con la búsqueda.")
+    else:
+        zip_key = (tuple(filtered_catalog["RecordId"]), tuple(filtered_catalog["Checksum"]), market_filter)
+        prepared = st.session_state.get("image_gallery_zip")
+        if prepared and prepared["key"] != zip_key:
+            st.session_state.pop("image_gallery_zip", None)
+            prepared = None
+        if st.button("Preparar ZIP de imagenes", key="image_repository_prepare_zip"):
+            try:
+                selected_zip = repository.zip_eans(
+                    filtered_catalog["EAN"].unique().tolist(),
+                    market=None if market_filter == "Todos" else "" if market_filter == "Original" else market_filter,
+                )
+                prepared = {"key": zip_key, "bytes": selected_zip}
+                st.session_state["image_gallery_zip"] = prepared
+            except (OSError, ValueError) as error:
+                st.error(f"No se puede preparar el ZIP: {error}")
+        if prepared:
+            st.download_button("ZIP de imágenes", prepared["bytes"], file_name="imagenes-ean.zip",
+                               mime="application/zip", key="image_repository_zip")
+        st.caption(
+            f"{len(filtered_catalog):,} imágenes | "
+            f"{filtered_catalog['EAN'].nunique():,} EAN | "
+            f"{filtered_catalog['Modelo'].nunique():,} modelos"
+        )
+        page_size = 24
+        total_pages = max(1, (len(filtered_catalog) + page_size - 1) // page_size)
+        current_page = min(
+            st.session_state.get("luxoptica_gallery_page", 1),
+            total_pages,
+        )
+        page_col, size_col = st.columns([3, 1])
+        with page_col:
+            current_page = st.number_input(
+                "Página",
+                min_value=1,
+                max_value=total_pages,
+                value=current_page,
+                step=1,
+                key="luxoptica_gallery_page_input",
+            )
+        with size_col:
+            st.caption(f"{total_pages} página(s) de {page_size} miniaturas")
+        st.session_state["luxoptica_gallery_page"] = int(current_page)
+
+        start = (int(current_page) - 1) * page_size
+        page_catalog = filtered_catalog.iloc[start : start + page_size]
+        by_id = {record.id: record for record in records}
+        visible = [by_id[int(row["RecordId"])] for _, row in page_catalog.iterrows()]
+        access = visible_access(repository, visible, "image_gallery_access", refresh=refresh,
+                                selection=(search_ean, market_filter, current_page))
+        previews = visible_previews(repository, visible, access)
+        thumbnail_columns = st.columns(4)
+        for position, (row_index, image_row) in enumerate(page_catalog.iterrows()):
+            with thumbnail_columns[position % 4]:
+                record = by_id[int(image_row["RecordId"])]
+                preview = previews[record.id]
+                if isinstance(preview, bytes):
+                    st.image(preview, width="stretch")
+                else:
+                    st.warning(f"No se puede mostrar {record.name}: {preview}")
+                st.caption(
+                    f"{image_row['EAN']} · {image_row['Mercado']}\n"
+                    f"{image_row['Archivo']} · {image_row['Fecha']}"
+                )
+                if st.button(
+                    "Ver imagen",
+                    key=f"luxoptica_view_{row_index}",
+                    width="stretch",
+                    disabled=not isinstance(preview, bytes),
+                ):
+                    try:
+                        st.session_state["luxoptica_selected_bytes"] = original_for_display(repository, record)
+                        st.session_state["luxoptica_selected_image"] = str(image_row["Ruta"])
+                        st.session_state["luxoptica_selected_checksum"] = record.checksum
+                    except (OSError, ValueError) as error:
+                        st.error(f"No se puede abrir la imagen: {error}")
+                    st.rerun()
+
+        selected_path = st.session_state.get("luxoptica_selected_image")
+        if selected_path and selected_path in set(page_catalog["Ruta"]):
+            selected_row = filtered_catalog[filtered_catalog["Ruta"] == selected_path].iloc[0]
+            selected_record = by_id[int(selected_row["RecordId"])]
+            if (not isinstance(previews[selected_record.id], bytes) or
+                    access[selected_record.id] is None or
+                    st.session_state.get("luxoptica_selected_checksum") != selected_record.checksum):
+                st.session_state.pop("luxoptica_selected_image", None)
+                st.session_state.pop("luxoptica_selected_bytes", None)
+                st.warning("Original cambiado o inaccesible; vuelva a abrir la imagen.")
+                return
+            st.markdown("#### Imagen ampliada")
+            viewer_col, details_col = st.columns([2, 1])
+            with viewer_col:
+                st.image(st.session_state["luxoptica_selected_bytes"], caption=selected_row["Archivo"], width="stretch")
+            with details_col:
+                st.write(f"**Modelo:** {selected_row['Modelo']}")
+                st.write(f"**EAN:** {selected_row['EAN']}")
+                st.write(f"**Mercado:** {selected_row['Mercado']}")
+                st.write(f"**Fecha:** {selected_row['Fecha']}")
+                st.write(f"**Archivo:** {selected_row['Archivo']}")
+
+        st.markdown("#### Estructura encontrada")
+        st.dataframe(
+            filtered_catalog[["Modelo", "EAN", "Mercado", "Archivo", "Fecha", "Proveedor", "Vista"]],
+            hide_index=True,
+            width="stretch",
+        )
+
+    render_footer()
+
+
+def render_luxoptica_pending_page() -> None:
+    render_sidebar_shell("Repositorio de imágenes")
+    require_admin_access()
+    st.title("Pendiente Luxoptica")
+    st.caption("Revisa y procesa manualmente las copias pendientes para Farfetch y Miinto.")
+    render_luxoptica_pending_panel()
+    render_footer()
 
 
 def render_master_page(master_page: str | None = None) -> None:
@@ -1484,7 +1639,6 @@ def render_master_page(master_page: str | None = None) -> None:
             request_email = st.text_input("Email para la solicitud", value=default_email, key="luxoptica_request_email_input")
             st.caption("Se generan lotes de 250 EAN máximos por archivo, sin prefijo.")
 
-            eans_available = len(_extract_clean_eans(export_df))
             col_gen_a, col_gen_b = st.columns(2)
 
             with col_gen_a:
@@ -1511,7 +1665,9 @@ def render_master_page(master_page: str | None = None) -> None:
                 )
                 st.session_state["luxoptica_request_email"] = request_email.strip() or default_email
                 st.session_state["luxoptica_generated_files"] = [str(p) for p in generated_files]
-                st.session_state["luxoptica_generated_total_eans"] = min(eans_available, limit) if limit else eans_available
+                st.session_state["luxoptica_generated_total_eans"] = sum(
+                    len(path.read_text(encoding="utf-8").splitlines()) for path in generated_files
+                )
                 st.session_state["luxoptica_processed_files"] = []
 
                 if generated_files:
@@ -1522,7 +1678,7 @@ def render_master_page(master_page: str | None = None) -> None:
                     else:
                         st.success(f"Generados {len(generated_files)} archivo(s) en docs/Luxoptica.")
                 else:
-                    st.warning("No se encontraron EAN válidos para generar archivos.")
+                    st.info("No hay EAN con vistas pendientes para generar archivos.")
 
             generated_files_raw = st.session_state.get("luxoptica_generated_files", [])
             if generated_files_raw:
@@ -1800,6 +1956,194 @@ def render_master_dictionary_page_route() -> None:
     render_master_dictionary_page()
 
 
+def _format_alert_timestamp(value: int | None) -> str:
+    return datetime.fromtimestamp(int(value)).strftime("%d/%m/%Y %H:%M:%S") if value else "—"
+
+
+def _render_order_alert_service_status() -> None:
+    st.subheader("Envío automático")
+    try:
+        status = OrderAlertStore().get_status(SOURCE_AUTO)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se puede leer el registro de alertas: {exc}")
+        return
+
+    state = scheduler_state(status)
+    if state == "never":
+        st.warning(
+            "El servicio automático (contenedor `abcd-order-alerts`) no ha registrado ninguna ejecución. "
+            "Hasta que arranque, las alertas solo se envían con «Comprobar ahora»."
+        )
+        return
+
+    interval_minutes = max(1, int(status.get("interval_seconds") or 300) // 60)
+    result_label = RESULT_LABELS.get(status.get("last_check_result") or "", "—")
+    last_error_at = status.get("last_error_at")
+    last_check_failed = bool(last_error_at) and int(last_error_at) >= int(status.get("last_check_at") or 0)
+    if state == "stopped":
+        st.error(
+            f"Servicio automático DETENIDO desde {_format_alert_timestamp(status.get('stopped_at'))}. "
+            "No se están comprobando pedidos."
+        )
+    elif state == "stale":
+        st.error(
+            f"Servicio automático sin actividad desde {_format_alert_timestamp(status.get('heartbeat_at'))}: "
+            "proceso detenido o bloqueado. No se están comprobando pedidos."
+        )
+    elif last_check_failed:
+        st.warning(f"Servicio activo (cada {interval_minutes} min), pero la última comprobación falló: {result_label}.")
+    else:
+        st.success(f"Servicio activo (cada {interval_minutes} min). Último resultado: {result_label}.")
+
+    col_check, col_sent, col_error = st.columns(3)
+    col_check.markdown(
+        f"**Última comprobación**  \n{_format_alert_timestamp(status.get('last_check_at'))}  \n"
+        f"{result_label}. {status.get('last_check_detail') or ''}"
+    )
+    col_sent.markdown(
+        f"**Último envío**  \n{_format_alert_timestamp(status.get('last_sent_at'))}  \n"
+        + (f"{status.get('last_sent_count')} pedido(s)" if status.get("last_sent_at") else "Sin envíos")
+    )
+    col_error.markdown(
+        f"**Último error**  \n{_format_alert_timestamp(last_error_at)}  \n"
+        f"{status.get('last_error') or 'Sin errores'}"
+    )
+    st.caption(
+        "El envío automático busca solo pedidos confirmados y pendientes (estado 'sale', sin facturar del todo "
+        "o con líneas sin entregar) de la ventana ALERTA_PEDIDOS_DIAS_ATRAS (180 días por defecto). "
+        "Comparte con «Comprobar ahora» la lista de clientes y el registro de pedidos ya notificados."
+    )
+
+
+def render_alerta_pedidos_page() -> None:
+    render_sidebar_shell("Alerta Pedidos")
+    require_admin_access()
+    st.title("Alerta de Pedidos de Clientes Vigilados")
+    st.caption(
+        "Mantén aquí la lista de clientes a vigilar. Se busca coincidencia en el nombre del cliente "
+        "o en la dirección de entrega. Cuando se detecte un pedido, se enviará un email de alerta."
+    )
+
+    watchlist = load_watchlist()
+
+    with st.form("watchlist_add_form", clear_on_submit=True):
+        st.subheader("Añadir cliente a vigilar")
+        new_name = st.text_input(
+            "Nombre exacto del cliente (tal cual figura en Odoo)",
+            placeholder="Ej: Óptica Ejemplo S.L.",
+        )
+        added = st.form_submit_button("Añadir", type="primary")
+
+    if added:
+        if new_name.strip():
+            watchlist = add_customer(new_name)
+            st.success(f"Cliente '{new_name.strip()}' añadido a la lista de vigilancia.")
+        else:
+            st.warning("Introduce un nombre antes de añadir.")
+
+    st.divider()
+    st.subheader("Clientes vigilados")
+    if not watchlist:
+        st.info("No hay clientes en la lista de vigilancia todavía.")
+    else:
+        clientes_editados = st.data_editor(
+            pd.DataFrame({"Cliente": watchlist}),
+            column_config={"Cliente": st.column_config.TextColumn("Cliente vigilado", required=True)},
+            hide_index=True,
+            num_rows="dynamic",
+            key="watchlist_editor",
+        )
+        if st.button("Guardar lista de clientes", type="secondary"):
+            clientes = [
+                str(nombre).strip()
+                for nombre in clientes_editados["Cliente"].dropna().tolist()
+                if str(nombre).strip()
+            ]
+            clientes = list(dict.fromkeys(clientes))
+            save_watchlist(clientes)
+            st.success(f"Lista guardada: {len(clientes)} cliente(s) vigilado(s).")
+            st.rerun()
+
+            cliente_a_quitar = st.selectbox("Cliente a quitar", options=watchlist)
+            if st.button("Quitar cliente", type="secondary"):
+                remove_customer(cliente_a_quitar)
+                st.success(f"Cliente '{cliente_a_quitar}' eliminado de la lista.")
+                st.rerun()
+
+    st.divider()
+    _render_order_alert_service_status()
+
+    st.divider()
+    st.subheader("Comprobar pedidos")
+
+    col_desde, col_hasta, col_estado = st.columns([1, 1, 1])
+    hoy = date.today()
+    fecha_desde = col_desde.date_input("Desde", value=hoy - timedelta(days=30))
+    fecha_hasta = col_hasta.date_input("Hasta", value=hoy)
+    filtro_estado = col_estado.radio("Estado", options=["Pendientes", "Todos"], horizontal=True)
+
+    if st.button("Comprobar ahora", type="primary"):
+        if not watchlist:
+            st.warning("Añade al menos un cliente a la lista de vigilancia antes de comprobar.")
+        elif fecha_desde > fecha_hasta:
+            st.warning("La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.")
+        else:
+            with st.spinner("Consultando pedidos en Odoo..."):
+                try:
+                    resultados = find_matching_orders(
+                        clientes=watchlist,
+                        fecha_desde=fecha_desde,
+                        fecha_hasta=fecha_hasta + timedelta(days=1),
+                        solo_pendientes=(filtro_estado == "Pendientes"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Error al consultar Odoo: {exc}")
+                    resultados = None
+
+            if resultados is not None:
+                if resultados.empty:
+                    st.info("No se han encontrado pedidos para los clientes vigilados en el rango indicado.")
+                else:
+                    st.success(f"Se han encontrado {len(resultados)} pedido(s).")
+                    st.dataframe(resultados, use_container_width=True, hide_index=True)
+
+                    alert_store = OrderAlertStore()
+                    import_legacy_notification_file(alert_store, LEGACY_NOTIFICATIONS_FILE)
+                    load_env_file()
+                    destinatarios = alert_recipients()
+                    with st.spinner(f"Comprobando registro y enviando alerta a {', '.join(destinatarios)}..."):
+                        # Acción explícita: sin límite de intentos para poder reintentar envíos agotados.
+                        dispatch = dispatch_order_alerts(
+                            resultados.to_dict(orient="records"),
+                            alert_store,
+                            send_alert_email,
+                            destinatarios,
+                        )
+                    if dispatch.error:
+                        alert_store.record_check(
+                            SOURCE_MANUAL, "error_envio", error=dispatch.error
+                        )
+                        st.error(f"No se pudo enviar el email de alerta: {dispatch.error}")
+                    elif dispatch.sent:
+                        alert_store.record_check(
+                            SOURCE_MANUAL, "enviado", sent_count=len(dispatch.new_rows)
+                        )
+                        st.success(f"Email de alerta enviado a {', '.join(destinatarios)}.")
+                    else:
+                        alert_store.record_check(SOURCE_MANUAL, "ya_notificados")
+                        st.info("Los pedidos ya están notificados o hay otra ejecución procesándolos.")
+
+    render_footer()
+
+
+def render_kering_images_page() -> None:
+    render_sidebar_shell("Imagenes Kering")
+    require_admin_access()
+    render_kering_page(get_db_engine)
+    render_footer()
+
+
+KERING_IMAGES_PAGE = st.Page(render_kering_images_page, title="Imágenes Kering", url_path="imagenes-kering")
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
@@ -1815,8 +2159,6 @@ LUXOPTICA_IMAGES_PAGE = st.Page(
         render_sidebar_shell=render_sidebar_shell,
         require_admin_access=require_admin_access,
         render_footer=render_footer,
-        load_image_catalog=_load_image_catalog,
-        application_root=Path(__file__).resolve().parent,
     ),
     title="Imágenes",
     icon="🖼️",
@@ -1846,6 +2188,7 @@ ALERTA_PEDIDOS_PAGE = st.Page(
     url_path="alerta-pedidos",
 )
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
+ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", url_path="conciliacion-odoo")
 
 navigation = build_navigation(
     st,
@@ -1862,9 +2205,15 @@ navigation = build_navigation(
         "master_dictionary": MASTER_DICTIONARY_PAGE,
         "luxoptica_images": LUXOPTICA_IMAGES_PAGE,
         "luxoptica_pending": LUXOPTICA_PENDING_PAGE,
+        "kering_images": KERING_IMAGES_PAGE,
         "alerts": ALERTA_PEDIDOS_PAGE,
+        "reconciliation": ODOO_RECONCILIATION_PAGE,
         "settings": SETTINGS_PAGE,
     },
 )
 
+from kering_images_ui import page_transition
+page_transition(st.session_state, navigation.url_path)
+from cloud_dashboard import dashboard_transition
+dashboard_transition(st.session_state, navigation.url_path)
 navigation.run()

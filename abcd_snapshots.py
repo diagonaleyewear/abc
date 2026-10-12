@@ -116,6 +116,10 @@ def _json_object(value: Any) -> dict[str, Any]:
 def ensure_abcd_snapshot_table(engine) -> None:
     with engine.begin() as connection:
         connection.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key)::bigint)"),
+            {"lock_key": ABCD_SNAPSHOT_TABLE},
+        )
+        connection.execute(
             text(
                 f"""
                 CREATE TABLE IF NOT EXISTS {ABCD_SNAPSHOT_TABLE} (

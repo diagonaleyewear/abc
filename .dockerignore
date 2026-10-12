@@ -76,3 +76,13 @@ inicio/
 .env
 .env.local
 .env.*.local
+.env.prod
+masterdata_data/
+repo/
+luxoptica_data/
+image-thumbnails/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.enc
+*.key

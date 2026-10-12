@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from image_repository import ImageRepository
 from app_exports import (
     dataframe_to_excel_bytes,
     extract_clean_eans,
@@ -38,7 +39,8 @@ def test_luxoptica_eans_are_cleaned_and_deduplicated() -> None:
     assert extract_clean_eans(source) == ["000123", "12345"]
 
 
-def test_request_files_keep_manifest_and_txt_batch_content(tmp_path) -> None:
+def test_request_files_keep_manifest_and_txt_batch_content(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "image-repository"))
     source = pd.DataFrame(
         [
             {"Barcode": "ES.00123", "Modelo": "Model A", "Color": "01"},
@@ -52,6 +54,26 @@ def test_request_files_keep_manifest_and_txt_batch_content(tmp_path) -> None:
     assert files[0].read_text(encoding="utf-8").strip() == "00123"
     manifest = json.loads(files[0].with_suffix(".manifest.json").read_text(encoding="utf-8"))
     assert manifest["products"] == [{"ean": "00123", "modelo": "Model A", "color": "01"}]
+
+
+def test_request_files_only_include_eans_with_pending_views(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "image-repository"))
+    monkeypatch.setattr(
+        ImageRepository,
+        "pending_views",
+        lambda self, ean, required: () if ean == "00123" else required,
+    )
+    source = pd.DataFrame(
+        [
+            {"Barcode": "00123", "Modelo": "Model A", "Color": "01"},
+            {"Barcode": "00456", "Modelo": "Model B", "Color": "02"},
+        ]
+    )
+
+    files = generate_luxoptica_request_files(source, tmp_path)
+
+    assert len(files) == 1
+    assert files[0].read_text(encoding="utf-8").strip() == "00456"
 
 
 def test_excel_export_and_warning_split_remain_data_only() -> None:

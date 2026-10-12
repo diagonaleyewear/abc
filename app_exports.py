@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from image_repository import ImageRepository
+
 
 def load_masterdata_file(file_source) -> pd.DataFrame:
     """Load a MASTERDATA workbook while preserving identifiers as text."""
@@ -149,6 +151,11 @@ def generate_luxoptica_request_files(
 ) -> list[Path]:
     """Generate the TXT batches and JSON manifests for Luxottica image requests."""
     products = extract_luxoptica_products(dataframe)
+    repository = ImageRepository()
+    products = [
+        product for product in products
+        if repository.pending_views(product["ean"], ("frontal", "lateral", "perspectiva"))
+    ]
     if max_total_eans is not None and max_total_eans > 0:
         products = products[:max_total_eans]
     if not products:
