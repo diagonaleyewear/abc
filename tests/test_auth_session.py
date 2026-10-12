@@ -67,3 +67,46 @@ def test_concurrent_login_attempts_cannot_exceed_limit(tmp_path) -> None:
         )
 
     assert sum(results) == 3
+
+
+def _load_auth_cookie_remover(controller):
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "app_enhanced.py"
+    module = ast.parse(source.read_text(encoding="utf-8"))
+    function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_remove_auth_cookie")
+    namespace = {"_get_cookie_controller": lambda: controller, "AUTH_COOKIE_NAME": "synthetic_auth_cookie"}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["_remove_auth_cookie"]
+
+
+def test_remove_auth_cookie_is_idempotent_with_real_controller(monkeypatch):
+    import streamlit_cookies_controller.cookie_controller as cookies_module
+
+    commands = []
+    monkeypatch.setattr(cookies_module, "_cookie_controller", lambda **kwargs: commands.append(kwargs))
+    controller = cookies_module.CookieController.__new__(cookies_module.CookieController)
+    controller._CookieController__cookies = {}
+    remove = _load_auth_cookie_remover(controller)
+
+    remove()
+    controller._CookieController__cookies["synthetic_auth_cookie"] = "synthetic_token"
+    remove()
+    remove()
+
+    assert controller._CookieController__cookies == {}
+    assert len(commands) == 3
+    assert all(command["method"] == "remove" and command["name"] == "synthetic_auth_cookie" for command in commands)
+
+
+def test_remove_auth_cookie_does_not_hide_unrelated_errors():
+    import pytest
+
+    class BrokenController:
+        def remove(self, name):
+            raise KeyError("unrelated_key")
+
+    remove = _load_auth_cookie_remover(BrokenController())
+    with pytest.raises(KeyError, match="unrelated_key"):
+        remove()

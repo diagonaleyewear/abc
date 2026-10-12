@@ -1,0 +1,13 @@
+# Preparation only: merge LAST with the verified active Compose, never replace it.
+services:
+  abcd-app:
+    environment:
+      IMAGE_THUMBNAIL_CACHE_ROOT: /cache/thumbnails
+      IMAGE_THUMBNAIL_CACHE_MAX_BYTES: ${IMAGE_THUMBNAIL_CACHE_MAX_BYTES:-1073741824}
+      IMAGE_THUMBNAIL_CACHE_RESERVE_BYTES: ${IMAGE_THUMBNAIL_CACHE_RESERVE_BYTES:-2147483648}
+    volumes:
+      - type: bind
+        source: ${CLOUD_THUMBNAIL_CACHE_HOST_PATH:?Set an existing independent local persistent directory}
+        target: /cache/thumbnails
+        bind:
+          create_host_path: false

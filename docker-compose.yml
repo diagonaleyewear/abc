@@ -1,62 +1,86 @@
+# Variables compartidas por la app y el servicio de alertas (mismas credenciales y destinatarios).
+x-cloud-build: &cloud-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    BUILD_COMMIT: ${BUILD_COMMIT:-}
+    BUILD_ID: ${BUILD_ID:-}
+    BUILD_PUBLISHED: ${BUILD_PUBLISHED:-}
+    BUILD_VERSION: ${BUILD_VERSION:-}
+
+x-odoo-env: &odoo-env
+  DB_HOST: ${DB_HOST}
+  DB_PORT: ${DB_PORT}
+  DB_NAME: ${DB_NAME}
+  DB_USER: ${DB_USER}
+  DB_PASSWORD: ${DB_PASSWORD}
+
+x-graph-env: &graph-env
+  M365_TENANT_ID: ${M365_TENANT_ID}
+  M365_CLIENT_ID: ${M365_CLIENT_ID}
+  M365_CLIENT_SECRET: ${M365_CLIENT_SECRET}
+  M365_MAILBOX: ${M365_MAILBOX}
+
+x-order-alert-env: &order-alert-env
+  ALERT_RECIPIENT_EMAIL: ${ALERT_RECIPIENT_EMAIL}
+  ORDER_ALERT_STATE_PATH: ${ORDER_ALERT_STATE_PATH:-/app/data/order_alerts.sqlite3}
+  WATCHLIST_PATH: ${WATCHLIST_PATH:-/app/data/watchlist_clientes.json}
+  ALERTA_PEDIDOS_DIAS_ATRAS: ${ALERTA_PEDIDOS_DIAS_ATRAS:-180}
+  ALERTA_PEDIDOS_INTERVALO_MINUTOS: ${ALERTA_PEDIDOS_INTERVALO_MINUTOS:-5}
+  ALERTA_PEDIDOS_REINTENTOS_CONSULTA: ${ALERTA_PEDIDOS_REINTENTOS_CONSULTA:-3}
+  ALERTA_PEDIDOS_MAX_INTENTOS_ENVIO: ${ALERTA_PEDIDOS_MAX_INTENTOS_ENVIO:-5}
+  TZ: Europe/Madrid
+  PROCESS_ACTIVITY_PATH: /app/data/process_activity.sqlite3
+
 services:
   abcd-app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *cloud-build
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-control
     ports:
       - "8501:8501"
     environment:
-      # Configuración de Base de Datos (desde .env)
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - APP_USERNAME=${APP_USERNAME}
-      - APP_PASSWORD=${APP_PASSWORD}
-      - MASTERDATA_USERNAME=${MASTERDATA_USERNAME}
-      - MASTERDATA_PASSWORD=${MASTERDATA_PASSWORD}
+      <<: [*odoo-env, *graph-env, *order-alert-env]
+      APP_USERNAME: ${APP_USERNAME}
+      APP_PASSWORD: ${APP_PASSWORD}
+      MASTERDATA_USERNAME: ${MASTERDATA_USERNAME}
+      MASTERDATA_PASSWORD: ${MASTERDATA_PASSWORD}
 
-      # Microsoft 365 / Graph API (envío de alertas y descarga Luxoptica)
-      - M365_TENANT_ID=${M365_TENANT_ID}
-      - M365_CLIENT_ID=${M365_CLIENT_ID}
-      - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
-      - M365_MAILBOX=${M365_MAILBOX}
-      - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT:-/app/repo/images}
-      - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
+      # Microsoft 365 / Graph API (descarga Luxoptica)
+      IMAGE_REPOSITORY_ROOT: ${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
+      MASTERDATA_DICTIONARY_PATH: ${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
 
-      # Alerta de pedidos vigilados
-      - ALERT_RECIPIENT_EMAIL=${ALERT_RECIPIENT_EMAIL}
-      - ORDER_ALERT_STATE_PATH=${ORDER_ALERT_STATE_PATH:-/app/data/order_alerts.sqlite3}
-      - AUTH_REMEMBER_DAYS=${AUTH_REMEMBER_DAYS}
-      - AUTH_COOKIE_SECRET=${AUTH_COOKIE_SECRET}
-      - AUTH_STATE_PATH=${AUTH_STATE_PATH:-/app/data/auth_state.sqlite3}
+      AUTH_REMEMBER_DAYS: ${AUTH_REMEMBER_DAYS}
+      AUTH_COOKIE_SECRET: ${AUTH_COOKIE_SECRET}
+      AUTH_STATE_PATH: ${AUTH_STATE_PATH:-/app/data/auth_state.sqlite3}
+      KERING_DATA_ROOT: /app/data/kering
+      KERING_ENCRYPTION_KEY: ${KERING_ENCRYPTION_KEY:-}
+      KERING_ENCRYPTION_KEY_FILE: ${KERING_ENCRYPTION_KEY_FILE:-}
 
       # Luxoptica (subida/descarga automática)
-      - LUXOPTICA_URL=${LUXOPTICA_URL}
-      - LUXOPTICA_USERNAME=${LUXOPTICA_USERNAME}
-      - LUXOPTICA_PASSWORD=${LUXOPTICA_PASSWORD}
-      - LUXOPTICA_REQUEST_EMAIL=${LUXOPTICA_REQUEST_EMAIL}
+      LUXOPTICA_URL: ${LUXOPTICA_URL}
+      LUXOPTICA_USERNAME: ${LUXOPTICA_USERNAME}
+      LUXOPTICA_PASSWORD: ${LUXOPTICA_PASSWORD}
+      LUXOPTICA_REQUEST_EMAIL: ${LUXOPTICA_REQUEST_EMAIL}
 
       # Configuración de Streamlit
-      - STREAMLIT_SERVER_HEADLESS=true
-      - STREAMLIT_SERVER_PORT=8501
-      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
-      - STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=true
-      - STREAMLIT_LOGGER_LEVEL=info
-      - PYTHONUNBUFFERED=1
-      - TZ=Europe/Madrid
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_SERVER_PORT: "8501"
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "true"
+      STREAMLIT_LOGGER_LEVEL: info
+      PYTHONUNBUFFERED: "1"
     
     # Volúmenes para desarrollo (comentar en producción)
     # volumes:
     #   - .:/app
     volumes:
-      - ./watchlist_clientes.json:/app/watchlist_clientes.json
-      - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json
+      # Lista de clientes y registro de alertas viven en ./masterdata_data (compartido con abcd-order-alerts).
+      # Los ficheros legacy solo se leen para migrar.
+      - ./watchlist_clientes.json:/app/watchlist_clientes.json:ro
+      - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json:ro
       - ./masterdata_data:/app/data
-      - ./repo/images:/app/repo/images
+      - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       - ./luxoptica_data:/app/docs/Luxoptica
     
     # Restart policy
@@ -84,9 +108,7 @@ services:
       - abcd-network
 
   abcd-luxoptica-monitor:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: *cloud-build
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-luxoptica-monitor
     command: ["python", "poll_luxoptica_mail.py", "--interval-minutes", "10", "--sender-hint", "luxottica", "--subject-hint", "image", "--lookback-days", "30", "--top-messages", "100"]
@@ -100,17 +122,96 @@ services:
       - M365_CLIENT_ID=${M365_CLIENT_ID}
       - M365_CLIENT_SECRET=${M365_CLIENT_SECRET}
       - M365_MAILBOX=${M365_MAILBOX}
-      - M365_DOWNLOAD_ROOT=${M365_DOWNLOAD_ROOT:-/app/repo/images}
+      - IMAGE_REPOSITORY_ROOT=${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
+      - PROCESS_ACTIVITY_PATH=/app/data/process_activity.sqlite3
       - MASTERDATA_DICTIONARY_PATH=${MASTERDATA_DICTIONARY_PATH:-/app/data/masterdata_dictionary.json}
       - TZ=Europe/Madrid
       - PYTHONUNBUFFERED=1
     volumes:
       - ./masterdata_data:/app/data
-      - ./repo/images:/app/repo/images
+      - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
       - ./luxoptica_data:/app/docs/Luxoptica
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 40s
     healthcheck:
       disable: true
+    networks:
+      - abcd-network
+
+  abcd-kering-scheduler:
+    build: *cloud-build
+    image: ${ABCD_IMAGE_REF:-abcd-control:local}
+    command: ["python", "kering_jobs.py"]
+    environment:
+      <<: *odoo-env
+      KERING_DATA_ROOT: /app/data/kering
+      IMAGE_REPOSITORY_ROOT: ${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
+      KERING_ENCRYPTION_KEY: ${KERING_ENCRYPTION_KEY:-}
+      KERING_ENCRYPTION_KEY_FILE: ${KERING_ENCRYPTION_KEY_FILE:-}
+      TZ: Europe/Madrid
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./masterdata_data:/app/data
+      - ${IMAGE_REPOSITORY_HOST_ROOT:-./image_repository}:${IMAGE_REPOSITORY_ROOT:-/app/repo/images}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    networks:
+      - abcd-network
+
+  # Comprobación periódica de pedidos de clientes vigilados (sustituye al cron de run_alerta_pedidos.py).
+  abcd-order-alerts:
+    build: *cloud-build
+    image: ${ABCD_IMAGE_REF:-abcd-control:local}
+    container_name: abcd-order-alerts
+    command: ["python", "run_alerta_pedidos.py", "--loop"]
+    environment:
+      <<: [*odoo-env, *graph-env, *order-alert-env]
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./masterdata_data:/app/data
+      - ./watchlist_clientes.json:/app/watchlist_clientes.json:ro
+      - ./alerta_pedidos_notificados.json:/app/alerta_pedidos_notificados.json:ro
+    # Solo escribe en /app/data (SQLite + WAL) y /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "run_alerta_pedidos.py", "--healthcheck"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
     networks:
       - abcd-network
 

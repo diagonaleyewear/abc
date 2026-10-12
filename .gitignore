@@ -62,6 +62,8 @@ snapshots/
 
 # Generated image downloads
 repo/
+image_repository/
+image-thumbnails/
 masterdata_data/
 luxoptica_data/
 docs/MasterData/masterdata_dictionary.json

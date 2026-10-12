@@ -139,6 +139,12 @@ def load_abcd_weekly_snapshot(engine, snapshot_date: date) -> pd.DataFrame:
 
 
 def main() -> int:
+    from process_activity import record_process
+    with record_process("abc-snapshot") as receipt:
+        return _run_snapshot(receipt)
+
+
+def _run_snapshot(receipt) -> int:
     engine = get_db_engine()
     df = load_odoo_dataframe()
     df_classified = run_abcd_engine(df.copy())
@@ -153,6 +159,7 @@ def main() -> int:
         )
 
     print(f"Snapshot ABCD guardado: {snapshot_date} | productos={len(snapshot_df)}")
+    receipt["counts"] = {"Productos": len(snapshot_df)}
     return 0
 
 

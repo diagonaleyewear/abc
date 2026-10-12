@@ -10,6 +10,7 @@ on:
       - main
       - master
       - 'copilot/**'
+      - 'prep/synology-nfs-images'
 
 concurrency:
   group: abcd-control-deploy-${{ github.ref }}
@@ -33,6 +34,14 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Identify exact artifact source
+        id: provenance
+        run: |
+          COMMIT="$(git rev-parse HEAD)"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "version=sha-${COMMIT:0:12}" >> "$GITHUB_OUTPUT"
+          echo "published=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Container Registry
         if: github.event_name == 'push'
@@ -61,12 +70,99 @@ jobs:
           context: .
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          load: ${{ github.event_name == 'pull_request' }}
+          build-args: |
+            BUILD_COMMIT=${{ steps.provenance.outputs.commit }}
+            BUILD_VERSION=${{ steps.provenance.outputs.version }}
+            BUILD_PUBLISHED=${{ steps.provenance.outputs.published }}
+            BUILD_ID=actions-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.revision=${{ steps.provenance.outputs.commit }}
+            org.opencontainers.image.created=${{ steps.provenance.outputs.published }}
+            org.opencontainers.image.version=${{ steps.provenance.outputs.version }}
+
+      - name: Verify built artifact identity and runtime imports
+        env:
+          EXPECTED_COMMIT: ${{ steps.provenance.outputs.commit }}
+          EXPECTED_BUILD: actions-${{ github.run_id }}-${{ github.run_attempt }}
+          EXPECTED_PUBLISHED: ${{ steps.provenance.outputs.published }}
+          EXPECTED_VERSION: ${{ steps.provenance.outputs.version }}
+          ARTIFACT_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          IMAGE="$(printf '%s\n' "$ARTIFACT_TAGS" | head -n 1)"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.image.outputs.digest }}"
+            docker pull "$IMAGE"
+          fi
+          test "$(docker inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$EXPECTED_COMMIT"
+          test "$(docker inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$EXPECTED_VERSION"
+          docker run --rm --network none -e EXPECTED_COMMIT -e EXPECTED_BUILD -e EXPECTED_PUBLISHED -e EXPECTED_VERSION "$IMAGE" python -c "
+          import os
+          import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, image_exports, luxoptica_auto_upload, repository_storage
+          from build_info import load_build_info
+          info = load_build_info()
+          assert info['commit'] == os.environ['EXPECTED_COMMIT']
+          assert info['build'] == os.environ['EXPECTED_BUILD']
+          assert info['published'] == os.environ['EXPECTED_PUBLISHED']
+          assert info['version'] == os.environ['EXPECTED_VERSION']
+          assert cloud_dashboard.LOGO.is_file()
+          print('Artifact identity and runtime imports verified; network disabled')
+          "
+          VOLUME="cloud-identity-smoke-${{ github.run_id }}-${{ github.run_attempt }}"
+          docker volume create "$VOLUME" >/dev/null
+          MONITOR_CONTAINERS=()
+          cleanup_smoke() {
+            for NAME in "${MONITOR_CONTAINERS[@]}"; do
+              if docker inspect "$NAME" >/dev/null 2>&1; then
+                docker rm -f "$NAME" >/dev/null || echo "ERROR cleaning isolated container $NAME" >&2
+              fi
+            done
+            docker volume rm "$VOLUME" >/dev/null || echo "ERROR cleaning isolated smoke volume" >&2
+          }
+          trap cleanup_smoke EXIT
+          docker run --rm --network none --read-only --user 0:0 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            "$IMAGE" sh -c 'mkdir /smoke/state; chown 1037:100 /smoke/state; chmod 0700 /smoke/state'
+          docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
+            --mount "type=volume,source=$VOLUME,target=/smoke" -e CLOUD_SMOKE_DIRECTORY=/smoke/state \
+            -e HOME=/home/cloud-images -e PYTHONPATH=/app "$IMAGE" python scripts/smoke_image_storage.py
+          docker run --rm --network none --read-only --user 1037:100 --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:size=536870912,mode=1777 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            -e CLOUD_SMOKE_DIRECTORY=/smoke/state -e HOME=/home/cloud-images -e PYTHONPATH=/app \
+            "$IMAGE" python scripts/smoke_image_thumbnails.py
+          docker run --rm --network none --read-only --user 1037:100 --tmpfs /tmp:size=536870912,mode=1777 \
+            --mount "type=volume,source=$VOLUME,target=/smoke" -e HOME=/home/cloud-images -e PYTHONPATH=/app \
+            "$IMAGE" python scripts/smoke_luxoptica_stop.py --directory /smoke/state/monitor-stop
+          for SCENARIO in idle download sqlite nfs; do
+            NAME="cloud-monitor-pid1-${{ github.run_id }}-$SCENARIO"
+            MONITOR_CONTAINERS+=("$NAME")
+            DIRECTORY="/smoke/state/pid1-$SCENARIO"
+            docker create --name "$NAME" --network none --read-only --user 1037:100 --cap-drop ALL \
+              --no-healthcheck --tmpfs /tmp:size=536870912,mode=1777 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e HOME=/home/cloud-images \
+              -e PYTHONPATH=/app/scripts/monitor_stop_fixture:/app \
+              -e MONITOR_SMOKE_DIRECTORY="$DIRECTORY" -e MONITOR_SMOKE_SCENARIO="$SCENARIO" \
+              "$IMAGE" python poll_luxoptica_mail.py --interval-minutes 10 --sender-hint luxottica \
+              --subject-hint image --lookback-days 30 --top-messages 100 >/dev/null
+            docker start "$NAME" >/dev/null
+            docker run --rm --network none --read-only --user 1037:100 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e PYTHONPATH=/app "$IMAGE" \
+              python scripts/smoke_luxoptica_stop.py --directory "$DIRECTORY" --wait-ready
+            docker kill --signal TERM "$NAME" >/dev/null
+            docker run --rm --network none --read-only --user 1037:100 \
+              --mount "type=volume,source=$VOLUME,target=/smoke" -e PYTHONPATH=/app "$IMAGE" \
+              python scripts/smoke_luxoptica_stop.py --directory "$DIRECTORY" --release
+            test "$(timeout 15 docker wait "$NAME")" = 0
+            docker logs "$NAME"
+            docker rm "$NAME" >/dev/null
+          done
+          docker run --rm --network none --read-only --user 1038:100 --mount "type=volume,source=$VOLUME,target=/smoke" \
+            "$IMAGE" python -c "import os; assert all(not os.access('/smoke/state', mode) for mode in (os.R_OK, os.W_OK, os.X_OK)); print('Other UID in users GID100 denied local state')"
 
       - name: Validate Secrets
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CLOUD_AUTO_DEPLOY == 'true'
         run: |
           if [ -z "${{ secrets.SERVER_HOST }}" ]; then
             echo "❌ ERROR: SERVER_HOST secret no configurado"
@@ -87,7 +183,7 @@ jobs:
           echo "✅ Todos los secrets están configurados"
 
       - name: Deploy to Server
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CLOUD_AUTO_DEPLOY == 'true'
         uses: appleboy/ssh-action@master
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -142,16 +238,6 @@ jobs:
             mv .last-deployed-image.tmp .last-deployed-image
             echo "✅ Imagen desplegada y healthy: ${IMAGE_REF}"
 
-            echo "🗓️  Programando foto semanal ABCD..."
-            mkdir -p /opt/abcd-control/logs
-            SNAPSHOT_CRON="0 6 * * 1 cd /opt/abcd-control && docker compose exec -T abcd-app python save_abcd_weekly_snapshot.py >> /opt/abcd-control/logs/abcd-weekly-snapshot.log 2>&1 # ABCD weekly snapshot"
-            if command -v crontab >/dev/null 2>&1; then
-              (crontab -l 2>/dev/null | grep -v 'ABCD weekly snapshot'; echo "$SNAPSHOT_CRON") | crontab -
-              echo "✅ Cron semanal configurado: lunes 06:00"
-            else
-              echo "⚠️  crontab no está disponible en el servidor; configura manualmente: $SNAPSHOT_CRON"
-            fi
-
             echo "✅ Deploy completado exitosamente"
 
   tests:
@@ -174,25 +260,52 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Verify dependency locks
-        run: |
-          uv pip compile requirements.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --custom-compile-command "uv pip compile requirements.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu" -o /tmp/requirements.txt
-          uv pip compile requirements-dev.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --custom-compile-command "uv pip compile requirements-dev.in --python-version 3.11 --python-platform x86_64-unknown-linux-gnu" -o /tmp/requirements-dev.txt
-          diff -u requirements.txt /tmp/requirements.txt
-          diff -u requirements-dev.txt /tmp/requirements-dev.txt
+        run: python scripts/dependency_locks.py
 
       - name: Run offline tests
         run: python -m pytest -q tests test_transform_luxottica_masterdata.py test_validate_masterdata_odoo_dryrun.py
 
+      - name: Benchmark synthetic thumbnail cold and hot reads
+        run: |
+          python -m scripts.benchmark_image_thumbnails \
+            --directory "$GITHUB_WORKSPACE/.thumbnail-benchmark" \
+            --output "$RUNNER_TEMP/thumbnail-benchmark.json"
+
+      - name: Retain synthetic benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbnail-benchmark-synthetic
+          path: ${{ runner.temp }}/thumbnail-benchmark.json
+
       - name: Lint with flake8
         run: |
-          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
-          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+          flake8 image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py tests/test_image_work_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/nfs_isolated_probe.py scripts/audit_image_identity.py tests/test_image_service_identity.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/verify_staging_exports.py scripts/test_staging_storage.py tests/test_staging_exports.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/report_migration_review.py scripts/snapshot_sqlite_copy.py tests/test_migration_review.py tests/test_sqlite_snapshot_copy.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 tests/test_staging_precopy_protocol.py tests/test_order_alert_service.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 order_alerts.py scripts/smoke_order_alerts.py tests/test_order_alert_initialization.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 scripts/precopy_staging.py tests/test_live_precopy.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py tests/test_cloud_dashboard.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 graph_mail_downloader.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py tests/test_kering_images.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py adyen_reconciliation.py adyen_reconciliation_ui.py tests/test_adyen_reconciliation.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py adyen_reconciliation.py adyen_reconciliation_ui.py tests/test_adyen_reconciliation.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Check syntax
         run: |
+          python -m py_compile image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py
+          sh -n deployment/nfs/remove-failed-staging-units.sh
+          sh -n deployment/nfs/validate-isolated-nfs.sh
+          python -m py_compile scripts/verify_staging_exports.py scripts/test_staging_storage.py
+          python -m py_compile scripts/report_migration_review.py scripts/snapshot_sqlite_copy.py
+          python -m py_compile repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py
+          python -m py_compile cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py
+          python -m py_compile image_naming.py image_exports.py image_repository.py migrate_image_repository.py graph_mail_downloader.py kering_media.py tests/test_kering_image_sections.py
+          python -m py_compile kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py
           python -m py_compile app_enhanced.py
           python -m py_compile db_loader.py
           python -m py_compile engine.py
-          python -m py_compile auth_session.py
-          python -m py_compile order_alerts.py
-          python -m py_compile graph_mail_downloader.py
+          python -m py_compile adyen_reconciliation.py adyen_reconciliation_ui.py

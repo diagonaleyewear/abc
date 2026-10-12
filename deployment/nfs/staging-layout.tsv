@@ -1,0 +1,7 @@
+# role minimum_reserved_bytes; all share ONE NAS volume
+source 25769803776
+images 8589934592
+backups 68719476736
+recovery 25769803776
+# work: candidate24GiB + retained24GiB + existing ZIP/extraction16GiB
+work 68719476736

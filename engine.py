@@ -7,7 +7,7 @@ import pandas as pd
 
 
 DEFAULT_MARGIN_DAYS = 90
-DEFAULT_DAYS_WITHOUT_SALES_FOR_D = 120  # Aumentado a 120 días
+DEFAULT_DAYS_WITHOUT_SALES_FOR_D = 180
 DEFAULT_DAYS_WITHOUT_SALES_FOR_C = 60   # Nuevo umbral para C
 DEFAULT_PERCENTILE_A = 0.80
 REQUIRED_COLUMNS = [
@@ -106,19 +106,19 @@ def run_abcd_engine(
     df["Alerta"] = ""
     df["Accion_Recomendada"] = ""
 
-    # REGLA D: Sin ventas 120+ días (excluyendo ventanas de agotamiento)
+    # REGLA D: Sin ventas 180+ días (excluyendo ventanas de agotamiento)
     # Un producto es D si:
     # 1. Tiene stock
     # 2. Pasó período de margen
-    # 3. No tiene ventas en últimos 120 días (sin contar agotamientos)
+    # 3. No tiene ventas en últimos 180 días (sin contar agotamientos)
     # 4. No tiene ventas recientes en últimos 180 días
     has_recent_sales = df["Num_Ventas_180D"] > 0
-    no_sales_for_d = days_since_last_sale >= DEFAULT_DAYS_WITHOUT_SALES_FOR_D
+    no_sales_for_d = days_since_last_sale >= days_without_sales_for_d
     mask_d = has_stock & has_margin & no_sales_for_d & ~has_recent_sales
     
     df.loc[mask_d, ["ABCD", "Motivo", "Alerta", "Accion_Recomendada"]] = [
         "D",
-        "Sin ventas 120+ días (sin demanda reciente)",
+        "Sin ventas 180+ días (sin demanda reciente)",
         "LIQUIDAR",
         "Liquidar / No reponer",
     ]

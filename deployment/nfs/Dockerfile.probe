@@ -1,0 +1,9 @@
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends nfs-common iproute2 nfs4-acl-tools \
+    && rm -rf /var/lib/apt/lists/*
+COPY nfs_isolated_probe.py /probe-code/nfs_isolated_probe.py
+COPY nfs_repository_guard.py /probe-code/nfs_repository_guard.py
+RUN chmod 0755 /probe-code && chmod 0644 /probe-code/*.py
+CMD ["sleep", "600"]
