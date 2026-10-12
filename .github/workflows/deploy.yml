@@ -101,6 +101,7 @@ jobs:
           test "$(docker inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$EXPECTED_VERSION"
           docker run --rm --network none -e EXPECTED_COMMIT -e EXPECTED_BUILD -e EXPECTED_PUBLISHED -e EXPECTED_VERSION "$IMAGE" python -c "
           import os
+          import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage
           from build_info import load_build_info
           info = load_build_info()
@@ -295,6 +296,8 @@ jobs:
 
       - name: Lint with flake8
         run: |
+          flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
           flake8 image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py tests/test_image_work_storage.py tests/test_repository_storage.py tests/test_nfs_repository_guard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 scripts/nfs_isolated_probe.py scripts/audit_image_identity.py tests/test_image_service_identity.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -312,6 +315,7 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile app_enhanced.py app_exports.py app_navigation.py app_pages/alerts.py app_pages/luxoptica.py tests/test_app_exports.py tests/test_app_navigation.py
           python -m py_compile image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py
           sh -n deployment/nfs/remove-failed-staging-units.sh
           sh -n deployment/nfs/validate-isolated-nfs.sh
@@ -322,6 +326,10 @@ jobs:
           python -m py_compile image_naming.py image_exports.py image_repository.py migrate_image_repository.py graph_mail_downloader.py tests/test_graph_mail_downloader.py abcd_snapshots.py tests/test_abcd_snapshots.py tests/test_abcd_snapshots_postgres.py kering_media.py tests/test_kering_image_sections.py
           python -m py_compile kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py
           python -m py_compile app_enhanced.py
+          python -m py_compile app_exports.py
+          python -m py_compile app_navigation.py
+          python -m py_compile app_pages/alerts.py
+          python -m py_compile app_pages/luxoptica.py
           python -m py_compile db_loader.py
           python -m py_compile engine.py
           python -m py_compile save_abcd_weekly_snapshot.py

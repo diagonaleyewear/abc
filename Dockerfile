@@ -32,6 +32,9 @@ ENV PATH=/opt/venv/bin:$PATH
 
 # Copiar archivos de la aplicación
 COPY app_enhanced.py .
+COPY app_exports.py .
+COPY app_navigation.py .
+COPY app_pages ./app_pages
 COPY adyen_reconciliation.py .
 COPY adyen_reconciliation_ui.py .
 COPY kering_images.py .

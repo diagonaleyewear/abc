@@ -1,5 +1,4 @@
 from concurrent.futures import ProcessPoolExecutor
-import ast
 from io import BytesIO
 import json
 import multiprocessing
@@ -302,21 +301,20 @@ def test_cache_failure_is_explicit_placeholder_not_original_fallback(repository,
 def test_general_gallery_uses_same_cache_no_zip_or_original_on_hot_render(repository, monkeypatch):
     for index in range(27):
         save(repository, f"{index}.png", (index * 8, 20, 30))
-    source = (Path(__file__).resolve().parents[1] / "app_enhanced.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                    and node.name == "render_luxoptica_images_page")
-    code = ast.get_source_segment(source, function)
+    from app_pages.luxoptica import render_images_page
+
     reader = Mock(wraps=ImageRepository.verified_bytes)
-    zipper = Mock(side_effect=AssertionError("ZIP on render"))
+    zipper = Mock(return_value=b"synthetic zip")
     monkeypatch.setattr(ImageRepository, "verified_bytes", lambda self, record: reader(self, record))
     monkeypatch.setattr(ImageRepository, "zip_eans", zipper)
     app = AppTest.from_string(
-        "import streamlit as st\nimport pandas as pd\n"
+        "import streamlit as st\n"
+        "from app_pages.luxoptica import render_images_page\n"
         "st.session_state['auth_role']='admin'\n"
         "def render_sidebar_shell(*args): pass\n"
         "def require_admin_access(): assert st.session_state['auth_role']=='admin'\n"
-        "def render_footer(): pass\n" + code + "\nrender_luxoptica_images_page()")
+        "def render_footer(): pass\n"
+        "render_images_page(render_sidebar_shell, require_admin_access, render_footer)")
     app.run()
     assert not app.exception and reader.call_count == 24 and zipper.call_count == 0
     app.run()
@@ -325,6 +323,8 @@ def test_general_gallery_uses_same_cache_no_zip_or_original_on_hot_render(reposi
     assert not app.exception and reader.call_count == 27
     app.button(key="image_gallery_refresh").click().run()
     assert not app.exception and reader.call_count == 27
+    app.button(key="image_repository_prepare_zip").click().run()
+    assert not app.exception and zipper.call_count == 1
 
 
 def test_different_ean_same_content_reuses_generation_once_each_source_verified(repository, monkeypatch):
