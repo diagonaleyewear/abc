@@ -1,5 +1,10 @@
 # Precopia y cierre coherente: protocolo y resultados
 
+**Actualizacion productiva autorizada posterior**: [PRODUCTION.md](PRODUCTION.md)
+documenta la captura FINAL20261011T180000Z y despliegue057ca07. La captura y
+recuperacion de staging siguientes se conservan como ensayo real, no como
+fuente operativa obsoleta. No repetir la pausa/migracion ya ejecutada.
+
 Continua [CAPTURE.md](CAPTURE.md). La primera ventana se aborto y restauro;
 ese resultado historico se conserva debajo. La nueva autorizacion permite
 parar los cuatro servicios el tiempo necesario y registrar una terminacion

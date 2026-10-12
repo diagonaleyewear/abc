@@ -1,5 +1,11 @@
 # Captura consistente: procedimiento y resultados
 
+**Corte productivo posterior autorizado y ejecutado**: [PRODUCTION.md](PRODUCTION.md)
+registra artefacto057ca07, captura FINAL nueva, activacion y pausa total
+15h44min7s. Los criterios/restricciones originales siguientes son historicos.
+Hay nuevas escrituras desde activacion: rollback requiere preservarlas y
+reconciliarlas antes de reabrir con el artefacto anterior.
+
 Estado actualizado: [PRECOPY.md](PRECOPY.md) distingue la ventana abortada
 del2026-10-10UTC y la nueva autorizacion de parada completa, que permite
 terminacion forzada documentada si la integridad posterior queda acreditada.
@@ -22,7 +28,7 @@ se corrigio con bloqueo compartido y espera acotada, sin debilitar los tests;
 CI f4dae43 paso327pruebas, lint, compilacion y Docker con smoke. El artefacto
 validado no se ha desplegado sobre los servicios activos.
 
-## Preparar estado local productivo: pasos pendientes, NO ejecutar ahora
+## Preparar estado local productivo: procedimiento historico previo al corte
 
 1. Autorizar por separado el corte y la identidad1037:100. Crear un directorio
    NUEVO local, por ejemplo `/opt/cloud-image-production/state/<fecha-UTC>`,
