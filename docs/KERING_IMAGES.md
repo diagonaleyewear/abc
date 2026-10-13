@@ -45,7 +45,9 @@ Los atributos presentes son `alt`, `class`, `data-img`, `loading`, `src`;
 No hay `title`, `aria-label`, `data-filename` o atributo de vista util.
 Metadatos de bytes PNG: `icc_profile`, `transparency`, sin etiqueta de vista.
 La referencia identifica el producto, NO el angulo ni el tipo de sombra.
-La posicion del visor y el hecho de tener tres archivos NO se usan como evidencia.
+La posicion del visor y el hecho de tener tres archivos NO se usaban como evidencia
+en esta inspeccion; desde 2026-10-13 aplica la regla posicional confirmada por el
+usuario (ver "Regla posicional del visor Kering").
 
 Se comprobo el mapeo TECNICO actual del renombrado compartido:
 `noshad__fr` -> V1/frontal, `noshad__qt` -> V2/perspectiva,
@@ -144,7 +146,7 @@ pero no se afirma que el portal real publique etiquetas semanticas en ellos.
 | Ejemplo anonimizado / senal | Evidencia | Regla actual |
 | --- | --- | --- |
 | `https://picture.kecdn.net/<identificador-opaco>`, alt `MODELO-001` | CDN y referencia observados; la documentacion no conserva una senal semantica por imagen | unknown; no permite determinar frontal/perspectiva/lateral |
-| Posicion 0/1/2 del visor | Dos muestras historicas mostraban perspectiva/frontal/detalle; no es una garantia por imagen | No usar posicion; detalle nunca acredita lateral |
+| Posicion 1/2/3 del visor (orden DOM, sin duplicados) | Regla confirmada por el usuario el 2026-10-13: lateral/frontal/detalle. Sustituye a la lectura historica perspectiva/frontal/detalle | Solo para imagenes sin senal explicita y visor completo sin contradicciones; detalle nunca acredita V2 |
 | `MODELO__001__noshad__fr.png` en nombre original | Patron real del contrato Luxoptica; presencia en Kering solo probada en fixtures offline, NO observada en las URLs opacas historicas | Adaptador acepta el patron exacto previo al renombrado como frontal |
 | `...__noshad__qt.png`, `...__shad__lt.png` | Mismo limite de evidencia | perspectiva, lateral respectivamente |
 | Dos nombres/atributos con patrones distintos | Fixture de contradiccion | unknown; revision explicita |
@@ -173,6 +175,42 @@ archivos invalidos/ausentes se recuperan; checksum y bloqueo EAN evitan perdida.
 Varias fotos de una misma vista y variantes de mercado no completan otras.
 Solo frontal/perspectiva/lateral acreditadas, validas y visualmente distintas
 completan el EAN; desconocidas y detalle se muestran/exportan sin acreditacion.
+
+### Regla posicional del visor Kering
+
+Regla `kering_viewer_position_v1`, confirmada por el usuario el 2026-10-13.
+Se aplica en `kering_media.classify_viewer` sobre el orden del visor (DOM de
+`#imageModal .itemModal img`), nunca sobre el orden en que terminan las descargas:
+
+| Posicion (tras deduplicar) | Vista | Nombre |
+| --- | --- | --- |
+| 1 | lateral (V3) | renombrado comun `__shad__lt` |
+| 2 | frontal (V1) | renombrado comun `__noshad__fr` |
+| 3 | detalle | nombre original saneado; nunca acredita V2 |
+| 4+ | unknown salvo senal explicita | se conservan, se muestran y se exportan |
+
+- Duplicados (misma URL, o misma ruta con distinta query/fragmento) se eliminan
+  antes de asignar posiciones.
+- Las imagenes posicionales guardan en `view_detection` la regla, `explicit_view`,
+  `viewer_position`, `viewer_size` y `provenance` (`kering_positional_rule`,
+  `confirmed_by: user`, fecha y mapeo).
+- Una senal explicita reconocida en el nombre/atributos ORIGINALES (contrato
+  Luxoptica) prevalece: se conserva su vista aunque contradiga la posicion.
+  Los nombres generados por la aplicacion no son evidencia.
+- Revision (`view_review` en el resultado y aviso en la UI):
+  - `visor_incompleto`: menos de 3 imagenes unicas; no se aplica posicion.
+  - `etiquetas_contradictorias`: una etiqueta explicita contradice su hueco
+    (o un hueco adicional declara lateral/frontal), o hay senales en conflicto
+    (esa imagen queda unknown). No se aplica posicion a ninguna imagen del EAN.
+- Una contradiccion se persiste en `history.sqlite3` (`view_reviews`) y bloquea
+  la completitud (`revision_vistas`, estado Parcial), incluso si las tres vistas
+  ya son validas, hasta que una persona revise en la galeria cada imagen
+  contradictoria (revision posterior a la deteccion). Las imagenes no se
+  reclasifican ni sobrescriben automaticamente.
+- Sin perspectiva (V2) acreditada por senal explicita o revision, el EAN no se
+  declara completo.
+- Solo afecta a descargas nuevas: registros historicos (incluido unknown
+  reutilizado por URL) no se reclasifican ni se renombran por posicion.
 
 ### Pantalla, consultas y exportacion
 
@@ -419,11 +457,10 @@ Evidencia real:
   distinto 889652542942. No se asume conversion entre ambos. Se acepta solo
   coincidencia textual exacta de EAN o UPC en `.characteristics-title` y valor
   hermano; se registra modelo, color y talla de esa misma ficha.
-- Originales del visor `#imageModal .itemModal img`: indices 0/1/2 son
-  perspectiva/frontal/detalle en la muestra. El cuarto es editorial con modelo,
-  no se cuenta. **No hay lateral independiente: se guarda detalle, no lateral.**
-  El orden y el detalle se han contrastado tambien en BV1012S-004; conviene
-  ampliar muestras si se incorporan familias con convenciones distintas.
+- Originales del visor `#imageModal .itemModal img`: indices 0/1/2 se leyeron
+  como perspectiva/frontal/detalle en la muestra historica. **El usuario confirmo
+  el 2026-10-13 que el orden es lateral/frontal/detalle**; esa regla es la vigente
+  (ver "Regla posicional del visor Kering"). Detalle nunca acredita otra vista.
 - Los tres originales respondieron HTTP 200, image/png, **2400x1286** frente a
   galeria 512x512 y miniaturas 128x128. Bytes: perspectiva 116124, frontal 99353,
   detalle 159631. Huellas de pixels distintas. Se descarga la mayor resolucion

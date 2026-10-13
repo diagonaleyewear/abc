@@ -23,6 +23,7 @@ from PIL import Image
 from sqlalchemy import bindparam, text
 from image_repository import ImageRepository, image_fingerprint
 from image_naming import kering_filename, classified_view
+from kering_media import REVIEW_CONFLICT
 
 
 PORTAL_URL = "https://my.keringeyewear.com/keringeyewear/es/login"
@@ -210,6 +211,9 @@ class ImageStore:
                     id INTEGER PRIMARY KEY CHECK(id=1), last_started REAL, last_finished REAL,
                     next_run REAL, result TEXT, run_id TEXT
                 );
+                CREATE TABLE IF NOT EXISTS view_reviews (
+                    ean TEXT PRIMARY KEY, review TEXT NOT NULL, created TEXT NOT NULL
+                );
             """)
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)")}
             if "origin" not in columns:
@@ -237,6 +241,34 @@ class ImageStore:
 
     def valid_views(self, ean: str) -> dict[str, Path]:
         return self.repository.valid_views(ean)
+
+    def record_view_review(self, ean: str, review: dict | None) -> None:
+        """Persist (or clear) the latest viewer classification review for an EAN."""
+        with self.connect() as connection:
+            if not review:
+                connection.execute("DELETE FROM view_reviews WHERE ean=?", (ean,))
+                return
+            previous = connection.execute("SELECT review, created FROM view_reviews WHERE ean=?", (ean,)).fetchone()
+            payload = json.dumps(review, ensure_ascii=False, sort_keys=True)
+            if previous and previous["review"] == payload:
+                return
+            connection.execute("INSERT OR REPLACE INTO view_reviews(ean, review, created) VALUES(?,?,?)",
+                               (ean, payload, datetime.now(timezone.utc).isoformat()))
+
+    def blocking_view_review(self, ean: str) -> dict | None:
+        """Contradicted viewer labels block completeness until a person reviews every contradicted image."""
+        with self.connect() as connection:
+            row = connection.execute("SELECT review, created FROM view_reviews WHERE ean=?", (ean,)).fetchone()
+        if not row:
+            return None
+        review = json.loads(row["review"])
+        if REVIEW_CONFLICT not in review.get("reasons", []):
+            return None
+        reviewed = {record.origin for record in self.repository.records(ean)
+                    if (record.metadata.get("view_review") or {}).get("reviewer") not in {None, "kering-adapter"}
+                    and record.metadata["view_review"].get("date", "") >= row["created"]}
+        pending = [item for item in review.get("contradictions", []) if item["url"] not in reviewed]
+        return {**review, "created": row["created"]} if pending or not review.get("contradictions") else None
 
     def available_image_count(self, ean: str) -> int:
         checksums = set()
@@ -377,7 +409,8 @@ def count_complete_lines(store, order, cache):
         ean = line["ean"]
         if ean and ean not in cache:
             cache[ean] = store.valid_views(ean)
-        complete += int(bool(ean) and set(VIEWS) <= cache.get(ean, {}).keys())
+        complete += int(bool(ean) and set(VIEWS) <= cache.get(ean, {}).keys()
+                        and not store.blocking_view_review(ean))
     return complete
 
 
@@ -431,26 +464,32 @@ def process_ean(store: ImageStore, portal, ean: str) -> dict:
             valid = store.valid_views(ean)
             results = {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)}
             pending = tuple(view for view in displayed_views(valid) if view not in valid)
-            if set(VIEWS) <= valid.keys():
+            if set(VIEWS) <= valid.keys() and not store.blocking_view_review(ean):
                 available = store.available_image_count(ean)
                 return {"views": results, "reason": "", "tries": 0,
                         "acquisition": {"available_files": available, "downloaded_files": 0, "reused_files": available}}
             if hasattr(portal, "repository"):
                 portal.repository = store.repository
             images, reason, tries = fetch_pending(portal, ean, pending)
+            if reason == "vistas_no_disponibles" and hasattr(portal, "view_reviews"):
+                store.record_view_review(ean, portal.view_reviews.get(ean))
             reason, downloaded = save_pending(store, ean, pending, images, results, reason, portal)
             available = store.available_image_count(ean)
             if available and not valid and set(results.values()) == {"Pendiente"} and reason == "vistas_no_disponibles":
                 reason = "vistas_sin_identificar"
+            blocking = store.blocking_view_review(ean)
+            review = getattr(portal, "view_reviews", {}).get(ean) or blocking
             return {
                 "views": results,
-                "reason": reason if "Pendiente" in results.values() else "",
+                "reason": "revision_vistas" if blocking else reason if "Pendiente" in results.values() else "",
                 "tries": tries,
                 "identity": getattr(portal, "identities", {}).get(ean, {}),
                 "acquisition": {"available_files": available, "downloaded_files": downloaded,
                                 "reused_files": max(0, available - downloaded)},
                 **({"access_failure": dict(portal.access_failure)}
                    if getattr(portal, "access_failure", None) else {}),
+                **({"view_review": dict(review)} if review else {}),
+                **({"review_blocking": True} if blocking else {}),
             }
     except Timeout:
         return {"views": dict.fromkeys(VIEWS, "Pendiente"), "reason": "ean_en_proceso", "tries": 0}
@@ -513,7 +552,8 @@ def order_status(order: dict, results: dict) -> str:
     for line in order["lines"]:
         result = results.get(line["ean"], {})
         views = result.get("views", {})
-        complete = complete and bool(line["ean"]) and all(views.get(view, "Pendiente") != "Pendiente" for view in VIEWS)
+        complete = complete and bool(line["ean"]) and not result.get("review_blocking") and all(
+            views.get(view, "Pendiente") != "Pendiente" for view in VIEWS)
         available = available or any(value != "Pendiente" for value in views.values()) or bool(
             result.get("acquisition", {}).get("available_files", 0))
     if complete:
@@ -540,6 +580,7 @@ def execute_order(store, attempt, loader, portal, cache):
             results[ean] = {"views": {view: "Reutilizada" if view in valid else "Pendiente" for view in displayed_views(valid)},
                             "reason": cache[ean]["reason"], "tries": 0,
                             "identity": cache[ean].get("identity", {}),
+                            **{key: cache[ean][key] for key in ("view_review", "review_blocking") if key in cache[ean]},
                             "acquisition": {"available_files": available,
                                             "downloaded_files": 0, "reused_files": available}}
         else:
