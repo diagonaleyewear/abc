@@ -110,7 +110,10 @@ def render_job_settings(config_store):
 
 
 def format_timestamp(value):
-    return datetime.fromtimestamp(value, MADRID).strftime(TIME_FORMAT) if value else "-"
+    # pandas turns missing timestamps (e.g. running attempts) into NaN, which is truthy.
+    if value is None or pd.isna(value) or not value:
+        return "-"
+    return datetime.fromtimestamp(value, MADRID).strftime(TIME_FORMAT)
 
 
 @st.fragment(run_every="5s")

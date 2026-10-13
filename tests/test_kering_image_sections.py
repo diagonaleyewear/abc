@@ -332,3 +332,14 @@ def test_export_exact_documented_limits(monkeypatch, size, count):
     records.append(replace(record, id=count, name=f"photo_{count}.png"))
     with pytest.raises(ValueError, match="demasiado grande"):
         order_export_plan(repository, order())
+
+
+def test_history_timestamps_tolerate_missing_end_times():
+    import pandas as pd
+
+    ended = pd.DataFrame([{"ended": 1760000000}, {"ended": None}])["ended"]
+    formatted = ended.map(ui.format_timestamp)
+    assert formatted.iloc[1] == "-"
+    assert formatted.iloc[0] != "-"
+    assert ui.format_timestamp(None) == "-"
+    assert ui.format_timestamp(0) == "-"
