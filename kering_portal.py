@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from urllib.parse import urlsplit
 from pathlib import Path
 from image_naming import kering_filename
-from kering_media import identify_media
+from kering_media import POSITIONAL_RULE, classify_viewer
 from image_repository import ImageRepository, image_fingerprint
 from PIL import Image
 
@@ -65,6 +65,7 @@ class KeringPortal:
         self.identities = {}
         self.repository = None
         self.media = {}
+        self.view_reviews = {}
         self.access_events = []
         self.access_failure = None
         self._access_deadline = None
@@ -252,18 +253,31 @@ class KeringPortal:
         ean = getattr(self, "_ean", snapshot["ean"])
         records = repository.records(ean)
         reference, color = snapshot["reference"].rsplit("-", 1)
-        for image in snapshot["images"]:
-            if image["reference"] != snapshot["reference"] or not allowed_url(image["url"], media=True):
-                continue
-            url = image["url"]
+        viewer = [image for image in snapshot["images"]
+                  if image["reference"] == snapshot["reference"] and allowed_url(image["url"], media=True)]
+        classified = classify_viewer(viewer)
+        review = next((dict(detection["review"]) for detection in classified if "review" in detection), None)
+        if review:
+            review.pop("contradicts_position", None)
+            review.pop("position_expected", None)
+            review["rule"] = POSITIONAL_RULE
+            review["contradictions"] = [
+                {"url": detection["url"], "original_name": detection["original_name"],
+                 "explicit_view": detection["explicit_view"], "viewer_position": detection["viewer_position"],
+                 "position_expected": detection["review"].get("position_expected", "adicional")}
+                for detection in classified if detection["review"]["contradicts_position"]]
+            self.view_reviews[ean] = review
+            LOGGER.info("kering_view_review ean=%s reasons=%s", ean, ",".join(review["reasons"]))
+        for detection in classified:
+            url = detection["url"]
             if url in collected:
                 continue
-            detection = identify_media(image)
             source_name = detection["source_name"]
             view = detection["normalized_view"]
+            explicit = detection["explicit_view"]
             existing = [record for record in records if record.origin == url or
-                        record.provider != "Kering" and view != "unknown"
-                        and record.name == source_name and record.view == view]
+                        record.provider != "Kering" and explicit != "unknown"
+                        and record.name == source_name and record.view == explicit]
             reusable = False
             for record in existing:
                 try:
@@ -278,11 +292,13 @@ class KeringPortal:
                                     provider="Kering", origin=url, view=view,
                                     metadata={"modelo": reference, "view_detection": detection,
                                               "reused_from_provider": record.provider})
-                if record.view == "unknown" and view != "unknown" and not record.metadata.get("view_review"):
-                    repository.review_view(record.id, view, reviewer="kering-adapter",
+                # The positional rule only applies to new downloads; existing files are never reclassified by it.
+                if (record.view == "unknown" and explicit != "unknown" and view == explicit
+                        and not record.metadata.get("view_review")):
+                    repository.review_view(record.id, explicit, reviewer="kering-adapter",
                                            reason="Verified original filename pattern", evidence=detection)
                 continue
-            content = self._read_image(image["url"])
+            content = self._read_image(url)
             if content is not None:
                 name = kering_filename(reference, color, view, Path(source_name).suffix, source_name)
                 self.media[url] = {"url": url, "name": name, "detection": detection, "view": view}
@@ -306,6 +322,7 @@ class KeringPortal:
     def fetch(self, ean: str, pending: tuple[str, ...]) -> dict[str, bytes]:
         self._ean = ean
         self.media = {}
+        self.view_reviews.pop(ean, None)
         collected = {}
         try:
             for attempt in range(2):

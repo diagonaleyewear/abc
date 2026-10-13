@@ -762,19 +762,27 @@ def test_portal_resolves_only_exact_code_and_downloads_pending(monkeypatch):
 def test_real_portal_partial_then_only_pending_and_no_calls_for_complete(tmp_path, monkeypatch):
     portal = configured_portal()
     monkeypatch.setattr(portal, "_start", lambda: None)
-    find = Mock(side_effect=[portal_snapshot(image_count=2), portal_snapshot()])
+    # Viewer consistent with the confirmed rule: lateral, frontal, detail, then explicit V2.
+    stems = ("shad__lt", "noshad__fr", "detail", "noshad__qt")
+    def snapshot(count):
+        return {**portal_snapshot(), "images": [
+            {"url": f"https://picture.kecdn.net/OFFLINE__001__{stem}.png", "reference": "OFFLINE-001"}
+            for stem in stems[:count]]}
+    find = Mock(side_effect=[snapshot(2), snapshot(4)])
     monkeypatch.setattr(portal, "_find_product", find)
     downloads = []
     def read_image(url):
         downloads.append(url)
-        index = ("noshad__qt", "noshad__fr", "shad__lt").index(Path(url).stem.split("__", 2)[2])
+        index = stems.index(Path(url).stem.split("__", 2)[2])
         return photo((index * 60, 10, 50))
     monkeypatch.setattr(portal, "_read_image", read_image)
     store = ImageStore(tmp_path)
     first = process_ean(store, portal, "0012345678901")
-    assert first["views"]["lateral"] == "Pendiente"
-    process_ean(store, portal, "0012345678901")
-    assert all(downloads.count(image["url"]) == 1 for image in portal_snapshot()["images"])
+    assert first["views"]["perspectiva"] == "Pendiente"
+    assert first["view_review"]["reasons"] == ["visor_incompleto"]
+    second = process_ean(store, portal, "0012345678901")
+    assert "Pendiente" not in second["views"].values() and "view_review" not in second
+    assert all(downloads.count(image["url"]) == 1 for image in snapshot(4)["images"])
     assert process_ean(store, portal, "0012345678901")["tries"] == 0
     assert find.call_count == 2
 

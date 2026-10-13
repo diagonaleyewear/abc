@@ -545,6 +545,16 @@ def render_product(store, ean, result, prefix="product"):
         st.info("Fotos adquiridas; no hay senales suficientes para acreditar las vistas. Revision pendiente.")
     elif reason:
         st.warning("Quedan vistas pendientes. Consulte el diagnostico o revise las fotos.")
+    view_review = result.get("view_review")
+    if view_review:
+        st.warning("Orden del visor Kering pendiente de revision: "
+                   + ", ".join(view_review.get("reasons", [])).replace("_", " ")
+                   + ". No se aplico la regla posicional.")
+        for item in view_review.get("contradictions", []):
+            st.caption(f"Posicion {item['viewer_position']}: {item['original_name']} indica "
+                       f"{item['explicit_view']} (esperado {item['position_expected']}). Se conserva su vista.")
+        if result.get("review_blocking"):
+            st.caption("El EAN no se declarara completo hasta revisar manualmente cada imagen contradictoria.")
     acquisition = result.get("acquisition")
     if acquisition:
         st.caption(f"Archivos validos: {acquisition['available_files']} | "

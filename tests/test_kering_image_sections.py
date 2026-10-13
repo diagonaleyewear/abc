@@ -90,6 +90,10 @@ def test_acquire_more_than_three_reordered_and_reuse_unknown(monkeypatch, tmp_pa
     result = process_ean(store, portal, EAN)
     assert set(store.valid_views(EAN)) == set(VIEWS)
     assert "Pendiente" not in result["views"].values()
+    # Explicit lateral in slot 2 and extra frontals contradict the viewer rule: kept, but under review.
+    assert result["review_blocking"] and result["reason"] == "revision_vistas"
+    assert {item["viewer_position"] for item in result["view_review"]["contradictions"]} == {2, 5, 6}
+    assert order_status(order(), {EAN: result}) == "Parcial"
     assert len(store.repository.records(EAN)) == 6
     assert reader.call_count == 6
     process_ean(store, portal, EAN)
@@ -115,17 +119,19 @@ def test_many_same_views_and_unknown_do_not_complete(monkeypatch, tmp_path):
 
 
 def test_successful_unknown_acquisition_is_partial_not_download_error(monkeypatch, tmp_path):
-    portal, reader = portal_with_images(monkeypatch, ["opaque-a", "opaque-b", "opaque-c"])
+    # Two opaque images: incomplete viewer, so the positional rule cannot accredit any view.
+    portal, reader = portal_with_images(monkeypatch, ["opaque-a", "opaque-b"])
     store = ImageStore(tmp_path / "kering")
     first = process_ean(store, portal, EAN)
     assert order_status(order(), {EAN: first}) == "Parcial"
-    assert first["acquisition"] == {"available_files": 3, "downloaded_files": 3, "reused_files": 0}
+    assert first["acquisition"] == {"available_files": 2, "downloaded_files": 2, "reused_files": 0}
     assert first["reason"] == "vistas_sin_identificar"
+    assert first["view_review"]["reasons"] == ["visor_incompleto"]
     assert set(first["views"].values()) == {"Pendiente"}
     second = process_ean(store, portal, EAN)
     assert order_status(order(), {EAN: second}) == "Parcial"
-    assert second["acquisition"] == {"available_files": 3, "downloaded_files": 0, "reused_files": 3}
-    assert reader.call_count == 3
+    assert second["acquisition"] == {"available_files": 2, "downloaded_files": 0, "reused_files": 2}
+    assert reader.call_count == 2
     # Files cannot count as acquired once absent or corrupt.
     for record in store.repository.records(EAN):
         record.path.unlink()
