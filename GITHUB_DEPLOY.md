@@ -1,6 +1,12 @@
-# 🚀 GitHub Actions + Auto-Deploy
+# Procedimiento vigente para Cloud
 
-> Cada vez que hagas **push** a main, se despliega automáticamente en tu servidor.
+La publicacion GHCR no despliega produccion. Usar el workflow manual protegido
+**Deploy Cloud Production** y revisar [instalacion administrativa, identidad
+dedicada y rollback](deployment/cloud/README.md).
+Las instrucciones SSH/auto-deploy legacy de este documento no deben utilizarse
+para `cloud-nas` ni para el hotfix Luxottica.
+
+# GitHub Actions + Auto-Deploy (archivo historico)
 
 ## ⚡ En 3 Pasos
 

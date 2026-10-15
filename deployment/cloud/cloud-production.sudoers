@@ -1,0 +1,4 @@
+Defaults:cloud-deploy env_reset
+Defaults:cloud-deploy secure_path=/usr/sbin:/usr/bin:/sbin:/bin
+# Empty argument string forbids --worker and every other command-line argument.
+cloud-deploy ALL=(root) NOPASSWD: /usr/local/sbin/cloud-production-deploy ""

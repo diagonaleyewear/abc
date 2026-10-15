@@ -1,0 +1,68 @@
+name: Deploy Cloud Production
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cloud-production-abcd-app
+  cancel-in-progress: false
+
+jobs:
+  verify-release:
+    if: github.repository == 'sginfoocio/abc' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check approved publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          policy = json.loads(Path("deployment/cloud/approved-release.json").read_text())
+          run = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/sginfoocio/abc/actions/runs/{policy['build_run_id']}"
+          ]))
+          assert run["conclusion"] == "success" and run["event"] == "push"
+          assert run["head_branch"] == "main" and run["head_sha"] == policy["commit"]
+          assert run["path"] == ".github/workflows/deploy.yml"
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"## Approved Cloud release\nCommit: `{policy['commit']}`\n\n")
+              summary.write(f"Image: `{policy['image']}`\n\n")
+              summary.write("Target: `cloud-nas / abcd-app` only. Awaiting production approval.\n")
+          PY
+
+  deploy-production:
+    name: Deploy approved abcd-app
+    needs: verify-release
+    environment: production
+    runs-on: [self-hosted, linux, x64, cloud-production]
+    timeout-minutes: 25
+    permissions: {}
+    steps:
+      - name: Deploy root-approved release
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          RECEIPT="$(mktemp "$RUNNER_TEMP/cloud-deploy.XXXXXX")"
+          trap 'rm -f "$RECEIPT"' EXIT
+          STATUS=0
+          printf '{"run_id":%s,"attempt":%s}\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" |
+            sudo -n -- /usr/local/sbin/cloud-production-deploy > "$RECEIPT" || STATUS=$?
+          {
+            echo '## Cloud production deployment'
+            echo '```json'
+            cat "$RECEIPT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RECEIPT"
+          exit "$STATUS"

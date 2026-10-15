@@ -1,0 +1,16 @@
+[Unit]
+Description=Root-approved Cloud abcd-app release transaction
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cloud-production-deploy --worker
+WorkingDirectory=/
+UMask=0077
+TimeoutStartSec=1200
+TimeoutStopSec=300
+KillSignal=SIGTERM
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
+Environment=PYTHONNOUSERSITE=1

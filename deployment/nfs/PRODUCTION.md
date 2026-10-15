@@ -44,9 +44,10 @@ backup/temporales antes de arrancar, y publicaciones vuelven a comprobarlos.
 
 ## Despliegue y rollback
 
-El workflow solo puede desplegar automaticamente con la variable de repositorio
-`CLOUD_AUTO_DEPLOY=true`; ausente/deshabilitada no despliega por fusion. En este
-corte controlado mantenerla ausente, no fusionar para obtener un artefacto.
+La publicacion GHCR y el despliegue estan separados. El despliegue automatico
+legacy mediante `CLOUD_AUTO_DEPLOY` se ha retirado. Usar el workflow manual
+protegido y el procedimiento [Cloud production](../cloud/README.md), inicialmente
+limitado a `abcd-app`. Fusionar/publicar no actualiza produccion.
 Todo cambio de codigo requiere nueva CI/build/smoke y SHA verificado antes
 de parar Cloud. Guardar Compose efectivo, runtime, imagenes y servicios activos
 en recibos privados fuera de Git.

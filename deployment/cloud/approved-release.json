@@ -1,0 +1,16 @@
+{
+  "repository": "sginfoocio/abc",
+  "commit": "99a9f60eb6fbe11cc231b5626556e5db9b5166e9",
+  "image": "ghcr.io/sginfoocio/abc@sha256:3fcfa818e38d7fb690480c0d6af395fc1bd573cd6dcfbcdea537481eff92b1c9",
+  "previous_commit": "2082ee541ab3230d7a87ecd67b0d15b69cf36e66",
+  "build_run_id": 38772528737,
+  "build_attempt": 1,
+  "runner_name": "cloud-production-s2026",
+  "reviewers": ["sginfoocio"],
+  "workbook_sha256": "2aa51dcaf42b3653bc1c1a97b25a8cb6e906dfd3bc402c594a091cb58cc98e04",
+  "source_sha256": {
+    "app_enhanced.py": "44a225b29480d4090d30acf409fc1a5b46e2e996ac6579b4992f3d900668574c",
+    "app_exports.py": "05fb1557f5cdfe68f1890bd0443fb193d53f2858b0fbfd06174f08e054f60704",
+    "transform_luxottica_masterdata.py": "4e435ddadb6362f7ef7f2cd245b54c5fb439ddae903f1a4bdd70788d8256d609"
+  }
+}

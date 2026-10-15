@@ -72,12 +72,16 @@ def test_nonroot_smoke_is_executed_as_confirmed_nas_identity():
     assert "umask 077" in entrypoint and 'test "$(id -G)" = 100' in entrypoint
 
 
-def test_production_startup_checks_storage_and_automatic_deploy_is_opt_in():
+def test_production_startup_checks_storage_and_deploy_requires_separate_approval():
     entrypoint = (ROOT / "scripts/cloud_image_entrypoint.sh").read_text()
     assert 'if test -n "${IMAGE_REPOSITORY_NFS_SOURCE:-}"' in entrypoint
     assert entrypoint.index("check_image_root") < entrypoint.index('exec "$@"')
     workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
-    assert workflow.count("&& vars.CLOUD_AUTO_DEPLOY == 'true'") == 2
+    assert "Deploy to Server" not in workflow
+    assert "CLOUD_AUTO_DEPLOY" not in workflow
+    manual = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch:" in manual
+    assert "environment: production" in manual
 
 
 def test_staging_capture_uses_matching_local_history_and_source_run(monkeypatch):

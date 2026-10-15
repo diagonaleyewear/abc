@@ -162,84 +162,18 @@ jobs:
           docker run --rm --network none --read-only --user 1038:100 --mount "type=volume,source=$VOLUME,target=/smoke" \
             "$IMAGE" python -c "import os; assert all(not os.access('/smoke/state', mode) for mode in (os.R_OK, os.W_OK, os.X_OK)); print('Other UID in users GID100 denied local state')"
 
-      - name: Validate Secrets
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CLOUD_AUTO_DEPLOY == 'true'
-        run: |
-          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
-            echo "❌ ERROR: SERVER_HOST secret no configurado"
-            exit 1
-          fi
-          if [ -z "${{ secrets.SERVER_USER }}" ]; then
-            echo "❌ ERROR: SERVER_USER secret no configurado"
-            exit 1
-          fi
-          if [ -z "${{ secrets.SERVER_PORT }}" ]; then
-            echo "❌ ERROR: SERVER_PORT secret no configurado"
-            exit 1
-          fi
-          if [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
-            echo "❌ ERROR: SERVER_SSH_KEY secret no configurado"
-            exit 1
-          fi
-          echo "✅ Todos los secrets están configurados"
-
-      - name: Deploy to Server
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CLOUD_AUTO_DEPLOY == 'true'
-        uses: appleboy/ssh-action@master
+      - name: Publication summary (production is a separate approved workflow)
+        if: github.event_name == 'push'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          port: ${{ secrets.SERVER_PORT }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          envs: GH_TOKEN
-          script: |
-            set -euo pipefail
-            echo "🚀 Iniciando deploy desde GitHub Actions..."
-            cd /opt/abcd-control
-            echo "📁 Directorio: $(pwd)"
-
-            echo "📥 Actualizando código..."
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
-            git fetch origin "${{ github.sha }}"
-            git reset --hard "${{ github.sha }}"
-            echo "✅ Código actualizado"
-
-            IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.image.outputs.digest }}"
-            echo "📥 Descargando imagen verificada: ${IMAGE_REF}"
-            echo "${GH_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-            docker pull "${IMAGE_REF}"
-
-            PREVIOUS_REF=""
-            PREVIOUS_IMAGE_ID="$(docker inspect --format='{{.Image}}' abcd-control 2>/dev/null || true)"
-            if [ -n "${PREVIOUS_IMAGE_ID}" ]; then
-              PREVIOUS_REF="abcd-control:rollback-${{ github.sha }}"
-              docker image tag "${PREVIOUS_IMAGE_ID}" "${PREVIOUS_REF}"
-              echo "💾 Imagen previa preservada como ${PREVIOUS_REF}"
-            fi
-
-            echo "▶️  Actualizando servicios y esperando salud..."
-            if ! ABCD_IMAGE_REF="${IMAGE_REF}" docker compose up -d --no-build --wait --wait-timeout 180; then
-              echo "❌ La nueva revisión no llegó a estado healthy"
-              if [ -n "${PREVIOUS_REF}" ]; then
-                echo "↩️  Restaurando la imagen anterior"
-                ABCD_IMAGE_REF="${PREVIOUS_REF}" docker compose up -d --no-build --wait --wait-timeout 180 || {
-                  echo "❌ Falló también el rollback; requiere intervención manual"
-                  exit 1
-                }
-                echo "✅ Rollback completado"
-              else
-                echo "❌ No había contenedor anterior para restaurar"
-              fi
-              exit 1
-            fi
-
-            printf '%s\n' "${IMAGE_REF}" > .last-deployed-image.tmp
-            mv .last-deployed-image.tmp .last-deployed-image
-            echo "✅ Imagen desplegada y healthy: ${IMAGE_REF}"
-
-            echo "✅ Deploy completado exitosamente"
+          PUBLISHED_COMMIT: ${{ steps.provenance.outputs.commit }}
+          PUBLISHED_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          {
+            echo '## GHCR publication only'
+            echo "Commit: \`${PUBLISHED_COMMIT}\`"
+            echo "Digest: \`${PUBLISHED_DIGEST}\`"
+            echo 'Production was NOT changed. Use Deploy Cloud Production and approve production.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   tests:
     runs-on: ubuntu-latest
@@ -296,6 +230,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
+          flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py tests/test_cloud_production_deploy.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
           flake8 image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -315,6 +250,8 @@ jobs:
 
       - name: Check syntax
         run: |
+          python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py tests/test_cloud_production_deploy.py
+          sh -n deployment/cloud/runner_job_gate.sh
           python -m py_compile app_enhanced.py app_exports.py app_navigation.py app_pages/alerts.py app_pages/luxoptica.py tests/test_app_exports.py tests/test_app_navigation.py
           python -m py_compile image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py
           sh -n deployment/nfs/remove-failed-staging-units.sh
