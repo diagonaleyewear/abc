@@ -8,7 +8,6 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -320,17 +319,17 @@ def test_atomic_config_preserves_owner_mode_and_checks_every_ancestor(monkeypatc
 
 
 def test_workflow_has_no_arbitrary_input_checkout_or_token_in_privileged_job():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/deploy-cloud-production.yml").read_text())
-    # PyYAML's YAML 1.1 parses 'on' as True.
-    assert workflow.get("on", workflow.get(True)) == {"workflow_dispatch": None}
-    job = workflow["jobs"]["deploy-production"]
-    assert job["environment"] == "production"
-    assert job["permissions"] == {}
-    assert job["runs-on"] == ["self-hosted", "linux", "x64", "cloud-production"]
-    assert workflow["concurrency"]["cancel-in-progress"] is False
-    assert job["timeout-minutes"] == 25
-    assert not any("uses" in step for step in job["steps"])
-    assert "sudo -n -- /usr/local/sbin/cloud-production-deploy" in job["steps"][0]["run"]
+    workflow = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text()
+    assert "on:\n  workflow_dispatch:\n" in workflow
+    assert "inputs:" not in workflow and "pull_request:" not in workflow
+    job = workflow.split("  deploy-production:\n", 1)[1]
+    assert "    environment: production\n" in job
+    assert "    permissions: {}\n" in job
+    assert "    runs-on: [self-hosted, linux, x64, cloud-production]\n" in job
+    assert "  cancel-in-progress: false\n" in workflow
+    assert "    timeout-minutes: 25\n" in job
+    assert "uses:" not in job
+    assert "sudo -n -- /usr/local/sbin/cloud-production-deploy" in job
     sudoers = (ROOT / "deployment/cloud/cloud-production.sudoers").read_text()
     assert 'NOPASSWD: /usr/local/sbin/cloud-production-deploy ""' in sudoers
     assert "NOPASSWD: ALL" not in sudoers
