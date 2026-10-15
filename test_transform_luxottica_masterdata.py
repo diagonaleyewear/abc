@@ -1,8 +1,18 @@
 import unittest
+import os
+from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 
+from app_exports import (
+    dataframe_to_excel_bytes,
+    load_masterdata_file,
+    normalize_result_export_schema,
+    split_report_warnings,
+)
 from transform_luxottica_masterdata import (
+    RESULT_EXPORT_COLUMNS,
     find_dictionary_values_not_resolved,
     normalize_color,
     normalize_material,
@@ -22,7 +32,7 @@ class TransformMasterdataTests(unittest.TestCase):
     def test_supplier_color_removes_slashes(self) -> None:
         self.assertEqual(normalize_color("C395/3", {}), "C3953")
 
-    def test_inferred_category_is_normalized_to_monturas(self) -> None:
+    def test_source_collection_classifies_optical_frames(self) -> None:
         row = self._base_row()
         row["Color de las lentes"] = ""
         row["Tipo"] = "Aro completo"
@@ -31,6 +41,96 @@ class TransformMasterdataTests(unittest.TestCase):
 
         self.assertEqual(report.total_output, 1)
         self.assertEqual(output.iloc[0]["Categoría"], "MONTURAS")
+
+    def test_confirmed_dg5116_blue_light_frame_is_not_sunglasses(self) -> None:
+        row = self._base_row()
+        row.update({
+            "UPC": "8056266003066",
+            "Nombre de la marca": "DOLCE & GABBANA",
+            "Código de marca": "DG",
+            "Código del modelo": "0DG5116",
+            "Color": "3091",
+            "Calibre": "54",
+            "Categoría": "Productos finales: Gafas",
+            "Color de las lentes": "Transparente con Filtro de Luz Azul",
+        })
+
+        output, report, *_ = transform_masterdata(pd.DataFrame([row]), color_map={})
+
+        self.assertEqual(report.total_output, 1)
+        self.assertEqual(output.iloc[0]["Barcode"], "8056266003066")
+        self.assertEqual(output.iloc[0]["Categoría"], "MONTURAS")
+        self.assertEqual(output.iloc[0]["Color"], "3091")
+        self.assertEqual(output.iloc[0]["Calibre"], "54")
+
+    def test_classification_uses_only_original_collection(self) -> None:
+        for collection, expected in [
+            ("  GÁFAS  DE \t VÍSTA ", "MONTURAS"),
+            ("GAFAS DE SOL", "GAFAS DE SOL"),
+            ("Gafas de vista junior", "MONTURAS"),
+            ("Gafas de sol junior", "GAFAS DE SOL"),
+        ]:
+            with self.subTest(collection=collection):
+                row = self._base_row()
+                row.update({
+                    "Colección": collection,
+                    "Categoría": "Gafas de sol" if expected == "MONTURAS" else "MONTURAS",
+                    "Nombre del modelo": "SOL",
+                    "Tipo": "Sol",
+                    "Color de las lentes": "Transparente con Filtro de Luz Azul",
+                })
+                rules = [
+                    {"Columna": "Colección", "Valor": collection, "Transformado": "Gafas de sol"},
+                    {"Columna": "Categoría", "Valor": row["Categoría"], "Transformado": "INCORRECTA"},
+                ]
+                output, report, *_ = transform_masterdata(
+                    pd.DataFrame([row]), color_map={}, dictionary_rules=rules,
+                )
+                self.assertEqual(output.iloc[0]["Categoría"], expected)
+                self.assertEqual(report.category_review_rows, [])
+
+    def test_unknown_collection_is_kept_and_explicitly_flagged(self) -> None:
+        for collection in ["", "General", "Meta Smart", "Gafas de vista desconocidas"]:
+            with self.subTest(collection=collection):
+                row = self._base_row()
+                row.update({"Colección": collection, "Categoría": "Productos finales: Gafas"})
+                original = pd.DataFrame([row])
+                output, report, *_ = transform_masterdata(original, color_map={})
+                self.assertEqual(len(output), 1)
+                self.assertEqual(output.iloc[0]["Categoría"], "")
+                self.assertEqual(report.category_review_rows[0]["UPC"], row["UPC"])
+                self.assertEqual(report.category_review_rows[0]["Colección"], collection)
+                self.assertEqual(report.category_review_rows[0]["fila_excel"], 2)
+                self.assertEqual(report.to_dict()["category_review_rows"], report.category_review_rows)
+                self.assertTrue(split_report_warnings(report)[0])
+                pd.testing.assert_frame_equal(original, pd.DataFrame([row]))
+
+    def test_sunglasses_preview_xlsx_and_csv_categories_match(self) -> None:
+        row = self._base_row()
+        row["Colección"] = "Gafas de sol"
+        row["Color de las lentes"] = ""
+        output, _, *_ = transform_masterdata(pd.DataFrame([row]), color_map={})
+        export = normalize_result_export_schema(output)
+        preview = export.map(lambda value: str(value).upper())
+        downloaded = load_masterdata_file(BytesIO(dataframe_to_excel_bytes(export)))
+        csv = pd.read_csv(BytesIO(export.to_csv(index=False, sep=";").encode("utf-8-sig")),
+                          dtype=str, sep=";").fillna("")
+        self.assertEqual(list(export.columns), RESULT_EXPORT_COLUMNS)
+        self.assertEqual(preview["Categoría"].tolist(), ["GAFAS DE SOL"])
+        self.assertEqual(downloaded["Categoría"].tolist(), preview["Categoría"].tolist())
+        self.assertEqual(csv["Categoría"].tolist(), preview["Categoría"].tolist())
+
+    def test_ray_ban_junior_follows_explicit_collection(self) -> None:
+        for collection, category in [
+            ("Gafas de vista junior", "MONTURAS"), ("Gafas de sol junior", "GAFAS DE SOL"),
+        ]:
+            with self.subTest(collection=collection):
+                row = self._base_row()
+                row.update({"Nombre de la marca": "RAY BAN JUNIOR", "Colección": collection})
+                output, _, *_ = transform_masterdata(pd.DataFrame([row]), color_map={})
+                self.assertEqual(output.iloc[0]["Marca"], "Ray Ban Junior")
+                self.assertEqual(output.iloc[0]["Género"], "Niño")
+                self.assertEqual(output.iloc[0]["Categoría"], category)
 
     def test_color_code_is_preserved_in_masterdata(self) -> None:
         row = self._base_row()
@@ -99,7 +199,7 @@ class TransformMasterdataTests(unittest.TestCase):
             "UPC": "1234567890123",
             "Nombre de la marca": "RAY BAN",
             "Código de marca": "RB",
-            "Colección": "General",
+            "Colección": "Gafas de vista",
             "Género": "Unisex",
             "Forma": "Rectangular",
             "Tipo": "Aro Completo",
@@ -269,6 +369,35 @@ class TransformMasterdataTests(unittest.TestCase):
 
         self.assertEqual(report.total_output, 1)
         self.assertEqual(output.iloc[0]["Colección"], "VALOR_COLUMNA_L")
+
+
+class CustomerWorkbookRegressionTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("LUXOTTICA_REGRESSION_XLSX"), "Customer workbook not supplied")
+    def test_actual_902_reference_workbook(self) -> None:
+        source = load_masterdata_file(Path(os.environ["LUXOTTICA_REGRESSION_XLSX"]))
+        self.assertEqual(len(source), 902)
+        self.assertEqual(source["Colección"].value_counts().to_dict(),
+                         {"Gafas de vista": 464, "Gafas de sol": 438})
+        output, report, *_ = transform_masterdata(source, color_map={})
+        self.assertEqual(len(output), 902)
+        self.assertEqual(output["Categoría"].value_counts().to_dict(),
+                         {"MONTURAS": 464, "GAFAS DE SOL": 438})
+        self.assertEqual(report.discarded, 0)
+        self.assertEqual(report.category_review_rows, [])
+        self.assertEqual(output["Barcode"].tolist(), source["UPC"].tolist())
+        self.assertEqual(output.loc[output["Barcode"].eq("8056266003066"), "Categoría"].tolist(),
+                         ["MONTURAS"])
+        for target, origin in [
+            ("Color", "Color"), ("Calibre", "Calibre"), ("PVO", "PVO"),
+            ("PVP", "PVP Sugerido"), ("Ancho Puente", "Dimensión del puente"),
+            ("Longitud Varilla", "Largo de varilla"),
+        ]:
+            expected = source[origin].str.replace("/", "", regex=False) if target == "Color" else source[origin]
+            self.assertEqual(output[target].tolist(), expected.tolist())
+        downloaded = load_masterdata_file(BytesIO(dataframe_to_excel_bytes(output)))
+        pd.testing.assert_frame_equal(downloaded, output.reset_index(drop=True))
+        preview_categories = output["Categoría"].str.upper().tolist()
+        self.assertEqual(downloaded["Categoría"].tolist(), preview_categories)
 
 
 if __name__ == "__main__":

@@ -98,6 +98,12 @@ def split_report_warnings(report) -> tuple[list[str], list[str], list[str]]:
         blocking.append(f"Hay {report.invalid_yes_no_rows} filas con valores invalidos SI/NO.")
     if report.unmatched_brand_names:
         medium.append(f"Marcas con incidencia abierta: {', '.join(report.unmatched_brand_names)}")
+    category_review_rows = getattr(report, "category_review_rows", [])
+    if category_review_rows:
+        blocking.append(
+            f"Hay {len(category_review_rows)} filas sin categoria: Coleccion vacia o no reconocida. "
+            "Revisar antes de importar en Odoo."
+        )
     for key, values in report.anomalous_values.items():
         blocking.append(f"Valores anómalos en {key}: {', '.join(values)}")
     return blocking, medium, info

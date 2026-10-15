@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,7 +83,7 @@ VALID_MATERIALS = {
     "Nylon",
     "Biopoliamida",
 }
-VALID_CATEGORIES = {"MONTURAS", "Gafas de sol"}
+VALID_CATEGORIES = {"MONTURAS", "GAFAS DE SOL"}
 BRAND_NAME_ALIASES = {
     "dolce & gabbana": "Dolce Gabbana",
     "dolce e gabbana": "Dolce Gabbana",
@@ -128,6 +129,7 @@ class ValidationReport:
     anomalous_values: dict[str, list[str]] = field(default_factory=dict)
     dictionary_rules_not_found: list[dict[str, str]] = field(default_factory=list)
     dictionary_values_not_resolved: list[dict[str, Any]] = field(default_factory=list)
+    category_review_rows: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,6 +150,7 @@ class ValidationReport:
             "anomalous_values": self.anomalous_values,
             "dictionary_rules_not_found": self.dictionary_rules_not_found,
             "dictionary_values_not_resolved": self.dictionary_values_not_resolved,
+            "category_review_rows": self.category_review_rows,
         }
 
 
@@ -500,10 +503,13 @@ def build_executive_summary_markdown(
         "",
     ]
 
-    if report.invalid_yes_no_rows == 0 and report.leading_zero_real_loss_columns == 0:
+    category_review_rows = getattr(report, "category_review_rows", [])
+    if report.invalid_yes_no_rows == 0 and report.leading_zero_real_loss_columns == 0 and not category_review_rows:
         lines.append("- Lote apto para revision final de negocio e importacion en Odoo.")
     else:
         lines.append("- Lote con incidencias que requieren revision antes de importar.")
+    if category_review_rows:
+        lines.append(f"- Filas sin categoria por Coleccion vacia o no reconocida: {len(category_review_rows)}.")
 
     if report.unmatched_brand_names:
         lines.append(f"- Marcas con incidencia abierta: {', '.join(report.unmatched_brand_names)}")
@@ -689,25 +695,20 @@ def normalize_color(value: str, color_map: dict[str, str]) -> str:
 
 
 def normalize_category(value: str) -> str:
-    v = _normalize_text(value)
-    if not v:
+    v = "".join(
+        character for character in unicodedata.normalize("NFKD", _normalize_text(value))
+        if not unicodedata.combining(character)
+    )
+    if v in {"gafas de vista", "gafas de vista junior"}:
         return "MONTURAS"
-    if v in {"gafas de vista", "monturas", "monto"}:
-        return "MONTURAS"
-    if v == "gafas de sol":
-        return "Gafas de sol"
-    return v
+    if v in {"gafas de sol", "gafas de sol junior"}:
+        return "GAFAS DE SOL"
+    return ""
 
 
 def infer_category(row: pd.Series) -> str:
-    lens_color = _normalize_text(row.get("Color de las lentes", ""))
-    model_type = _normalize_text(row.get("Tipo", ""))
-
-    if lens_color and all(x not in lens_color for x in ["demo", "demostraci", "blue light"]):
-        return "Gafas de sol"
-    if "sol" in model_type:
-        return "Gafas de sol"
-    return "MONTURAS"
+    """Classify only the supplier's explicit collection, never lens or model hints."""
+    return normalize_category(row.get("Colección", ""))
 
 
 def mark_accessory(row: pd.Series, accessory_whitelist: set[str] | None = None) -> bool:
@@ -764,6 +765,7 @@ def transform_masterdata(
     input_count = len(df)
     df = _normalize_input_column_aliases(df)
     original_df = df.copy()
+    source_categories = original_df.apply(infer_category, axis=1)
     df, dictionary_rules_not_found = apply_custom_dictionary(df, dictionary_rules)
     dictionary_values_not_resolved = find_dictionary_values_not_resolved(
         df,
@@ -831,10 +833,9 @@ def transform_masterdata(
     is_rb_junior = working["Nombre de la marca"].str.lower().eq("ray ban junior")
     working.loc[is_rb_junior, "Género"] = "Niño"
 
-    inferred_category = working.apply(infer_category, axis=1)
-    working["Categoría"] = inferred_category.map(normalize_category)
+    working["Categoría"] = source_categories.reindex(working.index)
 
-    rb_junior_sol = is_rb_junior & working["Categoría"].eq("Gafas de sol")
+    rb_junior_sol = is_rb_junior & working["Categoría"].eq("GAFAS DE SOL")
     rb_junior_vista = is_rb_junior & working["Categoría"].eq("MONTURAS")
     working.loc[rb_junior_sol, "Código de marca"] = "RJ"
     working.loc[rb_junior_vista, "Código de marca"] = "RB"
@@ -869,6 +870,8 @@ def transform_masterdata(
     # Las reglas personalizadas se reaplican sobre el valor original para que
     # también puedan corregir el valor canónico final o vaciarlo.
     working, _ = apply_custom_dictionary(working, dictionary_rules, source_df=original_df)
+    # Supplier classification is authoritative, including unresolved collections.
+    working["Categoría"] = source_categories.reindex(working.index)
     working["PVO"] = working["PVO"].map(_safe_text)
 
     # Validaciones post-transformacion.
@@ -937,6 +940,16 @@ def transform_masterdata(
     unknown_cats = sorted(
         set(output_canonical[~output_canonical["Categoría"].isin(VALID_CATEGORIES)]["Categoría"].tolist())
     )
+    category_review_rows = [
+        {
+            "fila_excel": int(index) + 2,
+            "UPC": _safe_text(original_df.loc[index].get("UPC", "")),
+            "Modelo": _safe_text(original_df.loc[index].get("Código del modelo", "")),
+            "Colección": _safe_text(original_df.loc[index].get("Colección", "")),
+            "motivo": "Coleccion vacia o no reconocida; revisar antes de importar",
+        }
+        for index in output_canonical.index[output_canonical["Categoría"].eq("")]
+    ]
 
     if unknown_shapes:
         anomalous["forma"] = unknown_shapes
@@ -968,6 +981,7 @@ def transform_masterdata(
         anomalous_values=anomalous,
         dictionary_rules_not_found=dictionary_rules_not_found,
         dictionary_values_not_resolved=dictionary_values_not_resolved,
+        category_review_rows=category_review_rows,
     )
 
     discarded_audit = _build_audit_discarded(df)

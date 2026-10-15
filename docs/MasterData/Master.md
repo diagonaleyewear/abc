@@ -90,6 +90,9 @@ El valor se compara de forma exacta ignorando mayúsculas y espacios exteriores.
 Las reglas personalizadas se aplican antes de los diccionarios de Odoo, por lo
 que tienen prioridad para resolver excepciones del negocio. Después se aplican
 las normalizaciones estándar de color, forma, género y demás campos.
+Excepción: la categoría se obtiene siempre de la `Colección` original de
+Luxottica, antes de cualquier diccionario. Ninguna regla personalizada de
+`Colección` o `Categoría` puede cambiar esta clasificación.
 
 Se han incorporado inicialmente las relaciones detectadas en la revisión:
 
@@ -191,10 +194,67 @@ Todo producto infantil debe quedar en Niño.
 ## Reglas de categoría
 Mapear solo a:
 - MONTURAS
-- Gafas de sol
+- GAFAS DE SOL
 
-En la práctica, la categoría de monturas se normaliza a `MONTURAS` para
-alinearlo con el valor canónico esperado por Odoo.
+Usar exclusivamente la columna con cabecera `Colección` del Excel original:
+
+| Colección original | Categoría final |
+|---|---|
+| Gafas de vista | MONTURAS |
+| Gafas de sol | GAFAS DE SOL |
+| Gafas de vista junior | MONTURAS |
+| Gafas de sol junior | GAFAS DE SOL |
+
+La comparación ignora mayúsculas, acentos y espacios repetidos. No se deduce
+la categoría por marca, modelo, tipo, color o lente. Las lentes transparentes
+con filtro de luz azul no implican gafas de sol, y `Productos finales: Gafas`
+es una categoría genérica insuficiente.
+
+Si la colección falta o no coincide con un valor reconocido, conservar la fila
+con categoría vacía y mostrar un aviso bloqueante de revisión. El reporte JSON
+incluye `category_review_rows` con fila Excel, UPC, modelo, colección original y
+motivo. No importar estas filas sin resolverlas. La vista previa y las descargas
+XLSX/CSV usan exactamente las mismas categorías en mayúsculas.
+
+La `Colección` exportada sigue viniendo de la columna L; no confundirla con la
+colección original utilizada para clasificar. Se conservan las demás reglas,
+incluido el vaciado de campos de lentes de las monturas.
+
+Regresión del cliente: EAN `8056266003066`, DG5116, color 3091, calibre 54:
+`MONTURAS`. Para ejecutar la prueba del fichero real de 902 referencias, definir
+`LUXOTTICA_REGRESSION_XLSX` con su ruta y ejecutar
+`python -m pytest -q test_transform_luxottica_masterdata.py tests/test_app_exports.py`.
+Sin esa variable, la prueba del lote real queda explícitamente omitida; no se
+sustituye por 902 filas simuladas.
+
+### Auditoría posterior de categorías en Odoo (solo lectura)
+
+Esta corrección solo transforma ficheros; no modifica productos históricos.
+La revisión de históricos requiere autorización independiente.
+
+1. Conservar el Excel original y su hash. Derivar la categoría esperada de
+   `Colección`, no de un MASTERDATA generado por el clasificador anterior.
+2. Obtener con una cuenta de solo lectura una instantánea consistente de Odoo
+   en una transacción `READ ONLY`. Cruzar UPC/EAN como texto con
+   `product_product.barcode`, incluyendo productos archivados. No emparejar por
+   modelo ni convertir EAN a número; separar duplicados y EAN sin coincidencia.
+3. Leer categoría de `product_template.categ_id` y `product_category`. Incluir
+   identificadores de variante y plantilla, ya que la categoría afecta a la
+   plantilla y puede compartirse entre variantes.
+4. Consultar por variante la existencia y estado de `stock_move`,
+   `stock_move_line`, `stock_valuation_layer` y `account_move_line` unido a
+   `account_move`. Confirmar antes el esquema real/version de Odoo. Distinguir:
+   sin movimientos ni contabilidad; con movimientos pero sin apuntes; con
+   operaciones contables (separar borrador y publicado). Si una consulta no
+   puede verificarse, marcar estado desconocido; nunca asumir ausencia.
+5. Exportar CSV/XLSX con EAN, modelo origen/Odoo, colección original, categoría
+   actual y correcta, IDs, estado activo, duplicados, contadores de movimientos
+   y apuntes, estado contable y discrepancia. Conservar fecha de extracción,
+   hash del origen y versión del clasificador; no exportar credenciales.
+6. Revisar discrepancias y variantes de la misma plantilla antes de proponer
+   una corrección. No ejecutar UPDATE, importaciones, RPC de escritura ni
+   cambiar impuestos, facturas, asientos, valoración o inventario. La autorización
+   de este hotfix no autoriza esas correcciones.
 
 ## Reglas de forma
 - Consultar el catálogo `diagonal_product_forma` de Odoo.
