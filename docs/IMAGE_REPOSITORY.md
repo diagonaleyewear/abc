@@ -80,6 +80,73 @@ contratos reales; no se inventan selectores ni se descartan alternativas.
 Esta excepcion para EAN parciales fue aceptada por el solicitante durante la
 implementacion: permitir ZIP completo, deduplicar al importar y documentarlo.
 
+## Publicacion comercial por plataforma
+
+Las representaciones del catalogo son metadatos; varias pueden apuntar al mismo
+archivo fisico deduplicado por EAN y SHA-256. No se deben usar como si fueran
+archivos comerciales con nombres de entrega. La publicacion materializa copias
+fuera de las carpetas originales, en:
+
+```text
+IMAGE_REPOSITORY_ROOT/
+├── <EAN>/<nombre-original>
+└── commercial_exports/
+    ├── Farfetch/<EAN>/<ID_FARFETCH>_V1.png
+    ├── Farfetch/<EAN>/<ID_FARFETCH>_V2.png
+    ├── Farfetch/<EAN>/<ID_FARFETCH>_V3.png
+    ├── Miinto/<EAN>/<ID_MIINTO>_V1.jpeg
+    ├── Miinto/<EAN>/<ID_MIINTO>_V2.jpeg
+    └── Miinto/<EAN>/<ID_MIINTO>_V3.jpeg
+```
+
+Los IDs se consultan en Odoo por EAN y canal (`siteweb_id` Miinto/Farfetch).
+No se aceptan IDs ambiguos ni se construyen identificadores sustitutos. V1 es
+frontal, V2 perspectiva y V3 lateral. Solo se publican originales con vista
+acreditada, checksum correcto y formato/dimensiones válidos; detalle, vista
+desconocida, duplicados visuales y alternativas ambiguas no se asignan a una
+posición comercial. Un producto sin alguna vista produce una exportación
+parcial explícita.
+
+La publicación no escribe en el catálogo ni modifica nombres o bytes originales.
+Farfetch recibe PNG; un original JPEG/WEBP se convierte en una nueva copia PNG.
+Miinto conserva el contrato histórico: la extensión es `.jpeg`, pero los bytes
+continúan siendo los bytes PNG originales. Una foto Kering cuyos bytes son PNG
+pero cuyo nombre de origen no tiene extensión puede exportarse como `.png` para
+Farfetch y `.jpeg` para Miinto sin tocar el archivo opaco original. Otros
+formatos no se publican para Miinto sin una decisión explícita de migración.
+
+`python image_exports.py --dry-run` consulta los IDs actuales de Odoo y muestra
+nombres, bytes estimados, IDs/vistas ausentes, imágenes no publicables y
+conflictos antes de escribir. Se puede acotar con `--ean <EAN>`. Para reconstruir
+exportaciones históricas, ejecutar primero ese dry-run; `--apply` es explícito,
+idempotente y verifica los bytes al escribir. Si un destino ya existe con
+contenido diferente, la publicación se bloquea sin sobrescribirlo. La
+reconstrucción usa IDs vigentes de Odoo, no afirma recuperar IDs históricos ni
+reconstruye imágenes ausentes.
+
+### Incorporacion propuesta al espejo NAS
+
+Según el contexto operativo aportado para esta tarea, el origen es
+`/mnt/cloud-imagenes/images/` y hay un rsync cada 30 minutos hacia
+`192.168.0.19::Fotos`; ese dato no se verificó ni se modificó en esta revisión.
+Los exports se ubican bajo `commercial_exports/`, por lo que una réplica
+recursiva del árbol los encontrará como nombres nuevos; el rsync no realiza los
+renombrados comerciales. Antes de incorporarlos, revisar el comando real del
+espejo y ejecutar, sin `--delete`, un dry-run solo para esta subcarpeta:
+
+```sh
+rsync -avn --checksum --itemize-changes --stats \
+  /mnt/cloud-imagenes/images/commercial_exports/ \
+  192.168.0.19::Fotos/commercial_exports/
+```
+
+El operador debe comprobar en ambos lados el espacio disponible para los bytes
+duplicados, permisos de escritura de la cuenta rsync, ACL y que el destino
+corresponda al módulo esperado. Tras una aprobación separada, transferir de
+forma aditiva, sin `--delete`, y comparar SHA-256 origen/destino. No replicar el
+catálogo SQLite, locks, estado Graph, backups ni staging. No se modificó ni
+ejecutó el espejo existente ni se escribieron datos al NAS.
+
 ## CLI (ejemplos para staging, no ejecutar en produccion)
 
 No existe migracion automatica al arrancar la app. El inventario usa solo

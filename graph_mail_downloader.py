@@ -22,7 +22,14 @@ from sqlalchemy.engine import URL
 
 from db_config import load_db_config, load_env_file
 from filelock import FileLock
-from image_repository import ImageRepository, atomic_write, collision_name, file_checksum, repository_root
+from image_repository import (
+    ImageRepository,
+    atomic_write,
+    collision_name,
+    file_checksum,
+    repository_root,
+    validate_ean,
+)
 import hashlib
 from image_naming import sanitize_filename as _sanitize_filename
 from image_naming import market_view_from_image_name as _market_view_from_image_name
@@ -466,6 +473,9 @@ def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
     """Obtiene los IDs externos de Farfetch y Miinto para los EAN indicados."""
     if not eans:
         return {}
+    normalized_eans = {str(ean).strip() for ean in eans}
+    for ean in normalized_eans:
+        validate_ean(ean)
 
     config = load_db_config()
     if not all([config.host, config.database, config.user]):
@@ -494,15 +504,28 @@ def _get_market_ids_by_ean(eans: set[str]) -> dict[str, dict[str, str]]:
         """
     ).bindparams(bindparam("eans", expanding=True))
     market_names = {2: "Miinto", 3: "Farfetch"}
-    result: dict[str, dict[str, str]] = {}
-    checkpoint()
+    found: dict[str, dict[str, set[str]]] = {}
     try:
         with engine.connect() as conn:
-            for row in conn.execute(query, {"eans": sorted(eans)}).mappings():
-                result.setdefault(row["ean"], {})[market_names[row["siteweb_id"]]] = row["product_website_id"]
+            ordered_eans = sorted(normalized_eans)
+            for start in range(0, len(ordered_eans), 500):
+                checkpoint()
+                batch = ordered_eans[start:start + 500]
+                for row in conn.execute(query, {"eans": batch}).mappings():
+                    market = market_names.get(int(row["siteweb_id"]))
+                    market_id = str(row["product_website_id"] or "").strip()
+                    ean = str(row["ean"]).strip()
+                    if market and market_id:
+                        found.setdefault(ean, {}).setdefault(market, set()).add(market_id)
     finally:
         engine.dispose()
-    return result
+
+    if any(len(ids) > 1 for markets in found.values() for ids in markets.values()):
+        raise ValueError("Odoo devuelve IDs comerciales ambiguos por EAN y canal")
+    return {
+        ean: {market: next(iter(ids)) for market, ids in markets.items()}
+        for ean, markets in found.items()
+    }
 
 
 def _market_image_names(file_name: str, market_ids: dict[str, str]) -> dict[str, str]:
@@ -517,7 +540,13 @@ def _market_image_names(file_name: str, market_ids: dict[str, str]) -> dict[str,
     return names
 
 
-def _create_market_images(source: Path, ean_dir: Path, market_ids: dict[str, str]) -> list[Path]:
+def _create_market_images(
+    source: Path,
+    ean_dir: Path,
+    market_ids: dict[str, str],
+    *,
+    publish: bool = True,
+) -> list[Path]:
     repository = ImageRepository(ean_dir.parent)
     records = [record for record in repository.records(ean_dir.name)
                if record.path == source and not record.market and _market_image_names(record.name, market_ids)]
@@ -534,7 +563,18 @@ def _create_market_images(source: Path, ean_dir: Path, market_ids: dict[str, str
                 date=original.date, allow_invalid=True,
             )
             created.append(record.path)
+    if publish:
+        from image_exports import build_commercial_export_plan, publish_commercial_export_plan
+        plan = build_commercial_export_plan(repository, {ean_dir.name: market_ids}, [ean_dir.name])
+        publish_commercial_export_plan(repository, plan)
     return created
+
+
+def _publish_market_exports(repository: ImageRepository, market_ids_by_ean: dict[str, dict[str, str]],
+                            eans: set[str]) -> None:
+    from image_exports import build_commercial_export_plan, publish_commercial_export_plan
+    plan = build_commercial_export_plan(repository, market_ids_by_ean, sorted(eans))
+    publish_commercial_export_plan(repository, plan)
 
 
 def _market_pending_file(images_root: Path) -> Path:
@@ -564,12 +604,15 @@ def _refresh_pending_market_images_locked(images_root: Path) -> tuple[int, int]:
     market_ids_by_ean = _get_market_ids_by_ean({entry["ean"] for entry in pending_entries.values()})
     completed = 0
     created = 0
+    publish_eans = set()
     for source_name, entry in list(pending_entries.items()):
         checkpoint()
         source = Path(source_name)
         market_ids = market_ids_by_ean.get(entry["ean"], {})
-        created_paths = _create_market_images(source, source.parent, market_ids)
+        created_paths = _create_market_images(source, source.parent, market_ids, publish=False)
         created += len(created_paths)
+        if market_ids:
+            publish_eans.add(entry["ean"])
         registered = {record.market for record in repository.records(entry["ean"]) if record.path == source}
         missing = [market for market in ("Farfetch", "Miinto") if market not in registered]
         if missing:
@@ -578,6 +621,9 @@ def _refresh_pending_market_images_locked(images_root: Path) -> tuple[int, int]:
         else:
             completed += 1
             pending_entries.pop(source_name, None)
+
+    if publish_eans:
+        _publish_market_exports(repository, market_ids_by_ean, publish_eans)
 
     if pending_entries:
         _save_state(pending_file, pending_entries)
@@ -592,7 +638,6 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
     repository = ImageRepository(images_root)
     eans_by_image_key = _load_eans_by_image_key()
     matched_eans = set(eans_by_image_key.values())
-    market_ids_by_ean = _get_market_ids_by_ean(matched_eans)
     max_entries = positive_setting("GRAPH_IMAGE_MAX_ZIP_ENTRIES", 50000)
     max_entry_bytes = positive_setting("GRAPH_IMAGE_MAX_ENTRY_BYTES", 30 * 1024**2)
     max_total_bytes = positive_setting("GRAPH_IMAGE_MAX_ZIP_UNPACKED_BYTES", 1024**3)
@@ -642,8 +687,18 @@ def _extract_zip(archive_path: Path, images_root: Path) -> list[Path]:
                 metadata={"modelo": _model_from_image_name(file_name)}, allow_invalid=True,
             )
             extracted_paths.append(record.path)
-            market_ids = market_ids_by_ean.get(ean, {})
-            extracted_paths.extend(_create_market_images(record.path, record.path.parent, market_ids))
+    market_ids_by_ean = _get_market_ids_by_ean(matched_eans)
+    for ean in matched_eans:
+        market_ids = market_ids_by_ean.get(ean, {})
+        if not market_ids:
+            continue
+        for record in repository.records(ean):
+            if record.market or not _market_image_names(record.name, market_ids):
+                continue
+            extracted_paths.extend(_create_market_images(
+                record.path, record.path.parent, market_ids, publish=False,
+            ))
+    _publish_market_exports(repository, market_ids_by_ean, matched_eans)
     _refresh_pending_market_images(repository.root)
     return extracted_paths
 

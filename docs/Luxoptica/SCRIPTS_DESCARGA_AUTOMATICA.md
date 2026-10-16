@@ -94,7 +94,8 @@ docker compose logs -f abcd-luxoptica-monitor
 
 Las carpetas persistentes son:
 
-- `repo/images/`: imágenes originales y copias por mercado.
+- `repo/images/`: originales por EAN, catálogo común y publicaciones bajo
+  `commercial_exports/<plataforma>/<EAN>/`.
 - `luxoptica_data/`: solicitudes TXT, manifiestos y descargas auxiliares.
 - `masterdata_data/`: diccionario personalizado de producción.
 
@@ -173,29 +174,46 @@ python scheduler_luxoptica.py status
 
 ```
 repo/images/
-├─ .market_pending.json                (imágenes sin ID de mercado)
-└─ RB2140/
-   └─ 8056262672563/
-      ├─ originales.png
-      ├─ Farfetch/
-      │  ├─ <id>_V1.png
-      │  ├─ <id>_V2.png
-      │  └─ <id>_V3.png
-      └─ Miinto/
-         ├─ <id>_V1.jpeg
-         ├─ <id>_V2.jpeg
-         └─ <id>_V3.jpeg
+├─ 8056262672563/
+│  └─ originales Luxoptica sin renombrar
+├─ commercial_exports/
+│  ├─ Farfetch/8056262672563/<id-odoo>_V1.png
+│  └─ Miinto/8056262672563/<id-odoo>_V1.jpeg
 ```
 
 Si una imagen ya se ha descargado pero Odoo todavía no tiene el ID de
 Farfetch o Miinto, el original se conserva en su carpeta EAN y se registra en
 `.market_pending.json`. El monitor vuelve a consultar Odoo en cada intervalo
 (`--interval-minutes`, 10 minutos por defecto) y crea las copias pendientes
-cuando los IDs aparecen.
+cuando los IDs aparecen. Las representaciones del catálogo no son archivos
+comerciales físicos: el monitor materializa copias fuera de las carpetas por EAN,
+sin romper la deduplicación. V1/V2/V3 son frontal/perspectiva/lateral; vista
+desconocida no se asigna por posición o nombre supuesto.
+
+Para reconstrucción histórica, ejecutar desde el entorno de la aplicación:
+
+```powershell
+python image_exports.py --dry-run
+python image_exports.py --dry-run --ean 8056262672563
+```
+
+Revisar primero IDs vigentes de Odoo, vistas ausentes, conflictos y bytes
+estimados. `--apply` publica de forma idempotente y no sobrescribe un destino
+con otros bytes. Miinto conserva los bytes PNG bajo `.jpeg`; los originales,
+incluidos los Kering PNG sin extensión, nunca se renombran.
 
 ---
 
 ## NAS Synology: sincronización de imágenes
+
+El contexto operativo aportado para esta tarea indica que el origen actual es
+`/mnt/cloud-imagenes/images/` y que un espejo rsync cada 30 minutos copia hacia
+`192.168.0.19::Fotos`. No se verificó ni modificó esa tarea. Si su recorrido es
+recursivo, `commercial_exports/` aparecerá como contenido nuevo; no se ejecutan
+renombrados comerciales en el NAS. Antes de incluirlo, validar el comando real,
+espacio y permisos mediante un dry-run limitado a esa subcarpeta, sin `--delete`,
+y comparar SHA-256 tras una transferencia aprobada. El diseño completo está en
+[`IMAGE_REPOSITORY.md`](../IMAGE_REPOSITORY.md#incorporacion-propuesta-al-espejo-nas).
 
 Las imágenes organizadas en `repo/images/` se sincronizan con el Synology
 mediante el servicio rsync. El módulo remoto validado es `Fotos` y el destino

@@ -149,26 +149,33 @@ relación en Odoo. Para operaciones en el canal debe usarse
 5. **Organización**:
    ```
    repo/images/
-   └── VE4526U/                                      (modelo)
-      └── 8056262672563/                            (EAN)
-         ├── 0VE4526U__108_71__P21__noshad__fr.png (original)
-         ├── 0VE4526U__108_71__P21__noshad__qt.png (original)
-         ├── 0VE4526U__108_71__P21__shad__lt.png   (original)
-         ├── Farfetch/
-         │   ├── 31715787_V1.png                   (noshad__fr)
-         │   ├── 31715787_V2.png                   (noshad__qt)
-         │   └── 31715787_V3.png                   (shad__lt)
-         └── Miinto/
-            ├── <id-miinto>_V1.jpeg               (noshad__fr)
-            ├── <id-miinto>_V2.jpeg               (noshad__qt)
-            └── <id-miinto>_V3.jpeg               (shad__lt)
+   ├── 8056262672563/
+   │   ├── 0VE4526U__108_71__P21__noshad__fr.png (original)
+   │   ├── 0VE4526U__108_71__P21__noshad__qt.png (original)
+   │   └── 0VE4526U__108_71__P21__shad__lt.png   (original)
+   └── commercial_exports/
+       ├── Farfetch/8056262672563/
+       │   ├── 31715787_V1.png
+       │   ├── 31715787_V2.png
+       │   └── 31715787_V3.png
+       └── Miinto/8056262672563/
+           ├── <id-miinto>_V1.jpeg
+           ├── <id-miinto>_V2.jpeg
+           └── <id-miinto>_V3.jpeg
    ```
 
-   Los originales se conservan en la carpeta del EAN. Los IDs de Farfetch y
-   Miinto se consultan en Odoo desde ese EAN; solo se generan las tres vistas
-   indicadas para cada mercado. Para Miinto se conserva el contenido PNG
-   original y solo se cambia la extensión del nombre a `.jpeg`, sin conversión
-   ni pérdida de calidad.
+   Los originales se conservan en `<EAN>/`; las publicaciones comerciales
+   son copias separadas y no rompen la deduplicación del repositorio. Los IDs
+   se consultan en Odoo por EAN. V1/V2/V3 corresponden a frontal,
+   perspectiva y lateral. Solo se publican vistas acreditadas. Miinto conserva
+   sus bytes PNG originales bajo la extensión histórica `.jpeg`; los originales
+   no se renombran ni se modifican.
+
+   Para reconstruir archivos comerciales existentes, primero ejecutar
+   `python image_exports.py --dry-run`; revisar IDs, vistas, conflictos y
+   espacio estimado. Solo tras aprobarlo se ejecuta `python image_exports.py
+   --apply`. El comando usa IDs vigentes de Odoo y no sobrescribe destinos en
+   conflicto.
 
 ### Monitoreo:
 - Ver archivo: `docs/Luxoptica/descargas/.mail_download_state.json`

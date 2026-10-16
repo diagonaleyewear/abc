@@ -265,6 +265,23 @@ el almacenamiento anterior. Las nuevas descargas, galerias y ZIP usan
 El historial/configuracion permanece en `KERING_DATA_ROOT`. Consultar las
 [reglas de nombres y plan de migracion](IMAGE_REPOSITORY.md) antes del despliegue.
 
+### Publicacion comercial desde fotos Kering
+
+La galeria conserva las fotos originales por EAN y no las renombra al
+clasificarlas. La exportacion comercial es una copia separada bajo
+`IMAGE_REPOSITORY_ROOT/commercial_exports/<plataforma>/<EAN>/`, con IDs actuales
+de Farfetch/Miinto consultados en Odoo. Solo una vista acreditada puede
+publicarse: la regla del visor asigna primera posicion a lateral (V3), segunda
+a frontal (V1) y tercera a detalle, que nunca se convierte en V2. Una vista
+perspectiva (V2) requiere evidencia independiente. Si falta una vista, la
+publicacion es parcial.
+
+Los bytes PNG recibidos de Kering aunque el nombre original sea opaco o no tenga
+extension se exportan con la extension comercial requerida sin cambiar el
+original. Miinto mantiene `.jpeg` con los bytes PNG historicos; no se convierte
+ni se modifica el original. Conflictos de nombre bloquean la escritura de esa
+publicacion y requieren revision, no sustitucion destructiva.
+
 ## Correccion de acceso no confirmado (2026-10-10)
 
 La PR original #36 ya esta fusionada. El commit eb519f9 no estaba en main.
