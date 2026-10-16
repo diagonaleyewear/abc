@@ -2,6 +2,7 @@ from datetime import date
 from dataclasses import replace
 from io import BytesIO
 import json
+from pathlib import Path
 from unittest.mock import Mock
 from zipfile import ZipFile
 
@@ -239,20 +240,19 @@ def test_one_listing_query_filters_reentry_and_no_export_on_render(monkeypatch, 
         "page_transition(st.session_state, st.session_state.get('route','imagenes-kering'))\n"
         "render_kering_page(None)")
     app.run()
-    assert not app.exception and reader.call_count == 1
+    assert not app.exception and reader.call_count == 0
     app.run()
+    assert reader.call_count == 0
+    next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
+    assert reader.call_count == 1
+    assert ui.service().store.repository.search_eans("PO/1") == [EAN]
     app.text_input(key="kering_order_number").set_value("changed").run()
     assert any("pendientes de aplicar" in warning.value for warning in app.warning)
-    app.button(key="kering_indicator_Pendientes").click().run()
-    app.selectbox(key="kering_open_order").set_value(1).run()
-    assert reader.call_count == 1
-    next(button for button in app.button if button.label == "Actualizar pedidos").click().run()
-    assert reader.call_count == 2
     app.session_state["route"] = "config"
     app.run()
     app.session_state["route"] = "imagenes-kering"
     app.run()
-    assert reader.call_count == 3 and not app.exception
+    assert reader.call_count == 1 and not app.exception
 
 
 def test_search_leading_zeros_and_zip_cache_invalidation(monkeypatch, tmp_path):
@@ -260,14 +260,18 @@ def test_search_leading_zeros_and_zip_cache_invalidation(monkeypatch, tmp_path):
     record, _ = store.repository.save(EAN, "extra.png", photo(1), provider="Other", origin="offline")
     monkeypatch.setattr(ui, "configured_orders", Mock(side_effect=AssertionError("No Odoo in search")))
     app = AppTest.from_string(
-        "from kering_images import ImageStore, data_root\nfrom kering_images_ui import render_image_search\n"
+        "import streamlit as st\nfrom kering_images import ImageStore, data_root\n"
+        "from kering_images_ui import render_image_search\n"
+        "st.session_state['auth_role']='masterdata'\n"
         "render_image_search(ImageStore(data_root()))")
     app.run()
     app.text_input(key="kering_image_query").set_value(EAN).run()
+    app.button(key="kering_library_search_button").click().run()
     assert not app.exception
-    assert EAN in app.selectbox[0].value
+    assert EAN in app.selectbox(key="kering_library_selected").value
     app.text_input(key="kering_image_query").set_value(EAN.lstrip('0')).run()
-    assert any("Sin imagenes" in item.value for item in app.info)
+    app.button(key="kering_library_search_button").click().run()
+    assert any("No se encontraron" in item.value for item in app.info)
     # A prepared ZIP is a snapshot; external changes require manual refresh.
     builder = Mock(wraps=ui.prepare_order_zip)
     planner = Mock(wraps=ui.order_export_plan)
@@ -289,6 +293,145 @@ def test_search_leading_zeros_and_zip_cache_invalidation(monkeypatch, tmp_path):
     assert not app.get("download_button")
 
 
+def test_local_library_search_and_download_permissions(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMAGE_THUMBNAIL_CACHE_ROOT", str(Path.cwd() / ".pytest_cache" / "kering-library-thumbnails"))
+    monkeypatch.setenv("IMAGE_THUMBNAIL_CACHE_MAX_BYTES", str(10 * 1024 * 1024))
+    monkeypatch.setenv("IMAGE_THUMBNAIL_CACHE_RESERVE_BYTES", "1")
+    repository = ImageRepository(tmp_path / "images")
+    repository.save(EAN, "front.png", photo(1), provider="Kering", origin="local",
+                    view="frontal", metadata={"modelo": "Modelo Biblioteca"})
+    no_photo_ean = "0000000000002"
+    repository.associate_order("Kering", "PO/NO-PHOTO", [no_photo_ean])
+
+    assert repository.search_eans("Modelo Biblioteca") == [EAN]
+    accented_ean = "0000000000007"
+    repository.save(accented_ean, "accented.png", photo(7), provider="Other", origin="local",
+                    metadata={"modelo": "Óptica"})
+    assert repository.search_eans("ÓPTICA") == [accented_ean]
+    assert repository.search_eans("PO/NO-PHOTO") == [no_photo_ean]
+    assert repository.search_eans(EAN) == [EAN]
+    assert repository.search_eans(EAN.lstrip("0")) == []
+    assert repository.search_eans("%") == []
+    with pytest.raises(PermissionError):
+        repository.zip_eans_for_user([EAN], role="user")
+    assert repository.zip_eans_for_user([EAN], role="masterdata")
+    store = ImageStore(ui.data_root())
+    store.create_run([order(number=4321)], "admin", 7, date(2026, 10, 1), date(2026, 10, 1))
+    with repository.connect() as connection:
+        connection.execute("DELETE FROM order_eans WHERE source='Kering' AND order_id='PO/4321'")
+    assert repository.search_eans("PO/NO-PHOTO") == [no_photo_ean]
+    with repository.connect() as connection:
+        connection.execute("DELETE FROM order_eans WHERE source='Kering' AND order_id='PO/4321'")
+    assert repository.search_eans("PO/4321") == []
+    store.index_local_order_search("PO/4321", role="masterdata")
+    assert repository.search_eans("PO/4321") == [EAN]
+    with pytest.raises(PermissionError):
+        store.index_local_order_search("PO/4321", role="user")
+    for index in range(13):
+        paged_ean = f"9{index:012d}"
+        repository.save(paged_ean, "page.png", photo(index + 2), provider="Other", origin="local",
+                        metadata={"modelo": "Paginacion biblioteca"})
+    assert len(repository.search_eans("Paginacion biblioteca", limit=12)) == 12
+    assert len(repository.search_eans("Paginacion biblioteca", limit=12, offset=12)) == 1
+
+    app = AppTest.from_string(
+        "import streamlit as st\nfrom kering_images import ImageStore, data_root\n"
+        "from kering_images_ui import render_image_search\n"
+        "st.session_state['auth_role']='masterdata'\n"
+        "render_image_search(ImageStore(data_root()))")
+    app.run()
+    app.text_input(key="kering_image_query").set_value("Modelo Biblioteca").run()
+    app.button(key="kering_library_search_button").click().run()
+    assert not app.exception
+    assert app.selectbox(key="kering_library_selected").value == EAN
+    assert not app.error, [item.value for item in app.error]
+    assert not any("Sin fotografias" in item.value for item in app.info)
+    app.button(key=f"kering-library-{EAN}-prepare-download").click().run()
+    assert app.get("download_button") and not app.exception
+    app.text_input(key="kering_image_query").set_value("Paginacion biblioteca").run()
+    app.button(key="kering_library_search_button").click().run()
+    assert app.selectbox(key="kering_library_selected").value == "9000000000000"
+    assert not next(button for button in app.button if button.key == "kering_library_next").disabled
+    app.button(key="kering_library_next").click().run()
+    assert app.selectbox(key="kering_library_selected").value == "9000000000012"
+    assert not app.exception
+    app.text_input(key="kering_image_query").set_value("PO/NO-PHOTO").run()
+    app.button(key="kering_library_search_button").click().run()
+    assert not app.exception
+    assert app.selectbox(key="kering_library_selected").value == no_photo_ean
+
+
+def test_library_role_is_read_only_and_does_not_query_odoo(monkeypatch):
+    store = ImageStore(ui.data_root())
+    record, _ = store.repository.save(EAN, "front.png", photo(1), provider="Kering",
+                                      origin="local", view="frontal")
+    reader = Mock(side_effect=AssertionError("No Odoo on library navigation"))
+    monkeypatch.setattr(ui, "configured_orders", reader)
+    monkeypatch.setattr(ui, "service", lambda: Mock(store=store))
+    app = AppTest.from_string(
+        "import streamlit as st\nfrom kering_images_ui import render_kering_page\n"
+        "st.session_state['auth_role']='masterdata'\nrender_kering_page(None)")
+    app.run()
+    assert not app.exception
+    assert app.title[0].value == "Biblioteca de fotografías de producto"
+    assert reader.call_count == 0
+    assert not any(button.label == "Buscar pedidos en Odoo" for button in app.button)
+    assert record.path.exists()
+
+
+def test_library_product_statuses(tmp_path):
+    store = ImageStore(tmp_path / "kering")
+    assert ui.product_library_status(store, EAN, []) == ("pendiente", "Pendiente")
+    store.repository.save(EAN, "front.png", photo(1), provider="Other", origin="local", view="frontal")
+    assert ui.product_library_status(store, EAN, store.repository.catalog_records(EAN)) == (
+        "parcial", "Parcial")
+
+    complete_ean = "0000000000003"
+    for index, view in enumerate(("frontal", "perspectiva", "lateral"), start=2):
+        store.repository.save(complete_ean, f"{view}.png", photo(index), provider="Kering",
+                             origin="local", view=view)
+    assert ui.product_library_status(
+        store, complete_ean, store.repository.catalog_records(complete_ean)) == ("completo", "Completo")
+
+    duplicate_ean = "0000000000006"
+    identical = photo(6)
+    for view in VIEWS:
+        store.repository.save(duplicate_ean, f"{view}.png", identical, provider="Kering",
+                              origin="local", view=view)
+    assert ui.product_library_status(
+        store, duplicate_ean, store.repository.catalog_records(duplicate_ean)) == (
+            "parcial", "Parcial")
+
+    review_ean = "0000000000004"
+    store.repository.save(review_ean, "unknown.png", photo(5), provider="Kering",
+                          origin="local", view="unknown")
+    assert ui.product_library_status(
+        store, review_ean, store.repository.catalog_records(review_ean)) == (
+            "revision", "Pendiente de revisión")
+    review_record = store.repository.catalog_records(review_ean)[0]
+    original_path = review_record.path
+    with pytest.raises(PermissionError):
+        store.repository.review_view_for_user(
+            review_record.id, "frontal", role="masterdata", reviewer="viewer", reason="Not authorized")
+    store.repository.review_view_for_user(
+        review_record.id, "frontal", role="admin", reviewer="admin", reason="Checked original")
+    assert original_path.exists()
+
+    error_ean = "0000000000005"
+    store.repository.save(error_ean, "invalid.png", b"not-an-image", provider="Kering",
+                          origin="local", view="frontal", allow_invalid=True)
+    assert ui.product_library_status(
+        store, error_ean, store.repository.catalog_records(error_ean)) == ("error", "Error")
+
+    failed_ean = "0000000000008"
+    run_id = store.create_run([order(eans=(failed_ean,), number=88)], "admin", 7,
+                              date(2026, 10, 1), date(2026, 10, 1))
+    with store.connect() as connection:
+        connection.execute("UPDATE attempts SET status='Error' WHERE run_id=?", (run_id,))
+        connection.execute("UPDATE runs SET status='Finalizado', ended=1 WHERE id=?", (run_id,))
+    assert ui.product_library_status(store, failed_ean, []) == ("error", "Error")
+
+
 def test_pagination_stable_selection_and_queries(monkeypatch, tmp_path):
     orders = [order(number=index) for index in range(1, 24)]
     reader = Mock(return_value=orders)
@@ -298,11 +441,14 @@ def test_pagination_stable_selection_and_queries(monkeypatch, tmp_path):
         "st.session_state['auth_role']='admin'\nrender_kering_page(None)")
     app.session_state["kering_selected_ids"] = [1, 22]
     app.run()
+    assert reader.call_count == 0
+    next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
+    assert reader.call_count == 1
     app.number_input(key="kering_orders_page_Todos_2").set_value(2).run()
     assert app.session_state["kering_selected_ids"] == [1, 22]
     assert reader.call_count == 1
     reader.return_value = list(reversed(orders))
-    next(button for button in app.button if button.label == "Actualizar pedidos").click().run()
+    next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
     assert reader.call_count == 2
     assert app.session_state["kering_selected_ids"] == [1, 22]
     assert not app.exception

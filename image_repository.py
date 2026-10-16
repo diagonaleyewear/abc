@@ -205,6 +205,8 @@ class ImageRepository:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
+            connection.create_function(
+                "casefold", 1, lambda value: value.casefold() if isinstance(value, str) else "")
             with connection:
                 yield connection
         finally:
@@ -316,6 +318,31 @@ class ImageRepository:
                 row["date"], json.loads(row["metadata"])))
         return records
 
+    def search_eans(self, query: str, *, limit: int = 12, offset: int = 0) -> list[str]:
+        """Search product metadata and locally associated Kering order numbers."""
+        query = query.strip()
+        if not query or len(query) > 120 or not 1 <= limit <= 50 or offset < 0:
+            raise ValueError("Consulta o paginacion invalida")
+        escaped = query.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        ean_query = query if query.isascii() and query.isdigit() else pattern
+        with self.connect() as connection:
+            rows = connection.execute("""
+                WITH matches(ean) AS (
+                    SELECT a.ean
+                    FROM assets a
+                    JOIN representations r ON r.asset_id=a.id
+                    WHERE a.ean LIKE ? ESCAPE '\\'
+                       OR casefold(r.metadata) LIKE ? ESCAPE '\\'
+                    UNION
+                    SELECT ean FROM order_eans
+                    WHERE source='Kering' AND casefold(order_id) LIKE ? ESCAPE '\\'
+                )
+                SELECT DISTINCT ean FROM matches
+                ORDER BY ean LIMIT ? OFFSET ?
+            """, (ean_query, pattern, pattern, limit, offset)).fetchall()
+        return [str(row["ean"]) for row in rows]
+
     def save(self, ean: str, name: str, content: bytes, *, provider: str, origin: str,
              view: str = "unknown", market: str = "", date: str | None = None,
              metadata: dict | None = None, allow_invalid: bool = False) -> tuple[ImageRecord, bool]:
@@ -409,6 +436,12 @@ class ImageRepository:
                                (review["date"], record.ean, "view_review",
                                 json.dumps({"record_id": record_id, **review})))
 
+    def review_view_for_user(self, record_id: int, view: str, *, role: str | None,
+                             reviewer: str, reason: str, evidence: dict | None = None) -> None:
+        if role != "admin":
+            raise PermissionError("La revision de vistas requiere un usuario administrador")
+        self.review_view(record_id, view, reviewer=reviewer, reason=reason, evidence=evidence)
+
     def order_records(self, source: str, order_id: str) -> list[ImageRecord]:
         with self.connect() as connection:
             eans = {row[0] for row in connection.execute(
@@ -438,6 +471,12 @@ class ImageRepository:
                         names[name] = record.checksum
                         archive.writestr(name, self.verified_bytes(record))
         return buffer.getvalue()
+
+    def zip_eans_for_user(self, eans: list[str], *, role: str | None,
+                          market: str | None = None) -> bytes:
+        if role not in {"admin", "masterdata"}:
+            raise PermissionError("La descarga requiere acceso a la biblioteca de imagenes")
+        return self.zip_eans(eans, market=market)
 
     def sync_nas(self, target: Path) -> None:
         from process_activity import record_process

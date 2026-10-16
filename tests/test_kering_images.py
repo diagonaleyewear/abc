@@ -21,10 +21,26 @@ def no_external_network(monkeypatch, tmp_path):
     monkeypatch.setenv("KERING_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("KERING_DATA_ROOT", str(tmp_path / "kering-offline"))
     monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "common-images"))
+    real_create_connection = socket.create_connection
+    real_socket_connect = socket.socket.connect
+
     def reject(*args, **kwargs):
         raise AssertionError("Las pruebas Kering son offline")
-    monkeypatch.setattr(socket, "create_connection", reject)
-    monkeypatch.setattr(socket.socket, "connect", reject)
+
+    def reject_external_create_connection(address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) else address
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return real_create_connection(address, *args, **kwargs)
+        return reject(address, *args, **kwargs)
+
+    def reject_external_socket_connect(connection, address):
+        host = address[0] if isinstance(address, tuple) else address
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return real_socket_connect(connection, address)
+        return reject(address)
+
+    monkeypatch.setattr(socket, "create_connection", reject_external_create_connection)
+    monkeypatch.setattr(socket.socket, "connect", reject_external_socket_connect)
     monkeypatch.setattr("kering_portal.sync_playwright", reject)
 from io import BytesIO
 from PIL import Image
@@ -73,6 +89,9 @@ def test_encrypted_configuration(tmp_path, monkeypatch):
     assert store.load() == {**DEFAULT_SETTINGS, **config}
     with pytest.raises(ValueError):
         store.save(dict(config, url="https://example.org"))
+    with pytest.raises(PermissionError):
+        store.save_for_user(config, role="masterdata")
+    store.save_for_user(config, role="admin")
 
 
 def test_reuse_and_repair_only_pending(tmp_path):
@@ -137,6 +156,14 @@ def test_shared_batch_lock_blocks_a_second_service(tmp_path):
             service.submit([order()], "offline", 7, date(2026, 3, 29), date(2026, 3, 29), lambda _: order(), FakePortal())
     service.executor.shutdown(wait=True)
     assert not store.history()
+
+
+def test_user_batch_submission_requires_admin_role(tmp_path):
+    service = BatchService(ImageStore(tmp_path))
+    with pytest.raises(PermissionError):
+        service.submit_for_user([], "viewer", "masterdata", 7, date(2026, 3, 29),
+                                date(2026, 3, 29), lambda _: None)
+    service.executor.shutdown(wait=True)
 
 
 def pilot_config(config_store, **changes):
@@ -302,7 +329,9 @@ def test_order_first_ui_processes_one_pilot_and_reuses_images(tmp_path, monkeypa
     monkeypatch.setattr(ui, "service", lambda: batch)
     monkeypatch.setattr(ui, "configured_orders", lambda *args, **kwargs: [current])
     monkeypatch.setattr(ui, "create_portal", lambda _: portal)
-    app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\nst.session_state['auth_role']='admin'\nrender_kering_page(None)")
+    app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\n"
+                              "st.session_state['auth_role']='admin'\nst.session_state['auth_user']='operator'\n"
+                              "render_kering_page(None)")
     from concurrent.futures import Future
     probe = Future()
     probe.set_result({"ok": True})
@@ -310,13 +339,14 @@ def test_order_first_ui_processes_one_pilot_and_reuses_images(tmp_path, monkeypa
     try:
         app.run()
         assert not app.exception
+        next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
         listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
         assert listing.iloc[0]["Procesamiento"] == "No procesado"
         button = next(button for button in app.button if button.label == "Procesar pendientes")
         assert not button.disabled
         button.click().run()
         batch.executor.submit(lambda: None).result(timeout=10)
-        next(button for button in app.button if button.label == "Actualizar pedidos").click().run()
+        next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
         assert not app.exception
         listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
         assert listing.iloc[0]["Procesamiento"] == "Procesado"
@@ -377,7 +407,10 @@ def test_order_list_connection_failure_is_specific_and_secret_free(tmp_path, mon
     monkeypatch.setattr(ui, "service", lambda: Mock(store=ImageStore(tmp_path)))
     failure = OperationalError("private-sql", {}, Exception("offline-secret user host password"))
     monkeypatch.setattr(ui, "configured_orders", Mock(side_effect=failure))
-    app = AppTest.from_string("from datetime import date\nfrom kering_images_ui import render_order_list\nrender_order_list(None, date(2026,9,1), date(2026,10,9))")
+    app = AppTest.from_string(
+        "import streamlit as st\nfrom datetime import date\nfrom kering_images_ui import render_order_list\n"
+        "st.session_state['auth_role']='admin'\n"
+        "render_order_list(None, date(2026,9,1), date(2026,10,9))")
     app.run()
     assert not app.exception
     assert "ODOO_CONEXION" in app.error[0].value
@@ -692,9 +725,9 @@ def test_orders_and_history_ui_are_offline(tmp_path, monkeypatch):
     app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\nst.session_state['auth_role']='admin'\nrender_kering_page(None)")
     app.run()
     assert not app.exception
-    assert app.title[0].value == "Im\u00e1genes Kering"
+    assert app.title[0].value == "Biblioteca de fotografías de producto"
     assert not app.get("download_button")
-    next(button for button in app.button if button.label == "Actualizar pedidos").click().run()
+    next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
     assert not app.exception
     assert any("Seleccionar" in frame.value.columns for frame in app.dataframe)
     ui.service.clear()
@@ -712,14 +745,15 @@ def test_ui_injects_configured_adapter_and_sql_scope(monkeypatch):
     factory = Mock(return_value=portal)
     batch = Mock()
     batch.store = ImageStore(ui.data_root())
-    batch.submit.return_value = "offline-run"
+    batch.submit_for_user.return_value = "offline-run"
     reader = Mock(return_value=[order()])
     monkeypatch.setattr(ui, "create_portal", factory)
     monkeypatch.setattr(ui, "service", lambda: batch)
     monkeypatch.setattr(ui, "configured_orders", reader)
+    monkeypatch.setattr(ui.st, "session_state", {"auth_role": "admin", "auth_user": "operator"})
     assert ui.submit_orders(None, config, [order()], date(2026, 3, 29), date(2026, 3, 29)) == "offline-run"
-    assert batch.submit.call_args.kwargs["portal"] is portal
-    loader = batch.submit.call_args.args[-1]
+    assert batch.submit_for_user.call_args.kwargs["portal"] is portal
+    loader = batch.submit_for_user.call_args.args[-1]
     loader(1)
     assert reader.call_args.args[-1] == [1]
     assert reader.call_args.args[1]["include_commercial_contacts"] is True

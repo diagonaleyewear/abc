@@ -790,7 +790,9 @@ def render_home_page() -> None:
     from cloud_dashboard import render_dashboard
     render_sidebar_shell("Inicio")
     pages = {"master": MASTER_IMPORT_PAGE, "dictionary": MASTER_DICTIONARY_PAGE}
-    if st.session_state.get("auth_role") == "admin":
+    if st.session_state.get("auth_role") == "masterdata":
+        pages["kering"] = KERING_IMAGES_PAGE
+    elif st.session_state.get("auth_role") == "admin":
         pages.update(images=LUXOPTICA_IMAGES_PAGE, luxpending=LUXOPTICA_PENDING_PAGE,
                      kering=KERING_IMAGES_PAGE, alerts=ALERTA_PEDIDOS_PAGE,
                      abchistory=ABC_HISTORY_PAGE, config=SETTINGS_PAGE)
@@ -2144,7 +2146,6 @@ def render_alerta_pedidos_page() -> None:
 
 def render_kering_images_page() -> None:
     render_sidebar_shell("Imagenes Kering")
-    require_admin_access()
     render_kering_page(get_db_engine)
     render_footer()
 
