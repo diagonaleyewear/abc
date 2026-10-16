@@ -136,6 +136,21 @@ def test_receipts_active_error_and_counts_without_sensitive_data():
             connection.execute("DELETE FROM process_runs")
 
 
+def test_weekly_snapshot_receipts_keep_automatic_and_manual_runs_separate():
+    with record_process("abc-snapshot-auto") as receipt:
+        receipt["counts"] = {"iso_year": 2026, "iso_week": 42, "products": 3}
+    automatic = dashboard.read_journal("abc-snapshot-auto", dashboard.time.time())
+    assert automatic.schedule == "No acreditada por el registro"
+    assert automatic.counts == {"iso_year": 2026, "iso_week": 42, "products": 3}
+    assert "abc-snapshot-auto" in dashboard.JOURNAL_PROCESSES
+
+    with record_process("abc-snapshot-manual") as receipt:
+        receipt["counts"] = {"snapshot_id": 17, "products": 3}
+    manual = dashboard.read_journal("abc-snapshot-manual", dashboard.time.time())
+    assert manual.schedule == "Manual / programación no registrada"
+    assert manual.counts == {"snapshot_id": 17, "products": 3}
+
+
 def test_concurrent_receipt_stays_active_and_stale_is_not_running():
     with record_process("nas-sync"):
         with record_process("nas-sync"):

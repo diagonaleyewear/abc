@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import json
 import os
 from uuid import uuid4
@@ -10,8 +11,10 @@ from sqlalchemy import create_engine, text
 
 from abcd_snapshots import (
     ensure_abcd_snapshot_table,
+    current_week_start,
     list_abcd_snapshot_refs,
     load_abcd_snapshot_by_id,
+    save_abcd_official_snapshot,
     save_abcd_snapshot,
 )
 
@@ -92,7 +95,7 @@ def test_legacy_migration_preserves_rows_and_is_idempotent(isolated_postgres_eng
             text(
                 """
                 SELECT snapshot_id, snapshot_date, run_at, engine_version, parameters,
-                       data_sha256, product_count, data
+                       data_sha256, product_count, data, capture_kind
                 FROM abcd_weekly_snapshots
                 """
             )
@@ -115,6 +118,7 @@ def test_legacy_migration_preserves_rows_and_is_idempotent(isolated_postgres_eng
     assert legacy.data_sha256 == ""
     assert legacy.product_count == len(legacy_payload)
     assert legacy.data == legacy_payload
+    assert legacy.capture_kind == "manual"
     assert primary_keys == ["PRIMARY KEY (snapshot_id)"]
 
     added = save_abcd_snapshot(
@@ -127,6 +131,45 @@ def test_legacy_migration_preserves_rows_and_is_idempotent(isolated_postgres_eng
     )
     assert added.snapshot_id != legacy.snapshot_id
     assert len(list_abcd_snapshot_refs(isolated_postgres_engine)) == 2
+
+
+def test_concurrent_official_captures_are_idempotent_and_keep_manual_history(
+    isolated_postgres_engine,
+) -> None:
+    captured_at = datetime.now(ZoneInfo("Europe/Madrid"))
+    week_start = current_week_start(captured_at)
+    manual = save_abcd_snapshot(
+        isolated_postgres_engine,
+        pd.DataFrame([{"EAN": "manual", "Stock": 1}]),
+        week_start,
+        run_at=captured_at,
+        engine_version="manual",
+    )
+
+    def capture(index: int):
+        return save_abcd_official_snapshot(
+            isolated_postgres_engine,
+            pd.DataFrame([{"EAN": f"official-{index}", "Stock": index}]),
+            captured_at=captured_at,
+            engine_version=f"official-{index}",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        captures = list(executor.map(capture, range(8)))
+
+    official_ids = {reference.snapshot_id for reference, _ in captures}
+    official_created = sum(created for _, created in captures)
+    references = list_abcd_snapshot_refs(isolated_postgres_engine)
+    official = [reference for reference in references if reference.capture_kind == "official"]
+
+    assert len(official_ids) == 1
+    assert official_created == 1
+    assert len(official) == 1
+    assert manual.snapshot_id != official[0].snapshot_id
+    assert len(references) == 2
+    restored, metadata = load_abcd_snapshot_by_id(isolated_postgres_engine, official[0].snapshot_id)
+    assert len(restored) == 1
+    assert metadata is not None and metadata.capture_kind == "official"
 
 
 def test_concurrent_captures_receive_unique_ids_and_retain_metadata(

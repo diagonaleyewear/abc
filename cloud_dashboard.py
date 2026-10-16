@@ -26,7 +26,8 @@ JOURNAL_PROCESSES = {
     "luxoptica-mail": ("Luxoptica · correo e imágenes", "luxpending"),
     "luxoptica-upload": ("Luxoptica · solicitudes", "master"),
     "nas-sync": ("Sincronización NAS", "images"),
-    "abc-snapshot": ("Snapshot ABC semanal", "abchistory"),
+    "abc-snapshot-auto": ("ABCD · captura semanal automática", "abchistory"),
+    "abc-snapshot-manual": ("ABCD · captura manual", "abchistory"),
 }
 
 
@@ -184,8 +185,14 @@ def read_journal(key: str, now: float) -> ProcessStatus:
     status.state = _execution_state(latest["started"], latest["ended"], status.result, latest["heartbeat"], now)
     if active is not None and 0 <= now - active <= 300:
         status.state = "En ejecución"
-    status.schedule = ("Activada (último registro)" if latest["enabled"] == 1 else "Programación desactivada"
-                       if latest["enabled"] == 0 else "Manual / programación no registrada")
+    if latest["enabled"] == 1:
+        status.schedule = "Activada (último registro)"
+    elif latest["enabled"] == 0:
+        status.schedule = "Programación desactivada"
+    elif key == "abc-snapshot-auto":
+        status.schedule = "No acreditada por el registro"
+    else:
+        status.schedule = "Manual / programación no registrada"
     status.next_run = latest["next_run"] if latest["next_run"] and latest["next_run"] >= now else None
     status.last_success = success
     status.duration = max(0, latest["ended"] - latest["started"]) if latest["ended"] else None

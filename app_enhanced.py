@@ -4,10 +4,12 @@ from functools import partial
 from pathlib import Path
 from image_repository import IMAGE_REPOSITORY_ROOT_ENV, repository_root
 from datetime import date, datetime, timedelta
+import sqlite3
 import hmac
 import json
 import os
 import time
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -86,14 +88,18 @@ from abcd_snapshots import (
     list_abcd_snapshot_dates,
     load_abcd_snapshot_by_id,
     load_abcd_weekly_snapshot,
-    save_abcd_weekly_snapshot,
+    madrid_now,
+    save_abcd_snapshot,
+    snapshot_week_inventory,
 )
+from process_activity import activity_path, read_state, record_process
 
 # ==============================================================================
 # CONFIG
 # ==============================================================================
 
 APP_TITLE = "Cloud"
+ABCD_MADRID = ZoneInfo("Europe/Madrid")
 APP_ICON = Path(__file__).resolve().parent / "logo" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
@@ -902,6 +908,47 @@ def render_settings_page() -> None:
     render_footer()
 
 
+def _abcd_snapshot_scheduler_status() -> tuple[str, bool]:
+    path = activity_path()
+    if not path.exists():
+        return "Sin ejecuciones automáticas registradas; la programación no está acreditada.", False
+    with read_state(path) as connection:
+        row = connection.execute(
+            """
+            SELECT started, ended, result, error_code, enabled, interval_seconds, next_run, heartbeat
+            FROM process_runs
+            WHERE process = 'abc-snapshot-auto'
+            ORDER BY started DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return "Sin ejecuciones automáticas registradas; la programación no está acreditada.", False
+    if row["ended"] is None:
+        heartbeat = row["heartbeat"] or row["started"]
+        if datetime.now(ABCD_MADRID).timestamp() - heartbeat <= 120:
+            return "Captura automática en ejecución.", False
+        return "La última captura automática parece interrumpida (sin latido reciente).", True
+    if not row["enabled"]:
+        return "La última ejecución no acredita una programación automática activa.", False
+
+    last_run = datetime.fromtimestamp(row["ended"], ABCD_MADRID).strftime("%d/%m/%Y %H:%M")
+    next_run = (
+        datetime.fromtimestamp(row["next_run"], ABCD_MADRID).strftime("%d/%m/%Y %H:%M")
+        if row["next_run"]
+        else "sin fecha"
+    )
+    if row["result"] != "Correcto":
+        return (
+            f"Última ejecución {last_run}: {row['result'] or 'sin resultado'} "
+            f"(código: {row['error_code'] or 'no disponible'}). Próximo intento esperado: {next_run}.",
+            True,
+        )
+    if row["next_run"] and datetime.now(ABCD_MADRID).timestamp() > row["next_run"]:
+        return f"Programación atrasada: última ejecución {last_run}; vencía {next_run}.", True
+    return f"Última ejecución correcta: {last_run}. Próxima ejecución esperada: {next_run}.", False
+
+
 def render_abc_page(abc_page: str | None = None) -> None:
     render_sidebar_shell("Análisis ABC")
     require_admin_access()
@@ -1107,30 +1154,66 @@ def render_abc_page(abc_page: str | None = None) -> None:
         st.caption("Guarda una foto semanal del análisis ABCD y consulta snapshots anteriores.")
         engine = get_db_engine()
 
-        current_snapshot_date = _current_week_start()
-        st.info(f"Semana actual: {current_snapshot_date.strftime('%d/%m/%Y')}")
+        captured_at = madrid_now()
+        current_snapshot_date = _current_week_start(captured_at)
+        current_iso_year, current_iso_week, _ = current_snapshot_date.isocalendar()
+        st.info(
+            f"Semana ISO actual: {current_iso_year}-W{current_iso_week:02} "
+            f"({current_snapshot_date:%d/%m/%Y} a {(current_snapshot_date + timedelta(days=6)):%d/%m/%Y}, "
+            "Europe/Madrid)"
+        )
 
-        if st.button("Guardar nueva foto de esta semana", type="primary"):
-            with st.spinner("Calculando ABCD y guardando foto semanal..."):
-                df = load_data_cached()
-                reference_date = pd.Timestamp.today().normalize()
-                snapshot_parameters = build_snapshot_parameters(reference_date)
-                df_classified = run_abcd_engine(df.copy(), reference_date=reference_date)
-                if ('EAN' not in df_classified.columns or df_classified['EAN'].isna().all()) and 'Cód Barras' in df_classified.columns:
-                    df_classified['EAN'] = df_classified['Cód Barras']
-                saved_date = save_abcd_weekly_snapshot(
-                    engine,
-                    df_classified,
-                    run_at=datetime.now().astimezone(),
-                    engine_version=engine_source_version(),
-                    parameters=snapshot_parameters,
+        st.subheader("Programación automática")
+        try:
+            schedule_message, schedule_is_error = _abcd_snapshot_scheduler_status()
+            (st.error if schedule_is_error else st.info)(schedule_message)
+        except (OSError, sqlite3.Error) as exc:
+            st.error(f"No se pudo leer el registro de ejecución ABCD: {type(exc).__name__}.")
+        st.caption(
+            "El registro confirma ejecuciones anteriores, no que cron/timer esté instalado o activo. "
+            "La programación no se activa desde esta pantalla."
+        )
+
+        if st.button("Guardar captura manual de esta semana", type="primary"):
+            try:
+                with st.spinner("Calculando ABCD y guardando captura manual..."):
+                    with record_process("abc-snapshot-manual") as receipt:
+                        df = load_data_cached()
+                        reference_date = pd.Timestamp(captured_at.date())
+                        snapshot_parameters = build_snapshot_parameters(captured_at)
+                        df_classified = run_abcd_engine(df.copy(), reference_date=reference_date)
+                        if ('EAN' not in df_classified.columns or df_classified['EAN'].isna().all()) and 'Cód Barras' in df_classified.columns:
+                            df_classified['EAN'] = df_classified['Cód Barras']
+                        saved = save_abcd_snapshot(
+                            engine,
+                            df_classified,
+                            run_at=captured_at,
+                            engine_version=engine_source_version(),
+                            parameters=snapshot_parameters,
+                        )
+                        snapshot_df, verified = load_abcd_snapshot_by_id(engine, saved.snapshot_id)
+                        if (
+                            verified is None
+                            or verified.data_sha256 != saved.data_sha256
+                            or len(snapshot_df) != len(df_classified)
+                            or verified.product_count != len(snapshot_df)
+                        ):
+                            raise RuntimeError("La lectura posterior no coincide con la captura guardada")
+                        receipt["counts"] = {
+                            "snapshot_id": saved.snapshot_id,
+                            "products": len(snapshot_df),
+                        }
+                st.success(
+                    f"Captura manual guardada y verificada para la semana "
+                    f"{current_iso_year}-W{current_iso_week:02}."
                 )
-            st.success(f"Nueva foto semanal guardada: {saved_date.strftime('%d/%m/%Y')}")
+            except Exception as exc:
+                st.error(f"No se pudo guardar/verificar la captura ABCD. Código: {type(exc).__name__}.")
 
         try:
             snapshot_refs = list_abcd_snapshot_refs(engine)
         except Exception as exc:
-            st.error(f"No se pudo cargar el histórico ABCD: {exc}")
+            st.error(f"No se pudo cargar el histórico ABCD. Código: {type(exc).__name__}.")
             render_footer()
             return
 
@@ -1139,11 +1222,28 @@ def render_abc_page(abc_page: str | None = None) -> None:
             render_footer()
             return
 
+        st.subheader("Semanas guardadas y ausentes")
+        inventory = snapshot_week_inventory(snapshot_refs, current_snapshot_date)
+        if inventory:
+            st.dataframe(pd.DataFrame(inventory), use_container_width=True, hide_index=True)
+            missing_weeks = [row["Semana ISO"] for row in inventory if row["Estado"] == "Ausente"]
+            if missing_weeks:
+                st.warning(f"Semanas sin captura guardada: {', '.join(missing_weeks)}")
+            else:
+                st.success("No hay semanas ausentes entre la primera captura y la semana actual.")
+            latest_saved = max(snapshot_refs, key=lambda item: (item.snapshot_date, item.run_at))
+            latest_iso = latest_saved.snapshot_date.isocalendar()
+            st.metric("Última semana guardada", f"{latest_iso.year}-W{latest_iso.week:02}")
+        else:
+            st.info("No hay un rango histórico definido desde el que calcular semanas ausentes.")
+
         selected_snapshot = st.selectbox(
             "Captura:",
             snapshot_refs,
             format_func=lambda item: (
-                f"{item.snapshot_date:%d/%m/%Y} · {item.run_at:%H:%M:%S %Z} · #{item.snapshot_id}"
+                f"{item.snapshot_date.isocalendar().year}-W{item.snapshot_date.isocalendar().week:02} · "
+                f"{'Oficial' if item.capture_kind == 'official' else 'Manual/legacy'} · "
+                f"{item.run_at:%d/%m/%Y %H:%M:%S %Z} · #{item.snapshot_id}"
             ),
         )
         try:
@@ -1152,7 +1252,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
                 selected_snapshot.snapshot_id,
             )
         except Exception as exc:
-            st.error(f"No se pudo verificar la integridad de la captura: {exc}")
+            st.error(f"No se pudo verificar la integridad de la captura. Código: {type(exc).__name__}.")
             render_footer()
             return
         if snapshot_df.empty:

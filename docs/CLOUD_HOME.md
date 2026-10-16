@@ -34,7 +34,7 @@ autorizadas siguen en sus pantallas actuales, con sus permisos y bloqueos.
 | Luxoptica correo/imágenes | Mismo diario, clave luxoptica-mail | Incluye invocaciones manuales y del monitor del descargador existente; no confundirlas con la programación del monitor. |
 | Luxoptica solicitudes | Mismo diario, clave luxoptica-upload | Resultado autorizado del uploader existente. Éxito de solicitud **no significa** haber recibido imágenes. |
 | Sincronización NAS | Mismo diario, clave nas-sync | Sólo la réplica explícita existente registra verificación y cantidad de archivos. No hay programador NAS implementado; no se deduce uno. |
-| Snapshot ABC semanal | Mismo diario, clave abc-snapshot | Capturas con ID y fecha/hora, versión del motor, parámetros y SHA-256; los datos legacy se conservan como no verificables. Una captura alterada se bloquea y las anteriores siguen disponibles. No se consulta PostgreSQL desde el inicio ni se deduce periodicidad por el nombre. |
+| Snapshot ABC semanal | Mismo diario, claves `abc-snapshot-auto` y `abc-snapshot-manual` | Capturas con ID, fecha/hora, año/semana ISO, tipo, versión del motor, parámetros y SHA-256; legacy pasa a manual/no verificable y no se reescribe. El recibo de cada intento conserva resultado/código de error en SQLite local persistente. |
 
 `PROCESS_ACTIVITY_PATH` apunta en Compose a `/app/data/process_activity.sqlite3`,
 compartido por aplicación y monitor; localmente su valor por defecto es
@@ -58,6 +58,50 @@ no borra ni convierte en error el último resultado.
 Detalle e historial limitado son locales. Las acciones y avisos enlazan con la
 pantalla correspondiente; en Alertas se muestran únicamente los últimos estados
 persistidos por origen, sin prometer un historial que la fuente no conserva.
+
+### Captura semanal ABCD
+
+La captura oficial usa la semana ISO y la fecha `Europe/Madrid`; existe como
+máximo una captura oficial por `(iso_year, iso_week)`. Un bloqueo transaccional
+de PostgreSQL y un índice único parcial hacen idempotentes las ejecuciones
+concurrentes. Las capturas manuales y legacy se conservan separadas y pueden
+seguir registrando más de una captura por semana. Ningún job reconstruye una
+semana pasada: si se pierde la ventana completa, queda un hueco visible.
+
+El entrypoint `python save_abcd_weekly_snapshot.py` consulta primero si ya hay
+captura oficial para la semana actual; si existe, verifica y reutiliza ese
+registro sin consultar Odoo. Si falta, calcula con datos actuales y solo guarda
+si sigue siendo la semana ISO actual. Después relee por ID y comprueba SHA-256,
+recuento de filas y lectura de PostgreSQL. Los fallos de Odoo/PostgreSQL quedan
+en el recibo `abc-snapshot-auto`, incluido su código de error, y el proceso
+devuelve código distinto de cero.
+
+Horario recomendado, aún no instalado: primera ejecución el lunes a las 06:00
+de `Europe/Madrid`; repetir diariamente a esa hora hasta obtener una captura
+correcta para la semana en curso. La repetición diaria es una recuperación
+acotada: tras el primer éxito, el entrypoint no vuelve a consultar Odoo esa
+semana. Si no hay éxito antes del siguiente cambio de semana, no se rellena
+la semana pasada con datos nuevos. Al cambiar de semana se intenta solo la
+semana actual.
+
+La pantalla `/abc-historico` muestra capturas oficiales/manuales, semana ISO,
+huecos desde la primera semana registrada y la última ejecución conocida.
+Un recibo reciente confirma que el comando se ejecutó, **no** que cron esté
+instalado o activo. La programación real y la conectividad en s2026 deben
+verificarse por separado antes de cualquier activación.
+
+Ejemplo orientativo para un operador autorizado (no ejecutar como parte de
+esta revisión; el comando no instala por sí mismo ninguna programación):
+
+```cron
+CRON_TZ=Europe/Madrid
+0 6 * * * cd /ruta/cloud && docker compose exec -T abcd-app python save_abcd_weekly_snapshot.py
+```
+
+Antes de activarlo se debe verificar persistencia y permisos del diario
+`PROCESS_ACTIVITY_PATH`, acceso de solo lectura necesario a Odoo y permiso de
+escritura en PostgreSQL para la tabla de snapshots. No cambiar permisos ni
+activar cron sin aprobación.
 
 ### Kering: evidencia preservada
 
