@@ -353,3 +353,92 @@ def test_runner_hook_rejects_other_jobs_and_pull_requests():
     assert not hook.allowed({})
     wrapper = (ROOT / "deployment/cloud/runner_job_gate.sh").read_text()
     assert "exec /usr/bin/python3 -I /usr/local/libexec/cloud-runner-job-gate.py" in wrapper
+
+
+def test_service_dropin_preserves_nas_dependencies_and_clears_old_condition():
+    override = (ROOT / "deployment/cloud/cloud-image-services.override.conf").read_text()
+    base = (ROOT / "deployment/nfs/cloud-image-services.service").read_text()
+    assert "Requires=docker.service mnt-cloud\\x2dimagenes.mount" in base
+    assert "BindsTo=mnt-cloud\\x2dimagenes.mount" in base
+    for directive in ("Requires=", "After=", "BindsTo="):
+        assert directive not in override
+    assert "[Unit]\nConditionPathExists=\nConditionPathExists=/etc/cloud-production/compose.private.json\n" in override
+    assert "WorkingDirectory=/etc/cloud-production\n" in override
+    assert override.count("--project-directory /etc/cloud-production") == 2
+    assert "up -d --no-recreate --no-build --pull never --wait --wait-timeout 180" in override
+    assert "stop --timeout 40" in override
+    assert "/opt/cloud-image-production" not in override
+    assert "--force-recreate" not in override
+    # Release deployments must still replace only the app, unlike systemd startup.
+    assert "--no-recreate" not in (ROOT / "deployment/cloud/cloud_production_deploy.py").read_text()
+
+
+@pytest.fixture
+def transition_check():
+    spec = importlib.util.spec_from_file_location(
+        "transition_check", ROOT / "deployment/cloud/verify_compose_transition.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_transition_checks_entire_effective_config_and_only_ignores_build(transition_check, config):
+    source = copy.deepcopy(config)
+    source["services"]["abcd-app"]["build"] = {"context": "/original"}
+    assert transition_check.compare_configs(source, config) == ["abcd-app", "abcd-order-alerts"]
+    assert source["services"]["abcd-app"]["build"] == {"context": "/original"}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("environment", {"SECRET": "changed"}),
+    ("volumes", [{"type": "bind", "source": "/different", "target": "/nas"}]),
+    ("user", "0:0"), ("group_add", ["100"]), ("cap_add", ["SYS_ADMIN"]),
+    ("networks", ["other-network"]), ("healthcheck", {"disable": True}),
+    ("restart", "always"), ("image", "different:tag"),
+])
+def test_transition_rejects_any_effective_service_change(transition_check, config, field, value):
+    changed = copy.deepcopy(config)
+    changed["services"]["abcd-app"][field] = value
+    with pytest.raises(transition_check.TransitionError):
+        transition_check.compare_configs(config, changed)
+
+
+def test_transition_has_read_only_compose_and_fixed_project_paths(transition_check):
+    original = transition_check.compose(transition_check.ORIGINAL)
+    controlled = transition_check.compose(transition_check.CONTROLLED)
+    assert "--project-directory" not in original
+    assert controlled[controlled.index("--project-directory") + 1] == "/etc/cloud-production"
+    assert controlled[-1] == "/etc/cloud-production/compose.private.json"
+    source = (ROOT / "deployment/cloud/verify_compose_transition.py").read_text()
+    for mutation in ('"up"', '"stop"', '"pull"', '"rm"', '"chmod"', '"chown"'):
+        assert mutation not in source
+
+
+@pytest.mark.parametrize("mismatch", ["hash", "image", "running", "health", "missing", "duplicate"])
+def test_transition_rejects_runtime_drift(transition_check, config, mismatch):
+    service = config["services"]["abcd-app"]
+    containers = [{
+        "Config": {"Labels": {
+            "com.docker.compose.project": "cloud-nas", "com.docker.compose.service": "abcd-app",
+            "com.docker.compose.config-hash": "expected-hash",
+        }},
+        "Image": "expected-image", "State": {"Running": True, "Health": {"Status": "healthy"}},
+    }]
+    hashes = {"abcd-app": "expected-hash"}
+    image_ids = {service["image"]: "expected-image"}
+    transition_check.check_runtime(["abcd-app"], config, hashes, containers, image_ids)
+    if mismatch == "hash":
+        hashes["abcd-app"] = "different"
+    elif mismatch == "image":
+        image_ids[service["image"]] = "different"
+    elif mismatch == "running":
+        containers[0]["State"]["Running"] = False
+    elif mismatch == "health":
+        containers[0]["State"]["Health"]["Status"] = "unhealthy"
+    elif mismatch == "missing":
+        containers.clear()
+    else:
+        containers.append(copy.deepcopy(containers[0]))
+    with pytest.raises(transition_check.TransitionError):
+        transition_check.check_runtime(["abcd-app"], config, hashes, containers, image_ids)

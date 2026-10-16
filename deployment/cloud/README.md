@@ -63,6 +63,7 @@ uses the local restricted sudo command.
 | `runner_job_gate.sh` | `/usr/local/libexec/cloud-runner-job-gate.sh` root:root 0755 |
 | `runner_job_gate.py` | `/usr/local/libexec/cloud-runner-job-gate.py` root:root 0644 |
 | `validate_luxottica.py` | `/etc/cloud-production/validate_luxottica.py` root:root 0600 |
+| `verify_compose_transition.py` | `/usr/local/libexec/cloud-verify-compose-transition.py` root:root 0700; administrative read-only check, no sudoers grant |
 | `approved-release.json` | `/etc/cloud-production/approved-release.json` root:root 0600; add reviewed `controller_commit` |
 | `cloud-production.sudoers` | `/etc/sudoers.d/cloud-production` root:root 0440 |
 | `cloud-production-deploy.service` | `/etc/systemd/system/cloud-production-deploy.service` root:root 0644 |
@@ -104,6 +105,7 @@ general sudo shell to the runner.
    install -o root -g root -m 0755 "$SOURCE/runner_job_gate.sh" /usr/local/libexec/cloud-runner-job-gate.sh
    install -o root -g root -m 0644 "$SOURCE/runner_job_gate.py" /usr/local/libexec/cloud-runner-job-gate.py
    install -o root -g root -m 0600 "$SOURCE/validate_luxottica.py" /etc/cloud-production/validate_luxottica.py
+   install -o root -g root -m 0700 "$SOURCE/verify_compose_transition.py" /usr/local/libexec/cloud-verify-compose-transition.py
    install -o root -g root -m 0600 "$SOURCE/approved-release.json" /etc/cloud-production/approved-release.json
    python3 - "$CONTROLLER_SHA" <<'PY'
    import json, pathlib, re, sys
@@ -138,6 +140,25 @@ general sudo shell to the runner.
    Verify app user `1037:100`, project `cloud-nas`, container `abcd-control`,
    and the current image ID/commit `2082ee541ab3`.
 
+   **Mandatory read-only transition gate, before installing the drop-in:**
+
+   ```sh
+   /usr/bin/python3 -I /usr/local/libexec/cloud-verify-compose-transition.py
+   ```
+
+   This compares the complete effective JSON from the original and controlled
+   configurations (including paths/mounts, UID/GID, networks, capabilities,
+   variables, healthchecks and every other value). Only removal of unused
+   `build` instructions is allowed. It also compares Compose's service hashes
+   across the changed project directory, and checks them and resolved local
+   image IDs against **every existing Cloud container**. It does not call `up`,
+   `stop`, `pull`, mount commands or write configuration; no secret values are
+   printed. Missing access, drift, a non-running/unhealthy service, duplicate
+   service containers or a missing local image cause rejection. Resolve and
+   review differences privately; do not bypass this gate or alter live services.
+   These checks cannot be reported as passed until the administrator runs them
+   against the actual private files.
+
 3. Stage the original 84 KB customer workbook once on **local root-only disk**,
    not Git, GHCR, public Actions artifacts, NAS or a new Docker volume:
 
@@ -156,17 +177,49 @@ general sudo shell to the runner.
    alternative rather than copying it unnecessarily. Do not replace real-file
    validation with a simulated 902-row dataset.
 
-4. Install unit and drop-in without starting a deployment or restarting Cloud:
+4. After the equivalence check passes, install unit and drop-in without starting
+   a deployment or restarting Cloud:
 
    ```sh
+   systemctl show cloud-image-services.service \
+     --property=Requires --property=After --property=BindsTo \
+     > /var/lib/cloud-production-deploy/unit-dependencies.before
    install -o root -g root -m 0644 "$SOURCE/cloud-production-deploy.service" /etc/systemd/system/cloud-production-deploy.service
    install -d -o root -g root -m 0755 /etc/systemd/system/cloud-image-services.service.d
    install -o root -g root -m 0644 "$SOURCE/cloud-image-services.override.conf" \
      /etc/systemd/system/cloud-image-services.service.d/cloud-production.conf
-   systemd-analyze verify /etc/systemd/system/cloud-production-deploy.service
+   systemd-analyze verify /etc/systemd/system/cloud-production-deploy.service \
+     /etc/systemd/system/cloud-image-services.service
    systemctl daemon-reload
+   systemctl cat cloud-image-services.service
+   systemctl show cloud-image-services.service \
+     --property=Requires --property=After --property=BindsTo \
+     > /var/lib/cloud-production-deploy/unit-dependencies.after
+   cmp /var/lib/cloud-production-deploy/unit-dependencies.before \
+     /var/lib/cloud-production-deploy/unit-dependencies.after
+   systemctl show cloud-image-services.service \
+     --property=Conditions --property=WorkingDirectory --property=ExecStart \
+     --property=ExecStop --property=ActiveState --property=SubState
    # Do NOT start/enable the release worker or restart Cloud here.
    ```
+
+   The effective unit must retain its existing `Requires`/`After` for Docker
+   and `mnt-cloud\x2dimagenes.mount`, and `BindsTo` for that mount. The drop-in
+   deliberately sets **none** of these dependency directives. It clears the old
+   `ConditionPathExists` before setting `/etc/cloud-production/compose.private.json`,
+   and sets `WorkingDirectory` and both Compose `--project-directory` arguments
+   to `/etc/cloud-production`. No condition referencing the old file may remain.
+   `ConditionResult` alone describes the last activation, not a re-evaluation
+   after daemon-reload; inspect `Conditions` and unit text without restarting.
+
+   Boot/service start uses `--no-recreate --no-build --pull never`: existing
+   container IDs are retained, stopped containers can be started, and missing
+   containers can be created from existing local images. It does not silently
+   reconcile drift or pull/rebuild an image. A service **restart** still invokes
+   `ExecStop` and therefore interrupts all Cloud services; do not use restart as
+   an installation test. The separate release transaction intentionally does
+   **not** use `--no-recreate`, because it must replace `abcd-app` only. It retains
+   `--no-deps` and cannot update Kering, monitors, alerts or Mustotal.
 
 5. Create a separate runner account. Confirm it has no supplementary docker,
    sudo, users/NAS groups, no login credentials, and cannot read private config:

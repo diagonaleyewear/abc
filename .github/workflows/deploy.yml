@@ -230,7 +230,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py tests/test_cloud_production_deploy.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
           flake8 image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -250,7 +250,7 @@ jobs:
 
       - name: Check syntax
         run: |
-          python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py tests/test_cloud_production_deploy.py
+          python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py
           sh -n deployment/cloud/runner_job_gate.sh
           python -m py_compile app_enhanced.py app_exports.py app_navigation.py app_pages/alerts.py app_pages/luxoptica.py tests/test_app_exports.py tests/test_app_navigation.py
           python -m py_compile image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py
