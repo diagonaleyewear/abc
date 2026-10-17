@@ -42,6 +42,7 @@ COPY kering_images_ui.py .
 COPY kering_portal.py .
 COPY kering_jobs.py .
 COPY image_repository.py image_naming.py image_exports.py kering_media.py .
+COPY market_publication.py .
 COPY repository_storage.py image_work_storage.py .
 COPY image_thumbnails.py .
 COPY migrate_image_repository.py .

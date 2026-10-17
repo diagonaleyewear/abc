@@ -20,7 +20,7 @@ actual: cualquier tarea externa debe inventariarse antes del cambio en Cloud.
 | ZIP actual | `<EAN>/<nombre solicitado>` de todas las representaciones validas, incluidas extensiones historicas `.img` y de mercado, mas `manifest.json`; sin proveedor en carpetas. |
 | Galerias | Luxoptica deducia modelo/EAN/mercado de carpetas; Kering usa `valid_views` y snapshots de pedidos por EAN. |
 | Historial | Kering `history.sqlite3`: runs, attempts, snapshots/results con EAN; configuracion cifrada independiente. Graph `.mail_download_state.json` y `.market_pending.json`. |
-| Colisiones | Luxoptica sobrescribia con `write_bytes`/`copy2`; Kering no reemplazaba vistas validas. No hay regla no destructiva de renombrado de colisiones. |
+| Colisiones | El repositorio canonico conserva contenidos distintos con nombres de colision deterministas. La publicacion comercial rechaza destinos ocupados con otros bytes. |
 
 Las funciones de nombre anteriores se mantienen. La ubicacion nueva es
 `IMAGE_REPOSITORY_ROOT/<EAN>/<nombre>`, nunca por pedido, modelo o proveedor.
@@ -29,6 +29,38 @@ la alternativa usa `stem__<sha256 completo>.extension`; se registra el conflicto
 y el nombre solicitado. No se renombra el primero ni se pierde ninguno.
 Los nombres de mercado identicos en bytes son representaciones/alias: mantienen
 su nombre y extension en metadatos y exportaciones, sin otra copia fisica.
+
+## Publicacion comercial separada
+
+`market_publication.py` prepara copias de canal sin escribir en el repositorio
+canonico ni cambiar su catalogo: consulta SQLite con `mode=ro` y falla si el
+catalogo existente no puede abrirse en solo lectura. El origen aprobado es
+`/mnt/cloud-imagenes/images/`; la raiz local aprobada es
+`/mnt/cloud-imagenes/market-publication/`. Los nombres son
+`Farfetch/<EAN>/<ID>_Vn.png` y `Miinto/<EAN>/<ID>_Vn.jpeg`. Miinto conserva los
+bytes PNG heredados bajo `.jpeg` y copia JPEG sin recodificar. Farfetch recibe
+PNG; fuentes Kering JPEG/WEBP se convierten solo en esa copia. WEBP no se envia
+a Miinto hasta aprobar expresamente su conversion. El manifiesto local conserva
+EAN, canal, vista y checksums de origen y salida, sin copiar metadatos canonicos
+ni URLs.
+
+El comando es manual y usa Odoo solo para leer los IDs comerciales. Por defecto
+simula y no crea la raiz de destino; `--apply` es necesario para materializar
+copias locales, y exige `--expected-plan-sha256` con la firma de una simulacion
+anterior identica. Una colision con bytes distintos o un manifiesto ajeno detiene
+el plan sin sobrescribirlos; las salidas antiguas registradas en el manifiesto
+se señalan y bloquean una nueva aplicacion hasta su revision manual, sin borrar
+archivos. Las vistas desconocidas, de detalle, duplicadas,
+con pixeles repetidos o con conflictos Kering sin revision quedan excluidas.
+La secuencia es `python market_publication.py`, revisar `plan_sha256` y despues
+ejecutar el mismo comando con `--apply --expected-plan-sha256 <firma>`, solo
+cuando exista autorizacion para materializar la copia local. No ejecuta rsync
+ni crea tareas, timers o servicios. Cualquier segunda
+sincronizacion al destino remoto
+`rsync://sync_images@192.168.0.19/Fotos/market-publication/` requiere
+validacion y autorizacion de produccion separadas; debe excluir el lock local
+`.market-publication.lock` y los temporales `.market-publication-*.tmp`. El
+espejo de originales permanece independiente.
 
 ## Configuracion y operaciones
 

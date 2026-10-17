@@ -78,6 +78,12 @@ en produccion y los comandos historicos no acreditan usarla. **Exclusion de
 una replica real automatica NO confirmada**, porque tal ejecutor no se encontro.
 No se ejecuto ni dry-run remoto ni copia ni se cambio configuracion.
 
+La IP `188.227.143.110` de esos comandos es solo evidencia historica anterior.
+La ruta remota aprobada posteriormente para la publicacion comercial es
+`rsync://sync_images@192.168.0.19/Fotos/market-publication/`; esta nota no
+confirma conectividad ni autoriza a modificar el espejo actual. No se creo ni
+activo una segunda sincronizacion.
+
 Tras terminar y validar migracion, preparar NUEVA replica a Fotos, no activarla:
 solo imagenes catalogadas del repositorio definitivo, nombres/EAN conservados;
 excluir staging/backups/work/temporales/SQLite/metadatos privados; sin borrados

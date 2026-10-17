@@ -43,7 +43,7 @@ python run_luxoptica_download.py
 3. Lee inbox del mailbox compartido
 4. Descarga adjuntos (imágenes)
 5. Organiza por modelo y EAN
-6. Crea copias para Farfetch y Miinto cuando existen sus IDs en Odoo
+6. Registra aliases de Farfetch y Miinto cuando existen sus IDs en Odoo
 7. Registra pendientes en `repo/images/.market_pending.json`
 8. Registra correos procesados en `.mail_download_state.json`
 
@@ -173,25 +173,21 @@ python scheduler_luxoptica.py status
 
 ```
 repo/images/
-├─ .market_pending.json                (imágenes sin ID de mercado)
-└─ RB2140/
-   └─ 8056262672563/
-      ├─ originales.png
-      ├─ Farfetch/
-      │  ├─ <id>_V1.png
-      │  ├─ <id>_V2.png
-      │  └─ <id>_V3.png
-      └─ Miinto/
-         ├─ <id>_V1.jpeg
-         ├─ <id>_V2.jpeg
-         └─ <id>_V3.jpeg
+└─ 8056262672563/
+   └─ originales.png
 ```
 
 Si una imagen ya se ha descargado pero Odoo todavía no tiene el ID de
 Farfetch o Miinto, el original se conserva en su carpeta EAN y se registra en
-`.market_pending.json`. El monitor vuelve a consultar Odoo en cada intervalo
-(`--interval-minutes`, 10 minutos por defecto) y crea las copias pendientes
-cuando los IDs aparecen.
+`.market_pending.json` bajo el estado local del repositorio. El monitor vuelve a consultar Odoo en cada intervalo
+(`--interval-minutes`, 10 minutos por defecto) y completa los aliases del
+catálogo cuando los IDs aparecen. Las copias persistentes se preparan por
+separado con `market_publication.py`; el comando simula por defecto y no activa
+la sincronización remota.
+
+La publicación persistente usa `/mnt/cloud-imagenes/market-publication/` con
+`Farfetch/<EAN>/<ID>_Vn.png` y `Miinto/<EAN>/<ID>_Vn.jpeg`. No forma parte del
+árbol canónico mostrado arriba.
 
 ---
 
