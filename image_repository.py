@@ -205,6 +205,13 @@ class ImageRepository:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
+            connection.create_function(
+                "casefold",
+                1,
+                lambda value: (
+                    value.casefold() if isinstance(value, str) else ""
+                ),
+            )
             with connection:
                 yield connection
         finally:
@@ -310,11 +317,63 @@ class ImageRepository:
             if relative.is_absolute() or ".." in relative.parts or excluded_staging_path(relative):
                 LOGGER.warning("Ruta de catalogo excluida: %s", relative)
                 continue
-            records.append(ImageRecord(
-                row["id"], row["ean"], row["checksum"], row["pixels"], self.root / relative,
-                row["provider"], row["origin"], row["view"], row["market"], row["name"],
-                row["date"], json.loads(row["metadata"])))
+            records.append(
+                ImageRecord(
+                    row["id"],
+                    row["ean"],
+                    row["checksum"],
+                    row["pixels"],
+                    self.root / relative,
+                    row["provider"],
+                    row["origin"],
+                    row["view"],
+                    row["market"],
+                    row["name"],
+                    row["date"],
+                    json.loads(row["metadata"]),
+                )
+            )
         return records
+
+    def search_eans(
+        self, query: str, *, limit: int = 12, offset: int = 0
+    ) -> list[str]:
+        """Search metadata and local Kering order associations."""
+        query = query.strip()
+        if (
+            not query
+            or len(query) > 120
+            or not 1 <= limit <= 50
+            or offset < 0
+        ):
+            raise ValueError("Consulta o paginacion invalida")
+        escaped = (
+            query.casefold()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        ean_query = query if query.isascii() and query.isdigit() else pattern
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                WITH matches(ean) AS (
+                    SELECT a.ean
+                    FROM assets a
+                    JOIN representations r ON r.asset_id=a.id
+                    WHERE a.ean LIKE ? ESCAPE '\\'
+                       OR casefold(r.metadata) LIKE ? ESCAPE '\\'
+                    UNION
+                    SELECT ean FROM order_eans
+                    WHERE source='Kering' AND casefold(order_id) LIKE ? ESCAPE '\\'
+                )
+                SELECT DISTINCT ean FROM matches
+                ORDER BY ean LIMIT ? OFFSET ?
+            """,
+                (ean_query, pattern, pattern, limit, offset),
+            ).fetchall()
+        return [str(row["ean"]) for row in rows]
 
     def save(self, ean: str, name: str, content: bytes, *, provider: str, origin: str,
              view: str = "unknown", market: str = "", date: str | None = None,
@@ -377,10 +436,14 @@ class ImageRepository:
                 SELECT id FROM representations WHERE asset_id=? AND provider=? AND origin=?
                     AND view=? AND market=? AND name=?
             """, (asset_id, provider, origin, view, market, name)).fetchone()[0]
-        record = next(record for record in self.records(ean) if record.id == row_id)
+        record = next(
+            record for record in self.records(ean) if record.id == row_id
+        )
         return record, created
 
-    def associate_order(self, source: str, order_id: str, eans: list[str]) -> None:
+    def associate_order(
+        self, source: str, order_id: str, eans: list[str]
+    ) -> None:
         for ean in eans:
             validate_ean(ean)
         with self.maintenance_lock(), self.connect() as connection:
@@ -397,22 +460,68 @@ class ImageRepository:
         record = records[0]
         with self.lock(record.ean), self.maintenance_lock(), self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute("SELECT * FROM representations WHERE id=?", (record_id,)).fetchone()
+            current = connection.execute(
+                "SELECT * FROM representations WHERE id=?", (record_id,)
+            ).fetchone()
             metadata = json.loads(current["metadata"])
-            review = {"previous_view": current["view"], "view": view, "reviewer": reviewer,
-                      "reason": reason, "date": datetime.now(timezone.utc).isoformat(),
-                      "evidence": evidence or {}}
+            review = {
+                "previous_view": current["view"],
+                "view": view,
+                "reviewer": reviewer,
+                "reason": reason,
+                "date": datetime.now(timezone.utc).isoformat(),
+                "evidence": evidence or {},
+            }
             metadata["view_review"] = review
-            connection.execute("UPDATE representations SET view=?, metadata=? WHERE id=?",
-                               (view, json.dumps(metadata, ensure_ascii=False, sort_keys=True), record_id))
-            connection.execute("INSERT INTO events(date,ean,action,details) VALUES(?,?,?,?)",
-                               (review["date"], record.ean, "view_review",
-                                json.dumps({"record_id": record_id, **review})))
+            connection.execute(
+                "UPDATE representations SET view=?, metadata=? WHERE id=?",
+                (
+                    view,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                    record_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO events(date,ean,action,details) VALUES(?,?,?,?)",
+                (
+                    review["date"],
+                    record.ean,
+                    "view_review",
+                    json.dumps({"record_id": record_id, **review}),
+                ),
+            )
+
+    def review_view_for_user(
+        self,
+        record_id: int,
+        view: str,
+        *,
+        role: str | None,
+        reviewer: str,
+        reason: str,
+        evidence: dict | None = None,
+    ) -> None:
+        if role != "admin":
+            raise PermissionError(
+                "La revision de vistas requiere un usuario administrador"
+            )
+        self.review_view(
+            record_id,
+            view,
+            reviewer=reviewer,
+            reason=reason,
+            evidence=evidence,
+        )
 
     def order_records(self, source: str, order_id: str) -> list[ImageRecord]:
         with self.connect() as connection:
-            eans = {row[0] for row in connection.execute(
-                "SELECT ean FROM order_eans WHERE source=? AND order_id=?", (source, str(order_id)))}
+            eans = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT ean FROM order_eans WHERE source=? AND order_id=?",
+                    (source, str(order_id)),
+                )
+            }
         return [record for record in self.records() if record.ean in eans]
 
     def zip_eans(self, eans: list[str], *, market: str | None = None) -> bytes:
@@ -438,6 +547,14 @@ class ImageRepository:
                         names[name] = record.checksum
                         archive.writestr(name, self.verified_bytes(record))
         return buffer.getvalue()
+
+    def zip_eans_for_user(self, eans: list[str], *, role: str | None,
+                          market: str | None = None) -> bytes:
+        if role not in {"admin", "masterdata"}:
+            raise PermissionError(
+                "La descarga requiere acceso a la biblioteca de imagenes"
+            )
+        return self.zip_eans(eans, market=market)
 
     def sync_nas(self, target: Path) -> None:
         from process_activity import record_process

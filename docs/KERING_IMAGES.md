@@ -1,5 +1,26 @@
 # Imagenes Kering (PR borrador, adaptador real)
 
+## Biblioteca de fotografias de producto
+
+La ruta `/imagenes-kering` ofrece una busqueda unica local por EAN, modelo o
+numero de pedido y pagina los resultados. La consulta y la navegacion no llaman
+a Odoo ni al portal Kering. La busqueda por pedido se nutre de pedidos
+consultados expresamente por un administrador o guardados en el historial de
+procesamiento Kering; los snapshots antiguos se indexan localmente al buscar.
+Sus asociaciones de EAN se guardan en el catalogo local.
+Los productos muestran las vistas frontal, perspectiva y lateral, las vistas
+pendientes, fotografias adicionales, fecha de actualizacion y descarga ZIP de
+las imagenes disponibles. Distingue completo, parcial, pendiente, pendiente de
+revision y error de lectura/procesamiento. La descarga valida los originales y
+no los renombra.
+
+Los roles `admin` y `masterdata` pueden consultar y descargar. Solo `admin`
+puede cargar pedidos desde Odoo, procesarlos, revisar clasificaciones o guardar
+configuracion. La consulta a Odoo se inicia desde el area de administracion
+plegable; credenciales, modo de prueba, pedidos piloto, programacion e
+informacion tecnica siguen en `/config`. Los servicios que ejecutan esas
+acciones validan el rol tambien en backend.
+
 ## Deteccion de vistas y alcance actual (issue #38)
 
 Esta seccion sustituye el contrato anterior que aceptaba detalle como tercera
