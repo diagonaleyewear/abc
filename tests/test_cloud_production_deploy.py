@@ -91,17 +91,17 @@ def test_policy_rejects_untrusted_inputs(policy, key, value):
 
 def test_checked_in_policy_pins_the_published_forward_release():
     release = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
-    assert release["previous_commit"] == "99a9f60eb6fbe11cc231b5626556e5db9b5166e9"
-    assert release["commit"] == "79e728f1330da42d6b1fd299049179e6fd210416"
+    assert release["previous_commit"] == "79e728f1330da42d6b1fd299049179e6fd210416"
+    assert release["commit"] == "c03674a048b26cdb2f27fb262cc2633ebadbd295"
     assert release["image"] == (
         "ghcr.io/sginfoocio/abc@sha256:"
-        "97e300dbe1279a1434c2346630cb6918779ba5174811df89583250211e0defd9"
+        "94be3e8a32c00ec04110c267096afdaccfcabebda9cda8c84359f57ae9b24bcb"
     )
-    assert release["build_run_id"] == 39022906253
+    assert release["build_run_id"] == 39043468756
     assert release["build_attempt"] == 1
     assert release["release_status"] == "approved"
     assert release["source_sha256"] == {
-        "app_enhanced.py": "98fbac1ed92f6693f07f05dbf50d3c0c244d8547ac0a66edd888835817546d6e",
+        "app_enhanced.py": "040fc49d6a7da97e7815bc82075da7510f51a951d72ca89c2f6e42c31be55e4a",
         "app_exports.py": "05fb1557f5cdfe68f1890bd0443fb193d53f2858b0fbfd06174f08e054f60704",
         "transform_luxottica_masterdata.py": "4e435ddadb6362f7ef7f2cd245b54c5fb439ddae903f1a4bdd70788d8256d609",
     }
@@ -109,8 +109,8 @@ def test_checked_in_policy_pins_the_published_forward_release():
 
 
 @pytest.mark.parametrize("comparison_status,build_sha", [
-    ("ahead", "79e728f1330da42d6b1fd299049179e6fd210416"),
-    ("behind", "79e728f1330da42d6b1fd299049179e6fd210416"),
+    ("ahead", "c03674a048b26cdb2f27fb262cc2633ebadbd295"),
+    ("behind", "c03674a048b26cdb2f27fb262cc2633ebadbd295"),
     ("ahead", "b" * 40),
 ])
 def test_workflow_preflight_checks_release_ancestry_and_publication(
@@ -144,12 +144,12 @@ def test_workflow_preflight_checks_release_ancestry_and_publication(
     if comparison_status != "ahead":
         with pytest.raises(SystemExit, match="not a forward update"):
             exec(script, {})
-    elif build_sha != "79e728f1330da42d6b1fd299049179e6fd210416":
+    elif build_sha != "c03674a048b26cdb2f27fb262cc2633ebadbd295":
         with pytest.raises(SystemExit, match="no matching successful main publication"):
             exec(script, {})
     else:
         exec(script, {})
-        assert "97e300dbe1279a1434c2346630cb6918779ba5174811df89583250211e0defd9" in summary.read_text()
+        assert "94be3e8a32c00ec04110c267096afdaccfcabebda9cda8c84359f57ae9b24bcb" in summary.read_text()
     assert len(calls) == (1 if comparison_status != "ahead" else 2)
 
 
@@ -312,7 +312,7 @@ def test_gate_verifies_workflow_approval_runner_and_publication(monkeypatch, pol
     ("actions/runs/123/attempts/1", "run_attempt", 2),
     ("actions/runs/123/attempts/1/jobs?per_page=100", "jobs", []),
     ("environments/production", "protection_rules", []),
-    ("compare/99a9f60eb6fbe11cc231b5626556e5db9b5166e9..." + "c" * 40, "status", "behind"),
+    ("compare/79e728f1330da42d6b1fd299049179e6fd210416..." + "c" * 40, "status", "behind"),
 ])
 def test_gate_rejects_wrong_context(monkeypatch, policy, resource, key, value):
     responses = api_responses(policy)
