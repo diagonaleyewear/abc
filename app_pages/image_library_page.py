@@ -12,13 +12,33 @@ from typing import Callable
 import pandas as pd
 import streamlit as st
 
+from PIL import Image
+
 import cloud_design as design
 import image_library as library
-from kering_images_ui import original_for_display, service, visible_access, visible_previews
+from image_thumbnails import UI_BACKGROUND, UI_DIMENSIONS, UI_VERSION, ThumbnailCache
+from kering_images_ui import original_for_display, service, visible_access
 
 TITLE = "Biblioteca de imágenes"
 FILTER_KEYS = ("lib_query", "lib_provider", "lib_market", "lib_view", "lib_availability")
 MIME = {".png": "image/png", ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def _visible_previews(repository, records, access) -> dict:
+    """High-quality derived previews for the visible records; errors become text per record."""
+    previews: dict = {}
+    try:
+        with ThumbnailCache(repository).batch(records) as cache:
+            for record in records:
+                try:
+                    previews[record.id] = cache.get(
+                        record, access[record.id], dimensions=UI_DIMENSIONS,
+                        version=UI_VERSION, background=UI_BACKGROUND)
+                except (OSError, ValueError, RuntimeError, SyntaxError, Image.DecompressionBombError) as error:
+                    previews[record.id] = str(error)
+    except (OSError, ValueError, RuntimeError) as error:
+        previews = {record.id: str(error) for record in records}
+    return previews
 
 
 def _keep_widget_state() -> None:
@@ -114,7 +134,7 @@ def _render_grid(repository, page, refresh: bool, signature: tuple) -> None:
     covers = [group.cover for group in page.items]
     access = visible_access(repository, covers, "image_gallery_access", refresh=refresh,
                             selection=(signature, page.number))
-    previews = visible_previews(repository, covers, access)
+    previews = _visible_previews(repository, covers, access)
     with st.container(horizontal=True, wrap=True, key="lib_grid"):
         for group in page.items:
             with st.container(border=True, key=f"lib_card_{group.ean}"):
@@ -268,7 +288,7 @@ def _render_product(repository, group) -> None:
         design.render(design.notice_html("Disponibles las vistas V1, V2 y V3.", "success"))
     records = list(group.records)
     access = visible_access(repository, records, "image_gallery_detail_access", selection=group.ean)
-    previews = visible_previews(repository, records, access)
+    previews = _visible_previews(repository, records, access)
     _render_viewer(repository, group, records, access, previews)
     st.subheader("Todas las fotografías")
     with st.container(horizontal=True, wrap=True, key="lib_thumbs"):

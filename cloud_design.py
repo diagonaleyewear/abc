@@ -105,7 +105,7 @@ div[class*="st-key-lib_card_"][class*="st-key-lib_card_"]:hover {{ border-color:
 div[class*="st-key-lib_card_"][class*="st-key-lib_card_"]:has(:focus-visible) {{ border-color: {_C['accent']}; box-shadow: 0 0 0 2px {_C['accent']}; }}
 .cd-card {{ display: flex; flex-direction: column; gap: 2px; font-family: {TOKENS['font']['body']}; color: {_C['text']}; }}
 .cd-card__media {{ aspect-ratio: {TOKENS['card']['media_ratio']}; flex: 0 0 auto; background: {_C['frame']}; border-radius: {TOKENS['radius']['md']}; display: flex; align-items: center; justify-content: center; overflow: hidden; margin-bottom: {_S['sm']}; }}
-.cd-card__media img {{ width: 100%; height: 100%; object-fit: contain; display: block; }}
+.cd-card__media img {{ width: 100%; height: 100%; object-fit: contain; object-position: center; image-rendering: auto; display: block; }}
 .cd-card__placeholder {{ color: {_C['frame_text']}; font-size: .85rem; text-align: center; padding: {_S['sm']}; }}
 .cd-card__eyebrow {{ margin: 0; color: {_C['muted']}; font-size: .72rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; min-height: 1.2em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
 .cd-card__brand::before {{ content: "·"; margin: 0 {_S['xs']}; }}

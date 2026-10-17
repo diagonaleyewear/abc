@@ -94,6 +94,14 @@ técnico, EAN sin modelo y modelos distintos. Las cifras de producción (4.774 i
 EAN distintos y valores `modelo` distintos no vacíos (antes sin filtrar nombres de archivo, por lo que 62 estaba sobreestimado en Luxoptica). El
 valor corregido y el reparto por proveedor deben leerse ejecutando el script en producción; no se ha modificado ningún dato original.
 
+## Miniaturas
+
+La biblioteca no usa la miniatura genérica de 360×240: `image_thumbnails.generate(..., background="#f4f4f2")` convierte siempre a RGBA
+(un PNG paletizado `P` se reescalaba con NEAREST y quedaba dentado), reescala con LANCZOS, compone sobre el gris claro del marco (antes el alfa
+se aplanaba sobre negro y la silueta oscura desaparecía), guarda JPEG q90 sin submuestreo de croma y a 640×480 (≈2× el tamaño visual, retina).
+Es una copia derivada en la caché existente (clave y versión propias `ui-lanczos-flat-v1`, no invalida otras miniaturas); el original no se
+modifica. CSS: `object-fit: contain`, sin `transform`. Comparativa: [`docs/design/biblioteca-imagenes-miniaturas/`](design/biblioteca-imagenes-miniaturas).
+
 ## Pendiente (fuera de este piloto)
 
 Migrar el resto de pantallas, `/imagenes-kering` (buscar/historial), `/abc-historico`, retirar el `render_luxoptica_images_page` heredado de

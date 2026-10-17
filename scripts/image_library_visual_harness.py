@@ -35,6 +35,8 @@ def _picture(index: int) -> bytes:
         draw.ellipse((centre - 170, 200, centre + 170, 400), outline=colour, width=18)
     draw.line((550, 290, 650, 290), fill=colour, width=16)
     stream = BytesIO()
+    if background and index % 2 == 0:
+        image = image.convert("RGB").convert("P", palette=Image.Palette.ADAPTIVE, colors=16)
     image.save(stream, "PNG")
     return stream.getvalue()
 

@@ -369,3 +369,80 @@ def test_page_uses_one_container_grid_not_fixed_columns(repository):
     from pathlib import Path
     source = (Path(__file__).parents[1] / "app_pages" / "image_library_page.py").read_text(encoding="utf-8")
     assert "lib_grid" in source and "st.columns(COLUMNS)" not in source and "COLUMNS = 4" not in source
+
+
+def _diagonal(mode, size=(1600, 900)):
+    """Black diagonal bar on white; 'P' is the palettised PNG case, 'RGBA' has a transparent surround."""
+    from PIL import ImageDraw
+    if mode == "RGBA":
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        ImageDraw.Draw(image).line([(100, 100), (1500, 800)], fill=(20, 20, 20, 255), width=14)
+    else:
+        image = Image.new("RGB", size, "white")
+        ImageDraw.Draw(image).line([(100, 100), (1500, 800)], fill=(0, 0, 0), width=14)
+        image = image.convert("P", palette=Image.Palette.ADAPTIVE, colors=8)
+    stream = BytesIO()
+    image.save(stream, "PNG")
+    return stream.getvalue()
+
+
+def _grey_levels(content):
+    with Image.open(BytesIO(content)) as image:
+        histogram = image.convert("L").histogram()
+    return sum(1 for count in histogram[41:215] if count)
+
+
+def test_palette_png_is_resampled_smoothly_not_with_nearest():
+    source = _diagonal("P")
+    with Image.open(BytesIO(source)) as image:
+        assert image.mode == "P"
+    legacy = thumbnails.generate(source, (640, 480), "JPEG")
+    smooth = thumbnails.generate(source, (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    assert _grey_levels(smooth) > 3 * max(_grey_levels(legacy), 1)
+
+
+def test_transparent_png_is_composited_on_the_light_frame_not_black():
+    source = _diagonal("RGBA")
+    preview = thumbnails.generate(source, (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    with Image.open(BytesIO(preview)) as image:
+        corner = image.convert("RGB").getpixel((5, 5))
+    assert all(abs(channel - expected) <= 3 for channel, expected in zip(corner, (0xf4, 0xf4, 0xf2)))
+    legacy = thumbnails.generate(source, (640, 480), "JPEG")
+    with Image.open(BytesIO(legacy)) as image:
+        assert max(image.convert("RGB").getpixel((5, 5))) < 10
+
+
+@pytest.mark.parametrize("size", [(1600, 900), (500, 1000), (300, 200)])
+def test_preview_keeps_aspect_ratio_fits_the_box_and_never_upscales(size):
+    preview = thumbnails.generate(_diagonal("RGBA", size), (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    with Image.open(BytesIO(preview)) as image:
+        width, height = image.size
+    assert width <= 640 and height <= 480 and (width == 640 or height == 480 or (width, height) == size)
+    assert abs(width / height - size[0] / size[1]) < 0.01
+
+
+def test_preview_generation_does_not_modify_source_bytes():
+    source = _diagonal("P")
+    digest = sha256(source).hexdigest()
+    thumbnails.generate(source, (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    assert sha256(source).hexdigest() == digest
+
+
+def test_library_cards_use_high_resolution_flat_previews_and_leave_originals_intact(repository):
+    import base64
+    import re
+    stored = repository.save("0000000000001", "0000000000001-frontal-0.png", _diagonal("RGBA"),
+                             provider="Kering", origin="synthetic", view="frontal")[0]
+    before = sha256(stored.path.read_bytes()).hexdigest()
+    app = run()
+    html = " ".join(item.value for item in app.get("html"))
+    encoded = re.search(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", html).group(1)
+    with Image.open(BytesIO(base64.b64decode(encoded))) as image:
+        assert image.size == (640, 360)
+        assert all(abs(c - e) <= 3 for c, e in zip(image.convert("RGB").getpixel((5, 5)), (0xf4, 0xf4, 0xf2)))
+    assert sha256(stored.path.read_bytes()).hexdigest() == before
+
+
+def test_card_image_is_never_scaled_with_transforms_in_css():
+    assert "transform" not in design.STYLES.split(".cd-card__media img")[1].split("}")[0]
+    assert "object-fit: contain" in design.STYLES and "scale(" not in design.STYLES
