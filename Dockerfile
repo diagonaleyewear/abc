@@ -45,7 +45,8 @@ COPY image_repository.py image_naming.py image_exports.py kering_media.py .
 COPY market_publication.py .
 COPY repository_storage.py image_work_storage.py .
 COPY image_thumbnails.py .
-COPY image_library.py cloud_design.py .COPY migrate_image_repository.py .
+COPY image_library.py cloud_design.py .
+COPY migrate_image_repository.py .
 COPY scripts/nfs_repository_guard.py ./scripts/nfs_repository_guard.py
 COPY scripts/verify_staging_exports.py scripts/test_staging_storage.py ./scripts/
 COPY scripts/report_migration_review.py scripts/snapshot_sqlite_copy.py ./scripts/
