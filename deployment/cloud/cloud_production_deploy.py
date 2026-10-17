@@ -1,5 +1,6 @@
 #!/usr/bin/python3 -I
 """Fixed root trust boundary. No image, path, command or Python supplied by the runner."""
+import base64
 from contextlib import contextmanager
 import copy
 import json
@@ -166,12 +167,46 @@ def validate_request(request, policy):
         workflow["repository"]["full_name"] == REPO
         and workflow["event"] == "workflow_dispatch"
         and workflow["head_branch"] == "main"
-        and workflow["head_sha"] == policy["controller_commit"]
+        and isinstance(workflow.get("head_sha"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", workflow["head_sha"])
         and workflow["path"] == WORKFLOW
         and workflow["status"] == "in_progress"
         and workflow["run_attempt"] == attempt
     ):
         raise DeployError("Workflow is not the reviewed production controller")
+    controller_history = api(
+        f"compare/{policy['controller_commit']}...{workflow['head_sha']}"
+    )
+    if controller_history.get("status") != "ahead":
+        raise DeployError("Workflow is not a descendant of the reviewed controller")
+
+    def content_file(path, revision):
+        result = api(f"contents/{path}?ref={revision}")
+        if (
+            not isinstance(result, dict) or result.get("type") != "file"
+            or not isinstance(result.get("sha"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", result["sha"])
+        ):
+            raise DeployError("Unable to verify reviewed workflow files")
+        return result
+
+    reviewed_workflow = content_file(WORKFLOW, policy["controller_commit"])
+    active_workflow = content_file(WORKFLOW, workflow["head_sha"])
+    if reviewed_workflow["sha"] != active_workflow["sha"]:
+        raise DeployError("Production workflow differs from the reviewed controller")
+
+    manifest = content_file("deployment/cloud/approved-release.json", workflow["head_sha"])
+    if manifest.get("encoding") != "base64" or not isinstance(manifest.get("content"), str):
+        raise DeployError("Unable to verify the committed release policy")
+    try:
+        encoded_policy = "".join(manifest["content"].split())
+        committed_policy = json.loads(base64.b64decode(encoded_policy, validate=True))
+    except (ValueError, UnicodeDecodeError) as error:
+        raise DeployError("Unable to verify the committed release policy") from error
+    installed_policy = {key: value for key, value in policy.items() if key != "controller_commit"}
+    if committed_policy != installed_policy:
+        raise DeployError("Committed release policy differs from root approval")
+
     jobs = api(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")["jobs"]
     active = [job for job in jobs if job["name"] == JOB and job["status"] == "in_progress"]
     if len(active) != 1 or active[0]["runner_name"] != policy["runner_name"]:

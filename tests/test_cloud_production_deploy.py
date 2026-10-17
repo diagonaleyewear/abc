@@ -1,3 +1,4 @@
+import base64
 import copy
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -113,11 +114,24 @@ def test_workflow_preflight_blocks_baseline_before_github_api(monkeypatch):
 
 
 def api_responses(policy):
+    workflow_sha = "d" * 40
+    committed_policy = {key: value for key, value in policy.items() if key != "controller_commit"}
+    encoded_policy = base64.b64encode(json.dumps(committed_policy).encode()).decode()
     return {
         "actions/runs/123/attempts/1": {
             "repository": {"full_name": "sginfoocio/abc"},
-            "event": "workflow_dispatch", "head_branch": "main", "head_sha": policy["controller_commit"],
+            "event": "workflow_dispatch", "head_branch": "main", "head_sha": workflow_sha,
             "path": DEPLOY.WORKFLOW, "status": "in_progress", "run_attempt": 1,
+        },
+        f"compare/{policy['controller_commit']}...{workflow_sha}": {"status": "ahead"},
+        f"contents/{DEPLOY.WORKFLOW}?ref={policy['controller_commit']}": {
+            "type": "file", "sha": "e" * 40,
+        },
+        f"contents/{DEPLOY.WORKFLOW}?ref={workflow_sha}": {
+            "type": "file", "sha": "e" * 40,
+        },
+        f"contents/deployment/cloud/approved-release.json?ref={workflow_sha}": {
+            "type": "file", "sha": "f" * 40, "encoding": "base64", "content": encoded_policy,
         },
         "actions/runs/123/attempts/1/jobs?per_page=100": {
             "jobs": [{"name": DEPLOY.JOB, "status": "in_progress", "runner_name": policy["runner_name"]}],
@@ -266,7 +280,6 @@ def test_gate_verifies_workflow_approval_runner_and_publication(monkeypatch, pol
 
 @pytest.mark.parametrize("resource,key,value", [
     ("actions/runs/123/attempts/1", "event", "pull_request"),
-    ("actions/runs/123/attempts/1", "head_sha", "b" * 40),
     ("actions/runs/123/attempts/1", "head_branch", "unreviewed"),
     ("actions/runs/123/attempts/1", "run_attempt", 2),
     ("actions/runs/123/attempts/1/jobs?per_page=100", "jobs", []),
@@ -276,6 +289,26 @@ def test_gate_verifies_workflow_approval_runner_and_publication(monkeypatch, pol
 def test_gate_rejects_wrong_context(monkeypatch, policy, resource, key, value):
     responses = api_responses(policy)
     responses[resource][key] = value
+    monkeypatch.setattr(DEPLOY, "api", responses.__getitem__)
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+
+
+@pytest.mark.parametrize("failure", ["not-descendant", "workflow-changed", "policy-mismatch"])
+def test_gate_binds_dispatch_to_reviewed_workflow_and_root_policy(monkeypatch, policy, failure):
+    responses = api_responses(policy)
+    workflow_sha = "d" * 40
+    if failure == "not-descendant":
+        responses[f"compare/{policy['controller_commit']}...{workflow_sha}"]["status"] = "behind"
+    elif failure == "workflow-changed":
+        responses[f"contents/{DEPLOY.WORKFLOW}?ref={workflow_sha}"]["sha"] = "g" * 40
+    else:
+        manifest = responses[
+            f"contents/deployment/cloud/approved-release.json?ref={workflow_sha}"
+        ]
+        committed_policy = json.loads(base64.b64decode(manifest["content"]))
+        committed_policy["image"] = "ghcr.io/sginfoocio/abc@sha256:" + "0" * 64
+        manifest["content"] = base64.b64encode(json.dumps(committed_policy).encode()).decode()
     monkeypatch.setattr(DEPLOY, "api", responses.__getitem__)
     with pytest.raises(DEPLOY.DeployError):
         DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)

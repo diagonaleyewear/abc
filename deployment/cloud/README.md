@@ -37,9 +37,12 @@ uses the local restricted sudo command.
   argument, or privileged path. Its only sudo permission is the root-owned
   executable **with no command-line arguments**.
 * The executable accepts bounded JSON stdin containing only numeric run ID and
-  attempt. Independently verifies GitHub API data: reviewed controller SHA,
-  dispatch on main, correct active job/runner, explicit authorized production
-  approval, protection still enabled, and successful main publication.
+  attempt. Independently verifies GitHub API data: the dispatch is on `main`
+  and descends from the reviewed controller commit, its workflow file is
+  byte-identical to that pinned revision, and its committed release policy
+  exactly matches the root-installed policy (apart from `controller_commit`).
+  It also verifies the correct active job/runner, explicit authorized
+  production approval, protection still enabled, and successful publication.
 * Root policy pins repository, current/new commits, GHCR digest, publication
   run/attempt and exact application source hashes. OCI labels alone are not
   treated as provenance. Candidate and deployed container verify build metadata
@@ -409,9 +412,13 @@ review the successful `main` build's exact image digest and run/attempt, record
 the new commit and SHA256 of `app_enhanced.py`, `app_exports.py` and
 `transform_luxottica_masterdata.py`, and set the candidate status to `approved`
 in both the reviewed repository policy and root-installed policy. Keep
-`controller_commit` pinned to the reviewed main revision containing the workflow.
-The hosted preflight and root helper independently check the publication and
-forward commit ancestry. The runner cannot change the root-installed policy.
+`controller_commit` pinned to the reviewed main revision that anchors the
+trusted deployment workflow. A later release-policy commit is permitted only
+as a descendant of that anchor, with the workflow file unchanged; the root
+helper also requires the committed policy to exactly match its root-installed
+policy, excluding the administrative `controller_commit` field. The hosted
+preflight and root helper independently check the publication and forward
+application-commit ancestry. The runner cannot change the root-installed policy.
 Install the reviewed controller, validator and baseline policy manually as root
 from a separately staged, reviewed source tree; add the exact reviewed main
 commit as `controller_commit`. Do not enable a candidate in the checked-in
