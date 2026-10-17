@@ -107,6 +107,13 @@ def validate_visible(repository: ImageRepository, records: list[ImageRecord]) ->
     return result
 
 
+def cache_key(record: ImageRecord, dimensions: tuple[int, int] = (360, 240), image_format: str = "JPEG",
+              version: str = GENERATOR_VERSION, background: str | None = None) -> str:
+    return hashlib.sha256(json.dumps(
+        [record.checksum, dimensions, image_format, version, *([background] if background else [])]
+    ).encode()).hexdigest()
+
+
 class ThumbnailCache:
     def __init__(self, repository: ImageRepository):
         self.repository = repository
@@ -173,6 +180,24 @@ class ThumbnailCache:
                 raise OSError("Reserva local protegida; no se guarda indice de miniaturas")
             self._atomic(index_path, encoded)
 
+    def snapshot(self) -> dict:
+        """Read-only copy of the index (empty when the cache does not exist yet)."""
+        try:
+            return json.loads((self.root / "index.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+
+    def purge(self, keys) -> int:
+        """Remove derived entries only; originals are never touched. Returns bytes freed."""
+        freed = 0
+        with self._locked() as index:
+            for key in keys:
+                entry = index.pop(key, None)
+                if entry is not None:
+                    freed += entry["size"]
+                    (self.root / f"{key}.jpg").unlink(missing_ok=True)
+        return freed
+
     def get(self, record: ImageRecord, access: tuple[int, int, int] | None,
             dimensions: tuple[int, int] = (360, 240), image_format: str = "JPEG",
             version: str = GENERATOR_VERSION, background: str | None = None) -> bytes:
@@ -188,9 +213,7 @@ class ThumbnailCache:
             authoritative = self._current.get(record.id)
         if authoritative != record:
             raise ValueError("Imagen eliminada o modificada en el catalogo")
-        key = hashlib.sha256(json.dumps(
-            [record.checksum, dimensions, image_format, version, *([background] if background else [])]
-        ).encode()).hexdigest()
+        key = cache_key(record, dimensions, image_format, version, background)
         source = hashlib.sha256(str(record.path).encode()).hexdigest()
         with self._locked() as index:
             entry = index.get(key)

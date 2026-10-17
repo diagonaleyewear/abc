@@ -102,6 +102,25 @@ se aplanaba sobre negro y la silueta oscura desaparecía), guarda JPEG q90 sin s
 Es una copia derivada en la caché existente (clave y versión propias `ui-lanczos-flat-v1`, no invalida otras miniaturas); el original no se
 modifica. CSS: `object-fit: contain`, sin `transform`. Comparativa: [`docs/design/biblioteca-imagenes-miniaturas/`](design/biblioteca-imagenes-miniaturas).
 
+## Regeneración de miniaturas
+
+Las miniaturas son derivadas (`IMAGE_THUMBNAIL_CACHE_ROOT`, `index.json` + `<sha256>.jpg`) y se direccionan por el checksum del original, de modo que los originales compartidos no se duplican. El perfil de la Biblioteca (640×480, LANCZOS, fondo `#f4f4f2`, `ui-lanczos-flat-v1`) tiene clave distinta del perfil antiguo (360×240): no se sobrescribe nada y el cambio de clave invalida las miniaturas dentadas. La Biblioteca las genera bajo demanda por página; `scripts/regenerate_image_thumbnails.py` permite precalentarlas.
+
+Ejecutar dentro del contenedor, con las mismas variables de entorno que la app:
+
+```
+python scripts/regenerate_image_thumbnails.py report                 # simulación: cuenta, espacio y tiempo estimados (no escribe)
+python scripts/regenerate_image_thumbnails.py regenerate             # simulación
+python scripts/regenerate_image_thumbnails.py regenerate --execute [--provider Kering] [--batch-size 200] [--limit N] [--resume]
+python scripts/regenerate_image_thumbnails.py verify --per-provider 20
+python scripts/regenerate_image_thumbnails.py purge-legacy [--execute]   # opcional: elimina las 360×240 antiguas
+```
+
+- Idempotente: solo genera las claves que faltan. Escritura atómica (fsync + `os.replace`). Solo lee los originales.
+- `--resume` continúa desde `regeneration-state.json`; los errores van a `regeneration-errors.jsonl` (ambos en la raíz de la caché) y no detienen el lote (salida 1).
+- `purge-legacy` borra únicamente derivados; otras pantallas (Kering) los regeneran bajo demanda.
+- No ejecutar en producción sin autorización: ejecutar antes `report` y comunicar nº de miniaturas, espacio y tiempo.
+
 ## Pendiente (fuera de este piloto)
 
 Migrar el resto de pantallas, `/imagenes-kering` (buscar/historial), `/abc-historico`, retirar el `render_luxoptica_images_page` heredado de
