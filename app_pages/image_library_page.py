@@ -18,7 +18,6 @@ from kering_images_ui import original_for_display, service, visible_access, visi
 
 TITLE = "Biblioteca de imágenes"
 FILTER_KEYS = ("lib_query", "lib_provider", "lib_market", "lib_view", "lib_availability")
-COLUMNS = 4
 MIME = {".png": "image/png", ".webp": "image/webp", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
@@ -72,7 +71,7 @@ def _stats(groups) -> tuple[tuple[str, str], ...]:
 
 
 def _header(groups, subtitle: str) -> bool:
-    left, right = st.columns([6, 1], vertical_alignment="bottom")
+    left, right = st.columns([4, 1.5], vertical_alignment="bottom")
     with left:
         design.render(design.page_header_html(TITLE, subtitle, _stats(groups)))
     with right:
@@ -91,17 +90,12 @@ def _read_filters(groups) -> library.LibraryFilters:
         "Buscar", key="lib_query", icon=":material/search:",
         placeholder="EAN (completo o parcial), modelo, referencia, marca o proveedor",
     ).strip()
-    columns = st.columns(5)
-    with columns[0]:
+    with st.container(horizontal=True, wrap=True, key="lib_filters"):
         provider = st.selectbox("Proveedor", options["providers"], key="lib_provider")
-    with columns[1]:
         market = st.selectbox("Mercado", options["markets"], key="lib_market")
-    with columns[2]:
         view = st.selectbox("Vista", list(library.VIEW_FILTERS), key="lib_view")
-    with columns[3]:
         availability = st.selectbox(
             "Fotografías", [library.ALL, *library.AVAILABILITY_FILTERS[1:]], key="lib_availability")
-    with columns[4]:
         st.session_state.setdefault("lib_size", library.PAGE_SIZES[1])
         st.selectbox("Por página", library.PAGE_SIZES, key="lib_size")
     return library.LibraryFilters(query, provider, market, view, availability)
@@ -121,18 +115,17 @@ def _render_grid(repository, page, refresh: bool, signature: tuple) -> None:
     access = visible_access(repository, covers, "image_gallery_access", refresh=refresh,
                             selection=(signature, page.number))
     previews = visible_previews(repository, covers, access)
-    for start in range(0, len(page.items), COLUMNS):
-        columns = st.columns(COLUMNS)
-        for column, group in zip(columns, page.items[start:start + COLUMNS]):
-            with column:
+    with st.container(horizontal=True, wrap=True, key="lib_grid"):
+        for group in page.items:
+            with st.container(border=True, key=f"lib_card_{group.ean}"):
                 design.render(design.product_card_html(
-                    title=group.title, brand=group.brand or ", ".join(group.providers),
-                    reference=group.reference if group.model else "", ean=group.ean,
+                    title=group.title, provider=", ".join(group.providers), brand=group.brand,
+                    reference=group.reference, ean=group.ean, named=group.has_commercial_title,
                     count=len(group.records), views=_card_views(group),
                     preview=_preview(previews, group.cover),
                 ))
                 st.button("Ver fotografías", key=f"lib_open_{group.ean}", width="stretch",
-                          on_click=_open, args=(group.ean,))
+                          icon=":material/photo_library:", on_click=_open, args=(group.ean,))
 
 
 def _render_pager(page) -> None:
@@ -262,7 +255,7 @@ def _render_details(group, records) -> None:
 
 def _render_product(repository, group) -> None:
     st.button("Volver a la biblioteca", icon=":material/arrow_back:", key="lib_back", on_click=_close)
-    subtitle = " · ".join(part for part in (group.brand, f"EAN {group.ean}") if part)
+    subtitle = " · ".join(part for part in (", ".join(group.providers), group.brand, f"EAN {group.ean}") if part)
     design.render(design.page_header_html(group.title, subtitle, (
         (str(len(group.records)), "imagen" if len(group.records) == 1 else "imágenes"),
         (str(len(group.providers)), "origen" if len(group.providers) == 1 else "orígenes"),
@@ -278,10 +271,9 @@ def _render_product(repository, group) -> None:
     previews = visible_previews(repository, records, access)
     _render_viewer(repository, group, records, access, previews)
     st.subheader("Todas las fotografías")
-    for start in range(0, len(records), 6):
-        columns = st.columns(6)
-        for column, record in zip(columns, records[start:start + 6]):
-            with column:
+    with st.container(horizontal=True, wrap=True, key="lib_thumbs"):
+        for record in records:
+            with st.container(key=f"lib_thumb_{record.id}"):
                 design.render(design.photo_html(_preview(previews, record), library.view_name(record.view)))
                 design.render(design.caption_html(_photo_caption(record)))
                 st.button("Ver", key=f"lib_photo_{record.id}", width="stretch",
