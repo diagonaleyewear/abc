@@ -93,7 +93,7 @@ from abcd_snapshots import (
 # CONFIG
 # ==============================================================================
 
-APP_TITLE = "Cloud"
+APP_TITLE = "Cloud Diagonal"
 APP_ICON = Path(__file__).resolve().parent / "logo" / "favicon.svg"
 AUTH_USERNAME_ENV = "APP_USERNAME"
 AUTH_COOKIE_SECRET_ENV = "AUTH_COOKIE_SECRET"
@@ -778,7 +778,7 @@ def render_sidebar_shell(section_name: str) -> None:
             - Área Masterdata para transformación y validación previa a Odoo.
             """
         )
-        st.caption("Cloud · Catálogo, imágenes y automatizaciones")
+        st.caption("Cloud Diagonal · Catálogo, imágenes y automatizaciones")
 
 
 def render_footer() -> None:
@@ -905,7 +905,7 @@ def render_settings_page() -> None:
 
 
 def render_abc_page(abc_page: str | None = None) -> None:
-    render_sidebar_shell("Análisis ABC")
+    render_sidebar_shell("Análisis ABCD")
     require_admin_access()
     if abc_page is None:
         abc_page = "📊 Inicio"
@@ -2167,7 +2167,7 @@ LUXOPTICA_IMAGES_PAGE = st.Page(
         require_admin_access=require_admin_access,
         render_footer=render_footer,
     ),
-    title="Imágenes",
+    title="Biblioteca de imágenes",
     icon="🖼️",
     url_path="repositorio-imagenes",
 )

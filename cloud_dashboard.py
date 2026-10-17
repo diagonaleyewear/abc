@@ -240,7 +240,7 @@ def render_dashboard(pages: dict, loader=dashboard_snapshot):
         else:
             st.caption("Logo Diagonal pendiente: logo/logo.png")
     with header[1]:
-        st.title("Cloud")
+        st.title("Cloud Diagonal")
         st.caption("Catálogo, imágenes y automatizaciones")
     refresh = st.button("Actualizar", icon=":material/refresh:", type="primary")
     snapshot = st.session_state.get("cloud_home_snapshot")
