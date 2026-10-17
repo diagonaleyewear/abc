@@ -89,16 +89,33 @@ def test_policy_rejects_untrusted_inputs(policy, key, value):
         DEPLOY.validate_policy(policy)
 
 
-def test_checked_in_policy_is_production_baseline_not_a_redeployable_release():
-    baseline = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
-    assert baseline["previous_commit"] == "99a9f60eb6fbe11cc231b5626556e5db9b5166e9"
-    assert baseline["commit"] == baseline["previous_commit"]
-    assert baseline["release_status"] == "baseline-only"
-    with pytest.raises(DEPLOY.DeployError, match="already the current production commit"):
-        DEPLOY.validate_policy({**baseline, "controller_commit": "a" * 40})
+def test_checked_in_policy_pins_the_published_forward_release():
+    release = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
+    assert release["previous_commit"] == "99a9f60eb6fbe11cc231b5626556e5db9b5166e9"
+    assert release["commit"] == "79e728f1330da42d6b1fd299049179e6fd210416"
+    assert release["image"] == (
+        "ghcr.io/sginfoocio/abc@sha256:"
+        "97e300dbe1279a1434c2346630cb6918779ba5174811df89583250211e0defd9"
+    )
+    assert release["build_run_id"] == 39022906253
+    assert release["build_attempt"] == 1
+    assert release["release_status"] == "approved"
+    assert release["source_sha256"] == {
+        "app_enhanced.py": "98fbac1ed92f6693f07f05dbf50d3c0c244d8547ac0a66edd888835817546d6e",
+        "app_exports.py": "05fb1557f5cdfe68f1890bd0443fb193d53f2858b0fbfd06174f08e054f60704",
+        "transform_luxottica_masterdata.py": "4e435ddadb6362f7ef7f2cd245b54c5fb439ddae903f1a4bdd70788d8256d609",
+    }
+    DEPLOY.validate_policy({**release, "controller_commit": "a" * 40})
 
 
-def test_workflow_preflight_blocks_baseline_before_github_api(monkeypatch):
+@pytest.mark.parametrize("comparison_status,build_sha", [
+    ("ahead", "79e728f1330da42d6b1fd299049179e6fd210416"),
+    ("behind", "79e728f1330da42d6b1fd299049179e6fd210416"),
+    ("ahead", "b" * 40),
+])
+def test_workflow_preflight_checks_release_ancestry_and_publication(
+    monkeypatch, tmp_path, comparison_status, build_sha,
+):
     workflow = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text()
     start = workflow.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
     end = workflow.index("\n          PY", start)
@@ -106,10 +123,34 @@ def test_workflow_preflight_blocks_baseline_before_github_api(monkeypatch):
     compile(script, "deploy-cloud-production-preflight", "exec")
     monkeypatch.chdir(ROOT)
     calls = []
-    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: calls.append(args))
-    with pytest.raises(SystemExit, match="No new release is approved"):
+
+    def gh_api(arguments, **kwargs):
+        endpoint = arguments[-1]
+        calls.append(endpoint)
+        if "/compare/" in endpoint:
+            return json.dumps({"status": comparison_status}).encode()
+        return json.dumps({
+            "conclusion": "success",
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": build_sha,
+            "path": ".github/workflows/deploy.yml",
+            "run_attempt": 1,
+        }).encode()
+
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setattr(subprocess, "check_output", gh_api)
+    if comparison_status != "ahead":
+        with pytest.raises(SystemExit, match="not a forward update"):
+            exec(script, {})
+    elif build_sha != "79e728f1330da42d6b1fd299049179e6fd210416":
+        with pytest.raises(SystemExit, match="no matching successful main publication"):
+            exec(script, {})
+    else:
         exec(script, {})
-    assert calls == []
+        assert "97e300dbe1279a1434c2346630cb6918779ba5174811df89583250211e0defd9" in summary.read_text()
+    assert len(calls) == (1 if comparison_status != "ahead" else 2)
 
 
 def api_responses(policy):
