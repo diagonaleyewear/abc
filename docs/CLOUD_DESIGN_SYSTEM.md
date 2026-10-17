@@ -47,7 +47,7 @@ Los constructores devuelven HTML escapado y son comprobables sin Streamlit.
 
 ## Biblioteca de imágenes: reglas funcionales
 
-- Agrupación por EAN (texto, conserva ceros iniciales). Contadores: imágenes = archivos, EAN = productos distintos, modelos = modelos distintos no vacíos.
+- Agrupación por EAN (texto, conserva ceros iniciales). Contadores: imágenes = registros de imagen, EAN = productos distintos, modelos = modelos **verificados** distintos (nombre comercial o modelo/referencia no técnicos).
 - Vistas: se usa solo la clasificación almacenada (`frontal`=V1, `perspectiva`=V2, `lateral`=V3, `detalle`). No se reclasifica; el detalle nunca se
   convierte en V2 (regla posicional Kering intacta). Las vistas ausentes se avisan.
 - Miniatura de portada: V1 original si existe; en otro caso la primera vista por orden.
@@ -55,9 +55,49 @@ Los constructores devuelven HTML escapado y son comprobables sin Streamlit.
   el original seleccionado.
 - ZIP bajo demanda (`zip_eans_for_user`, comprueba rol) y descarga individual con el nombre original. Sin consultas a Odoo ni a proveedores.
 
+## Modo claro y oscuro (issue #53)
+
+Causa raíz: los estilos usaban colores fijos del tema claro (`ink #000`, texto `#42403B`). La cabecera no pinta fondo propio y
+queda sobre el fondo de Streamlit; en modo oscuro el título era negro sobre `#0e1117`, mientras que chips y tarjetas pintaban su propia
+superficie clara (indicadores incoherentes).
+
+Solución: `TOKENS["color"]` (claro) y `TOKENS["color_dark"]` (oscuro). `build_styles("auto")` genera CSS con
+`light-dark(claro, oscuro)`; Streamlit fija `color-scheme` en `.stApp`, por lo que el navegador elige la paleta sin recargar ni depender del
+servidor (`st.context.theme.type` no es fiable). El marco de la fotografía es siempre claro (`#f4f4f2`) para que fotos con fondo blanco, negro o
+transparente se vean completas y sin modificar el archivo.
+
+Contraste (WCAG AA ≥ 4,5:1), verificado en tests por `CONTRAST_PAIRS` para ambas paletas: ink/text/muted sobre página, tarjeta, neutro y tint;
+acento sobre tarjeta y `accent_soft`; éxito/aviso/peligro sobre tint; texto del marco sobre el marco.
+
+## Identificación comercial
+
+Orden de resolución (`ProductGroup.title`): 1) denominación comercial verificada (`nombre_comercial`, `denominacion_comercial`, `product_name`);
+2) modelo/referencia verificados (`modelo`, `identity.model`, `referencia`); 3) identificación neutral por EAN («Modelo no disponible» + EAN).
+La marca se muestra aparte, junto al proveedor. Se descartan como modelo: nombres de archivo del propio registro, extensiones, `__`, rutas,
+palabras de vista (frontal, lateral…), marcadores (`n/a`) y cifras tipo EAN. Nunca se inventan datos de catálogo.
+
+Origen de `frontal.img`: `graph_mail_downloader._model_from_image_name` (Luxoptica) y `migrate_image_repository` guardan en `metadata["modelo"]`
+el prefijo anterior a `__` del nombre del archivo; si no hay `__`, guardan el nombre completo (`frontal.img`). Kering sí guarda el modelo del
+portal (`identity.model`). Odoo `product_name` solo existe en líneas de pedido, no en los metadatos de imagen.
+
+## Tarjetas y responsive
+
+Rejilla: `st.container(horizontal=True, wrap=True, key="lib_grid")` + CSS `grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr))`
+(clase `st-key-lib_grid`, única excepción documentada a «solo clases `cd-*`»; son claves creadas por nosotros). Cada ficha es
+`st.container(border=True, key="lib_card_<ean>")` con el HTML y el botón «Ver fotografías» dentro. Filtros: `lib_filters` (mínimo 150 px),
+miniaturas del detalle: `lib_thumbs`. Con barra lateral abierta: 4 columnas a 1440, 2 a 1024 y 768, 1 a 375; sin desbordamiento horizontal.
+
+## Diagnóstico de estadísticas
+
+`python scripts/diagnose_image_library.py` (solo lectura) imprime, por proveedor: imágenes, EAN, EAN con modelo verificado, EAN con valor solo
+técnico, EAN sin modelo y modelos distintos. Las cifras de producción (4.774 imágenes · 274 EAN · 62 modelos) provienen de: registros de imagen,
+EAN distintos y valores `modelo` distintos no vacíos (antes sin filtrar nombres de archivo, por lo que 62 estaba sobreestimado en Luxoptica). El
+valor corregido y el reparto por proveedor deben leerse ejecutando el script en producción; no se ha modificado ningún dato original.
+
 ## Pendiente (fuera de este piloto)
 
 Migrar el resto de pantallas, `/imagenes-kering` (buscar/historial), `/abc-historico`, retirar el `render_luxoptica_images_page` heredado de
 `app_enhanced.py` (código muerto), ZIP por pedido (#38), fuente de marca con licencia, tema global (`.streamlit/config.toml`).
 
-Capturas sintéticas antes/después: [`docs/design/biblioteca-imagenes/`](design/biblioteca-imagenes).
+Capturas reales antes/después (P1): [`docs/design/biblioteca-imagenes-p1/`](design/biblioteca-imagenes-p1), generadas con
+`scripts/image_library_visual_harness.py` (datos sintéticos; página real de Streamlit). Capturas sintéticas anteriores: [`docs/design/biblioteca-imagenes/`](design/biblioteca-imagenes).

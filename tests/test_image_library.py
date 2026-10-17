@@ -238,3 +238,134 @@ def test_dockerfile_ships_every_local_module_imported_by_app_pages():
                 module = name.split(".")[0]
                 if (root / f"{module}.py").is_file():
                     assert f"{module}.py" in dockerfile, f"{module}.py no se copia en el Dockerfile ({page.name})"
+
+
+def meta_record(ean, view, metadata, *, id=1, provider="Luxoptica", name=None):
+    return ImageRecord(id, ean, f"c{id}", None, None, provider, "synthetic", view, "",
+                       name or f"{view}-{id}.jpg", "2026-01-01T00:00:00", metadata)
+
+
+@pytest.mark.parametrize("technical", [
+    "frontal.img", "frontal.jpg", "RB3025__frontal.jpg", "frontal", "lateral", "perspectiva", "0000000000001",
+    "8056597123456", "", "  ", "n/a", "ruta/a/frontal.png", "C:\\fotos\\frontal.png",
+])
+def test_technical_values_never_become_the_commercial_model(technical):
+    group = library.group_records([meta_record("0000000000001", "frontal", {"modelo": technical})])[0]
+    assert group.model == "" and not group.has_commercial_title
+    assert group.title == "EAN 0000000000001"
+
+
+def test_model_resolution_order_name_then_model_then_ean():
+    named = library.group_records([meta_record("1", "frontal", {"nombre_comercial": "Aviator Classic", "modelo": "RB3025"})])[0]
+    assert named.title == "Aviator Classic" and named.has_commercial_title
+    modelled = library.group_records([meta_record("2", "frontal", {"modelo": "RB3025"})])[0]
+    assert modelled.title == "RB3025"
+    referenced = library.group_records([meta_record("3", "frontal", {"modelo": "frontal.img", "referencia": "RB3025"})])[0]
+    assert referenced.title == "RB3025"
+    identity = library.group_records([meta_record("4", "frontal", {"identity": {"model": "SL 751 JEANNE"}})])[0]
+    assert identity.title == "SL 751 JEANNE"
+    assert library.group_records([meta_record("5", "frontal", {})])[0].title == "EAN 5"
+
+
+def test_brand_is_kept_separate_from_model_and_never_invented():
+    group = library.group_records([meta_record("1", "frontal", {"modelo": "RB3025", "marca": "Ray-Ban"})])[0]
+    assert group.brand == "Ray-Ban" and group.title == "RB3025"
+    assert library.group_records([meta_record("2", "frontal", {"modelo": "RB3025"})])[0].brand == ""
+
+
+def test_file_name_of_the_record_is_not_a_title_even_with_unusual_extension():
+    group = library.group_records([meta_record("1", "frontal", {"modelo": "foto-1"}, name="foto-1.webp")])[0]
+    assert group.model == ""
+
+
+def test_images_stay_attached_to_their_ean_when_models_repeat():
+    groups = library.group_records([
+        meta_record("1", "frontal", {"modelo": "RB3025"}, id=1), meta_record("1", "lateral", {"modelo": "RB3025"}, id=2),
+        meta_record("2", "frontal", {"modelo": "RB3025"}, id=3),
+    ])
+    assert {g.ean: len(g.records) for g in groups} == {"1": 2, "2": 1}
+    assert library.summary(groups) == {"images": 3, "eans": 2, "models": 1}
+
+
+def test_summary_does_not_count_file_names_as_models():
+    groups = library.group_records([
+        meta_record("1", "frontal", {"modelo": "frontal.img"}, id=1),
+        meta_record("2", "frontal", {"modelo": "RB3025__frontal.jpg"}, id=2),
+        meta_record("3", "frontal", {"modelo": "RB3025"}, id=3),
+    ])
+    assert library.summary(groups)["models"] == 1
+
+
+def test_metadata_coverage_reports_each_provider():
+    rows = {r["provider"]: r for r in library.metadata_coverage([
+        meta_record("1", "frontal", {"modelo": "SL 1"}, id=1, provider="Kering"),
+        meta_record("2", "frontal", {"modelo": "frontal.img"}, id=2),
+        meta_record("2", "lateral", {"modelo": "frontal.img"}, id=3),
+        meta_record("3", "frontal", {}, id=4),
+    ])}
+    assert rows["Kering"]["eans_with_verified_model"] == 1
+    lux = rows["Luxoptica"]
+    assert (lux["images"], lux["eans"], lux["eans_with_technical_model_only"], lux["eans_without_model"]) == (3, 2, 1, 1)
+    assert lux["eans_with_verified_model"] == 0 and lux["distinct_models"] == 0
+
+
+def test_search_finds_commercial_name_and_brand():
+    groups = library.group_records([meta_record("1", "frontal", {"nombre_comercial": "Aviator", "marca": "Ray-Ban"})])
+    find = lambda q: [g.ean for g in library.filter_groups(groups, library.LibraryFilters(query=q))]
+    assert find("aviator") == ["1"] and find("ray") == ["1"] and find("frontal.img") == []
+
+
+def test_core_view_states_are_not_changed_by_this_fix():
+    group = library.group_records([record("1", "frontal", id=1), record("1", "perspectiva", id=2)])[0]
+    assert group.present_views >= {"frontal", "perspectiva"} and group.missing_core == ("V3",)
+
+
+def test_card_without_commercial_name_is_neutral_and_never_shows_a_file_name():
+    html = design.product_card_html(
+        title="EAN 0012", brand="", reference="", ean="0012", count=2, named=False, provider="Luxoptica",
+        views=(("V1", True), ("V2", False), ("V3", False)), preview=None)
+    assert "Modelo no disponible" in html and "frontal" not in html
+    assert "EAN 0012" in html and "faltan V2, V3" in html and "Luxoptica" in html
+    assert "cd-card__title--neutral" in html
+
+
+def test_card_with_name_shows_provider_brand_and_model_separately():
+    html = design.product_card_html(
+        title="RB3025", brand="Ray-Ban", reference="RB3025", ean="0012", count=3, provider="Luxoptica",
+        views=(("V1", True), ("V2", True), ("V3", True)), preview=None)
+    assert "Luxoptica" in html and "Ray-Ban" in html and "RB3025" in html and "faltan" not in html
+    assert "3 imágenes" in html
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_design_tokens_meet_wcag_aa_in_both_themes(theme):
+    colours = design.palette(theme)
+    for foreground, background, minimum in design.CONTRAST_PAIRS:
+        ratio = design.contrast_ratio(colours[foreground], colours[background])
+        assert ratio >= minimum, f"{theme}: {foreground} sobre {background} = {ratio:.2f}"
+
+
+def test_auto_theme_resolves_both_palettes_in_the_browser_without_hardcoded_colours():
+    assert "light-dark(" in design.STYLES
+    assert design.palette("auto")["ink"] == f"light-dark({design.palette('light')['ink']}, {design.palette('dark')['ink']})"
+    assert design.palette("dark")["ink"] != design.palette("light")["ink"]
+
+
+def test_styles_are_responsive_and_scoped_to_our_own_classes():
+    css = design.STYLES
+    assert "repeat(auto-fill" in css and "st-key-lib_grid" in css and "st-key-lib_filters" in css
+    assert "focus-visible" in css and "stBaseButton" not in css and "data-testid" not in css
+    assert "repeat(4" not in css
+    for selector in css.split("{")[:-1]:
+        for part in selector.split("}")[-1].split(","):
+            part = part.strip()
+            assert not part or part.startswith(("div.st-key-", "div[class*=", ".cd-", "ul.cd-", "@", "li.cd-", "a.cd-", "p.cd-", "article.cd-", "h3.cd-")) or "cd-" in part, part
+
+
+def test_page_uses_one_container_grid_not_fixed_columns(repository):
+    add(repository, "0000000000001", "frontal", 1)
+    app = run()
+    assert not app.exception
+    from pathlib import Path
+    source = (Path(__file__).parents[1] / "app_pages" / "image_library_page.py").read_text(encoding="utf-8")
+    assert "lib_grid" in source and "st.columns(COLUMNS)" not in source and "COLUMNS = 4" not in source

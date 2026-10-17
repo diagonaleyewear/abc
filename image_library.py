@@ -6,8 +6,10 @@ reclassified here, so the Kering positional rule stays where it is applied.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from math import ceil
+from pathlib import PureWindowsPath
 
 from image_repository import ImageRecord
 
@@ -26,6 +28,20 @@ AVAILABILITY_FILTERS = ("Todos", "Vistas completas (V1, V2, V3)", "Con vistas pe
 PAGE_SIZES = (12, 24, 48)
 ALL = "Todos"
 
+# Metadata keys, in order of trust. Nothing here is derived from the stored file name.
+NAME_KEYS = ("nombre_comercial", "denominacion_comercial", "product_name")
+MODEL_KEYS = ("modelo",)
+REFERENCE_KEYS = ("referencia", "reference")
+BRAND_KEYS = ("marca", "brand")
+# Importers store a name-derived "modelo" (file prefix before "__", or the whole file name when
+# there is no prefix). Those values, view words and placeholders are technical, not commercial.
+_FILE_EXTENSION = re.compile(r"\.[a-z][a-z0-9]{1,4}$", re.IGNORECASE)
+_TECHNICAL_WORDS = frozenset({
+    "modelo-unknown", "unknown", "desconocido", "sin modelo", "n/a", "na", "null", "none", "-", "--",
+    "frontal", "perspectiva", "lateral", "detalle", "front", "side", "perspective", "detail",
+    "v1", "v2", "v3", "original", "img", "image", "imagen", "foto", "photo",
+})
+
 
 @dataclass(frozen=True)
 class ProductGroup:
@@ -36,6 +52,7 @@ class ProductGroup:
     records: tuple[ImageRecord, ...]
     cover: ImageRecord
     latest: str
+    name: str = ""
 
     @property
     def providers(self) -> tuple[str, ...]:
@@ -54,8 +71,13 @@ class ProductGroup:
         return tuple(label for view, label in CORE_VIEWS if view not in self.present_views)
 
     @property
+    def has_commercial_title(self) -> bool:
+        return bool(self.name or self.model or self.reference)
+
+    @property
     def title(self) -> str:
-        return self.model or self.reference or f"EAN {self.ean}"
+        """Commercial name, else model/reference, else a neutral EAN label; never a file name."""
+        return self.name or self.model or self.reference or f"EAN {self.ean}"
 
 
 @dataclass(frozen=True)
@@ -101,12 +123,42 @@ def _cover(records: list[ImageRecord]) -> ImageRecord:
     return min(records, key=lambda r: (bool(r.market), VIEW_ORDER.get(r.view, len(VIEW_ORDER)), r.name))
 
 
-def _meta(records: list[ImageRecord], *keys: str) -> str:
+def _file_names(records: list[ImageRecord]) -> set[str]:
+    names = set()
     for record in records:
-        for key in keys:
-            value = str(record.metadata.get(key, "") or "").strip()
-            if value:
-                return value
+        name = str(record.name or "").strip().casefold()
+        if name:
+            names.update({name, PureWindowsPath(name).stem})
+    return names
+
+
+def is_technical_value(value: str, records: list[ImageRecord]) -> bool:
+    """True when `value` looks like a file name, view word, placeholder or the EAN itself."""
+    text = str(value or "").strip()
+    folded = text.casefold()
+    if not text or folded in _TECHNICAL_WORDS or "__" in text or "/" in text or "\\" in text:
+        return True
+    if _FILE_EXTENSION.search(text) or folded in _file_names(records):
+        return True
+    digits = text.replace(" ", "")
+    return digits.isdigit() and len(digits) >= 8
+
+
+def _candidates(record: ImageRecord, keys: tuple[str, ...]):
+    for key in keys:
+        yield record.metadata.get(key)
+    identity = record.metadata.get("identity")
+    if isinstance(identity, dict) and keys == MODEL_KEYS:
+        yield identity.get("model")
+
+
+def _meta(records: list[ImageRecord], *keys: str) -> str:
+    """First non-technical value of `keys` across the EAN's records (verified metadata only)."""
+    for record in records:
+        for value in _candidates(record, keys):
+            text = str(value or "").strip()
+            if text and not is_technical_value(text, records):
+                return text
     return ""
 
 
@@ -120,12 +172,13 @@ def group_records(records: list[ImageRecord]) -> list[ProductGroup]:
         items.sort(key=record_sort_key)
         groups.append(ProductGroup(
             ean=ean,
-            model=_meta(items, "modelo"),
-            reference=_meta(items, "referencia", "reference"),
-            brand=_meta(items, "marca", "brand"),
+            model=_meta(items, *MODEL_KEYS),
+            reference=_meta(items, *REFERENCE_KEYS),
+            brand=_meta(items, *BRAND_KEYS),
             records=tuple(items),
             cover=_cover(items),
             latest=max(r.date for r in items),
+            name=_meta(items, *NAME_KEYS),
         ))
     groups.sort(key=lambda g: (g.latest, g.ean), reverse=True)
     return groups
@@ -133,7 +186,7 @@ def group_records(records: list[ImageRecord]) -> list[ProductGroup]:
 
 def _matches_query(group: ProductGroup, query: str) -> bool:
     needle = query.casefold()
-    haystack = (group.ean, group.model, group.reference, group.brand, *group.providers)
+    haystack = (group.ean, group.name, group.model, group.reference, group.brand, *group.providers)
     return any(needle in value.casefold() for value in haystack)
 
 
@@ -183,12 +236,41 @@ def paginate(items: list, number: int, size: int) -> Page:
 
 
 def summary(groups: list[ProductGroup]) -> dict[str, int]:
-    """Counters with explicit semantics: images, distinct EAN, distinct non-empty models."""
+    """Counters with explicit semantics: images, distinct EAN, distinct verified models."""
     return {
         "images": sum(len(g.records) for g in groups),
         "eans": len(groups),
-        "models": len({g.model for g in groups if g.model}),
+        "models": len({g.model or g.name for g in groups if g.model or g.name}),
     }
+
+
+def metadata_coverage(records: list[ImageRecord]) -> list[dict]:
+    """Per provider: how many EAN carry a verified model and how many only a technical value.
+
+    Read-only diagnosis of the stored metadata; nothing is corrected or reclassified.
+    """
+    by_provider: dict[str, dict[str, list[ImageRecord]]] = {}
+    for record in records:
+        by_provider.setdefault(record.provider or "Sin proveedor", {}).setdefault(record.ean, []).append(record)
+    rows = []
+    for provider, eans in sorted(by_provider.items()):
+        verified, technical, empty, models = 0, 0, 0, set()
+        for items in eans.values():
+            model = _meta(items, *MODEL_KEYS)
+            raw = any(str(r.metadata.get(key) or "").strip() for r in items for key in MODEL_KEYS)
+            if model:
+                verified += 1
+                models.add(model)
+            elif raw:
+                technical += 1
+            else:
+                empty += 1
+        rows.append({
+            "provider": provider, "images": sum(len(items) for items in eans.values()), "eans": len(eans),
+            "eans_with_verified_model": verified, "eans_with_technical_model_only": technical,
+            "eans_without_model": empty, "distinct_models": len(models),
+        })
+    return rows
 
 
 def filter_options(groups: list[ProductGroup]) -> dict[str, list[str]]:
