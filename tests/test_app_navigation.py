@@ -38,9 +38,14 @@ def test_masterdata_navigation_exposes_only_authorized_areas() -> None:
 
     build_navigation(streamlit, "masterdata", _pages())
 
-    assert set(streamlit.groups) == {"Inicio", "Master Data"}
+    assert set(streamlit.groups) == {
+        "Inicio",
+        "Master Data",
+        "Repositorio de imagenes",
+    }
     assert streamlit.position == "sidebar"
     assert streamlit.groups["Master Data"] == ["master_import", "master_dictionary", "master_dryrun"]
+    assert streamlit.groups["Repositorio de imagenes"] == ["kering_images"]
 
 
 def test_admin_navigation_keeps_all_existing_page_groups() -> None:

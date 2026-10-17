@@ -9,6 +9,7 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
         groups = {
             "Inicio": [pages["home"]],
             "Master Data": [pages["master_import"], pages["master_dictionary"], pages["master_dryrun"]],
+            "Repositorio de imagenes": [pages["kering_images"]],
         }
     else:
         groups = {
