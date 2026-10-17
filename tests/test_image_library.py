@@ -223,3 +223,18 @@ def test_images_route_uses_only_the_new_library_page():
     page = next(n for n in tree.body if isinstance(n, ast.Assign)
                 and getattr(n.targets[0], "id", "") == "LUXOPTICA_IMAGES_PAGE")
     assert "render_images_page" in ast.unparse(page) and "repositorio-imagenes" in ast.unparse(page)
+
+
+def test_dockerfile_ships_every_local_module_imported_by_app_pages():
+    import ast
+    from pathlib import Path
+    root = Path(__file__).parents[1]
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+    for page in (root / "app_pages").glob("*.py"):
+        for node in ast.walk(ast.parse(page.read_text(encoding="utf-8"))):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else (
+                [node.module] if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module else [])
+            for name in names:
+                module = name.split(".")[0]
+                if (root / f"{module}.py").is_file():
+                    assert f"{module}.py" in dockerfile, f"{module}.py no se copia en el Dockerfile ({page.name})"
