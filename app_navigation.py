@@ -14,7 +14,7 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
     else:
         groups = {
             "Inicio": [pages["home"]],
-            "Análisis ABC": [
+            "Análisis ABCD": [
                 pages["abc_home"],
                 pages["abc_search"],
                 pages["abc_reports"],

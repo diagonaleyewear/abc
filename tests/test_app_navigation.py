@@ -55,7 +55,7 @@ def test_admin_navigation_keeps_all_existing_page_groups() -> None:
 
     assert set(streamlit.groups) == {
         "Inicio",
-        "Análisis ABC",
+        "Análisis ABCD",
         "Master Data",
         "Repositorio de imágenes",
         "Alertas",

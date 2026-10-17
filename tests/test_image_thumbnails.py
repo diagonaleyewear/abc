@@ -3,6 +3,7 @@ from io import BytesIO
 import json
 import multiprocessing
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -181,7 +182,9 @@ def worker(root):
     return thumbnails.ThumbnailCache(repository).get(record, access(repository, record))
 
 
-def test_multiprocess_atomic_single_generation(repository):
+def test_multiprocess_atomic_single_generation(repository, monkeypatch):
+    # AppTest leaves __main__.__file__ on its temporary script; spawn would re-run that page in every worker.
+    monkeypatch.delattr(sys.modules["__main__"], "__file__", raising=False)
     record = save(repository)
     with ProcessPoolExecutor(max_workers=4, mp_context=multiprocessing.get_context("spawn")) as pool:
         results = list(pool.map(worker, [str(repository.root)] * 8))
@@ -300,7 +303,7 @@ def test_cache_failure_is_explicit_placeholder_not_original_fallback(repository,
 
 def test_general_gallery_uses_same_cache_no_zip_or_original_on_hot_render(repository, monkeypatch):
     for index in range(27):
-        save(repository, f"{index}.png", (index * 8, 20, 30))
+        save(repository, f"{index}.png", (index * 8, 20, 30), ean=f"{index + 1:013d}")
     from app_pages.luxoptica import render_images_page
 
     reader = Mock(wraps=ImageRepository.verified_bytes)
@@ -319,11 +322,13 @@ def test_general_gallery_uses_same_cache_no_zip_or_original_on_hot_render(reposi
     assert not app.exception and reader.call_count == 24 and zipper.call_count == 0
     app.run()
     assert not app.exception and reader.call_count == 24
-    app.number_input(key="luxoptica_gallery_page_input").set_value(2).run()
+    app.button(key="lib_next").click().run()
     assert not app.exception and reader.call_count == 27
     app.button(key="image_gallery_refresh").click().run()
     assert not app.exception and reader.call_count == 27
-    app.button(key="image_repository_prepare_zip").click().run()
+    app.button(key="lib_open_0000000000001").click().run()
+    assert not app.exception and zipper.call_count == 0
+    app.button(key="lib_prepare_zip").click().run()
     assert not app.exception and zipper.call_count == 1
 
 
