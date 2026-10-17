@@ -369,3 +369,164 @@ def test_page_uses_one_container_grid_not_fixed_columns(repository):
     from pathlib import Path
     source = (Path(__file__).parents[1] / "app_pages" / "image_library_page.py").read_text(encoding="utf-8")
     assert "lib_grid" in source and "st.columns(COLUMNS)" not in source and "COLUMNS = 4" not in source
+
+
+def _diagonal(mode, size=(1600, 900)):
+    """Black diagonal bar on white; 'P' is the palettised PNG case, 'RGBA' has a transparent surround."""
+    from PIL import ImageDraw
+    if mode == "RGBA":
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        ImageDraw.Draw(image).line([(100, 100), (1500, 800)], fill=(20, 20, 20, 255), width=14)
+    else:
+        image = Image.new("RGB", size, "white")
+        ImageDraw.Draw(image).line([(100, 100), (1500, 800)], fill=(0, 0, 0), width=14)
+        image = image.convert("P", palette=Image.Palette.ADAPTIVE, colors=8)
+    stream = BytesIO()
+    image.save(stream, "PNG")
+    return stream.getvalue()
+
+
+def _grey_levels(content):
+    with Image.open(BytesIO(content)) as image:
+        histogram = image.convert("L").histogram()
+    return sum(1 for count in histogram[41:215] if count)
+
+
+def test_palette_png_is_resampled_smoothly_not_with_nearest():
+    source = _diagonal("P")
+    with Image.open(BytesIO(source)) as image:
+        assert image.mode == "P"
+    legacy = thumbnails.generate(source, (640, 480), "JPEG")
+    smooth = thumbnails.generate(source, (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    assert _grey_levels(smooth) > 3 * max(_grey_levels(legacy), 1)
+
+
+def test_transparent_png_is_composited_on_the_light_frame_not_black():
+    source = _diagonal("RGBA")
+    preview = thumbnails.generate(source, (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    with Image.open(BytesIO(preview)) as image:
+        corner = image.convert("RGB").getpixel((5, 5))
+    assert all(abs(channel - expected) <= 3 for channel, expected in zip(corner, (0xf4, 0xf4, 0xf2)))
+    legacy = thumbnails.generate(source, (640, 480), "JPEG")
+    with Image.open(BytesIO(legacy)) as image:
+        assert max(image.convert("RGB").getpixel((5, 5))) < 10
+
+
+@pytest.mark.parametrize("size", [(1600, 900), (500, 1000), (300, 200)])
+def test_preview_keeps_aspect_ratio_fits_the_box_and_never_upscales(size):
+    preview = thumbnails.generate(_diagonal("RGBA", size), (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    with Image.open(BytesIO(preview)) as image:
+        width, height = image.size
+    assert width <= 640 and height <= 480 and (width == 640 or height == 480 or (width, height) == size)
+    assert abs(width / height - size[0] / size[1]) < 0.01
+
+
+def test_preview_generation_does_not_modify_source_bytes():
+    source = _diagonal("P")
+    digest = sha256(source).hexdigest()
+    thumbnails.generate(source, (640, 480), "JPEG", thumbnails.UI_BACKGROUND)
+    assert sha256(source).hexdigest() == digest
+
+
+def test_library_cards_use_high_resolution_flat_previews_and_leave_originals_intact(repository):
+    import base64
+    import re
+    stored = repository.save("0000000000001", "0000000000001-frontal-0.png", _diagonal("RGBA"),
+                             provider="Kering", origin="synthetic", view="frontal")[0]
+    before = sha256(stored.path.read_bytes()).hexdigest()
+    app = run()
+    html = " ".join(item.value for item in app.get("html"))
+    encoded = re.search(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", html).group(1)
+    with Image.open(BytesIO(base64.b64decode(encoded))) as image:
+        assert image.size == (640, 360)
+        assert all(abs(c - e) <= 3 for c, e in zip(image.convert("RGB").getpixel((5, 5)), (0xf4, 0xf4, 0xf2)))
+    assert sha256(stored.path.read_bytes()).hexdigest() == before
+
+
+def test_card_image_is_never_scaled_with_transforms_in_css():
+    assert "transform" not in design.STYLES.split(".cd-card__media img")[1].split("}")[0]
+    assert "object-fit: contain" in design.STYLES and "scale(" not in design.STYLES
+
+
+def _six_photo_product(repository):
+    views = ("frontal", "perspectiva", "lateral", "detalle", "otra", "")
+    return [add(repository, "0000000000042", view, n, provider="Luxoptica", model="OX42") for n, view in enumerate(views)]
+
+
+def test_thumbnail_and_view_button_share_one_control_and_one_callback(repository):
+    saved = _six_photo_product(repository)
+    app = run()
+    app.button(key="lib_open_0000000000042").click().run()
+    assert not app.exception
+    for number, stored in enumerate(saved):
+        button = app.button(key=f"lib_photo_{stored.id}")
+        assert button.label == "Ver"
+        button.click().run()
+        assert not app.exception and app.session_state["lib_photo"] == stored.id
+        assert any(" de 6" in item.value and "Fotografía" in item.value for item in app.caption)
+    assert len([b for b in app.button if b.key.startswith("lib_photo_") and b.key[10:].isdigit()]) == 6
+
+
+def test_thumbnails_have_descriptive_alt_text_and_all_view_labels(repository):
+    _six_photo_product(repository)
+    app = run()
+    app.button(key="lib_open_0000000000042").click().run()
+    html = " ".join(item.value for item in app.get("html"))
+    for label in ("V1 frontal", "V2", "V3 lateral", "Detalle", "Sin clasificar"):
+        assert f'alt="Fotografía {label}' in html
+    assert html.count('class="cd-photo"') == 6 and "<script" not in html
+
+
+def test_thumbnail_click_target_is_the_view_button_without_javascript():
+    styles = design.STYLES
+    assert 'st-key-lib_thumb_"]' in styles and "button::after" in styles
+    overlay = styles.split("button::after")[1].split("}")[0]
+    assert "position: absolute" in overlay and "inset: 0" in overlay and "cursor: pointer" in overlay
+    assert ":has(button:focus-visible)" in styles and "outline: 3px solid" in styles
+    assert "<script" not in styles and "onclick" not in styles
+
+
+def test_thumbnail_frame_is_uniform_light_in_both_themes():
+    for theme_styles in (design.STYLES_LIGHT, design.STYLES_DARK):
+        assert "background: #f4f4f2" in theme_styles.split("\n.cd-photo {")[1].split("}")[0]
+        assert "background: #f4f4f2" in theme_styles.split("\n.cd-card__media {")[1].split("}")[0]
+
+
+def test_rgb_palette_and_rgba_profiles_keep_colours_without_black_backgrounds():
+    red = Image.new("RGB", (800, 400), (200, 30, 30))
+    stream = BytesIO()
+    red.save(stream, "PNG")
+    with Image.open(BytesIO(thumbnails.generate(stream.getvalue(), (640, 480), "JPEG", thumbnails.UI_BACKGROUND))) as image:
+        pixel = image.convert("RGB").getpixel((320, 180))
+    assert all(abs(c - e) <= 6 for c, e in zip(pixel, (200, 30, 30)))
+    for mode in ("P", "RGBA"):
+        with Image.open(BytesIO(thumbnails.generate(_diagonal(mode), (640, 480), "JPEG", thumbnails.UI_BACKGROUND))) as image:
+            assert min(image.convert("RGB").getpixel((630, 20))) > 200
+
+
+def test_library_and_legacy_profiles_use_separate_cache_entries(repository):
+    stored = add(repository, "0000000000050", "frontal", 1)
+    cache = thumbnails.ThumbnailCache(repository)
+    proof = thumbnails.validate_visible(repository, [stored])[stored.id]
+    legacy = cache.get(stored, proof)
+    ui = cache.get(stored, proof, dimensions=thumbnails.UI_DIMENSIONS, version=thumbnails.UI_VERSION,
+                   background=thumbnails.UI_BACKGROUND)
+    assert legacy != ui
+    keys = {thumbnails.cache_key(stored), thumbnails.cache_key(
+        stored, thumbnails.UI_DIMENSIONS, "JPEG", thumbnails.UI_VERSION, thumbnails.UI_BACKGROUND)}
+    assert len(keys) == 2 and set(cache.snapshot()) == keys
+    assert len(list(cache.root.glob("*.jpg"))) == 2
+
+
+def test_warm_library_page_does_not_rewrite_the_cache_index(repository, monkeypatch):
+    saved = [add(repository, f"00000000001{n:02d}", "frontal", n) for n in range(6)]
+    run()
+    writes = []
+    original = thumbnails.ThumbnailCache._atomic
+    monkeypatch.setattr(thumbnails.ThumbnailCache, "_atomic",
+                        lambda self, path, content: (writes.append(path.name), original(self, path, content))[1])
+    monkeypatch.setattr(ImageRepository, "verified_bytes",
+                        lambda *a, **k: pytest.fail("warm render must not read originals"))
+    app = run()
+    assert not app.exception and writes == []
+    assert len(saved) == 6

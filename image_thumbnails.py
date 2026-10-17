@@ -19,6 +19,12 @@ from repository_storage import check_image_root, require_local, filesystem_mount
 
 LOGGER = logging.getLogger(__name__)
 GENERATOR_VERSION = "exif-fit-rgb-v1"
+# Library cards: ~2x of the largest visual size (4:3 frame), flat light frame colour, high quality.
+UI_DIMENSIONS = (640, 480)
+UI_BACKGROUND = "#f4f4f2"
+TOUCH_INTERVAL_NS = 60 * 1_000_000_000
+UI_QUALITY = 90
+UI_VERSION = "ui-lanczos-flat-v1"
 DEFAULT_CAPACITY = 1024**3
 DEFAULT_RESERVE = 2 * 1024**3
 
@@ -59,12 +65,27 @@ def cache_root(repository: ImageRepository) -> Path:
     return root
 
 
-def generate(content: bytes, dimensions: tuple[int, int], image_format: str) -> bytes:
+def generate(content: bytes, dimensions: tuple[int, int], image_format: str,
+             background: str | None = None) -> bytes:
+    """Derived preview; the original bytes are never modified.
+
+    With `background` the image is converted to RGBA first (palette and alpha modes would otherwise be
+    resampled with NEAREST, which jags the silhouette), resized with LANCZOS and composited on that flat
+    colour instead of black, then saved with high quality and no chroma subsampling.
+    """
     with Image.open(BytesIO(content)) as original:
         image = ImageOps.exif_transpose(original)
+        if background is None:
+            image.thumbnail(dimensions, Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.convert("RGB").save(buffer, format=image_format)
+            return buffer.getvalue()
+        image = image.convert("RGBA")
         image.thumbnail(dimensions, Image.Resampling.LANCZOS)
+        flat = Image.new("RGBA", image.size, background)
         buffer = BytesIO()
-        image.convert("RGB").save(buffer, format=image_format)
+        Image.alpha_composite(flat, image).convert("RGB").save(
+            buffer, format=image_format, quality=UI_QUALITY, subsampling=0, optimize=True)
         return buffer.getvalue()
 
 
@@ -85,6 +106,13 @@ def validate_visible(repository: ImageRepository, records: list[ImageRecord]) ->
             LOGGER.warning("Original no accesible id=%s: %s", record.id, error)
             result[record.id] = None
     return result
+
+
+def cache_key(record: ImageRecord, dimensions: tuple[int, int] = (360, 240), image_format: str = "JPEG",
+              version: str = GENERATOR_VERSION, background: str | None = None) -> str:
+    return hashlib.sha256(json.dumps(
+        [record.checksum, dimensions, image_format, version, *([background] if background else [])]
+    ).encode()).hexdigest()
 
 
 class ThumbnailCache:
@@ -133,8 +161,10 @@ class ThumbnailCache:
         with FileLock(self.root / ".cache.lock", timeout=30, mode=0o600):
             index_path = self.root / "index.json"
             try:
-                index = json.loads(index_path.read_text(encoding="utf-8"))
+                raw = index_path.read_text(encoding="utf-8")
+                index = json.loads(raw)
             except FileNotFoundError:
+                raw = None
                 index = {}
             except (ValueError, UnicodeError) as error:
                 raise ValueError("Indice de miniaturas corrupto; retirar cache regenerable") from error
@@ -149,13 +179,33 @@ class ThumbnailCache:
             (self.root / ".thumb-write.tmp").unlink(missing_ok=True)
             yield index
             encoded = json.dumps(index, sort_keys=True).encode()
+            if raw is not None and encoded.decode("ascii") == raw:
+                return
             if shutil.disk_usage(self.root).free < self.reserve + len(encoded):
                 raise OSError("Reserva local protegida; no se guarda indice de miniaturas")
             self._atomic(index_path, encoded)
 
+    def snapshot(self) -> dict:
+        """Read-only copy of the index (empty when the cache does not exist yet)."""
+        try:
+            return json.loads((self.root / "index.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+
+    def purge(self, keys) -> int:
+        """Remove derived entries only; originals are never touched. Returns bytes freed."""
+        freed = 0
+        with self._locked() as index:
+            for key in keys:
+                entry = index.pop(key, None)
+                if entry is not None:
+                    freed += entry["size"]
+                    (self.root / f"{key}.jpg").unlink(missing_ok=True)
+        return freed
+
     def get(self, record: ImageRecord, access: tuple[int, int, int] | None,
             dimensions: tuple[int, int] = (360, 240), image_format: str = "JPEG",
-            version: str = GENERATOR_VERSION) -> bytes:
+            version: str = GENERATOR_VERSION, background: str | None = None) -> bytes:
         if access is None:
             raise OSError("Original no validado o inaccesible")
         if min(dimensions) <= 0 or image_format != "JPEG":
@@ -168,8 +218,7 @@ class ThumbnailCache:
             authoritative = self._current.get(record.id)
         if authoritative != record:
             raise ValueError("Imagen eliminada o modificada en el catalogo")
-        key = hashlib.sha256(json.dumps(
-            [record.checksum, dimensions, image_format, version]).encode()).hexdigest()
+        key = cache_key(record, dimensions, image_format, version, background)
         source = hashlib.sha256(str(record.path).encode()).hexdigest()
         with self._locked() as index:
             entry = index.get(key)
@@ -192,11 +241,15 @@ class ThumbnailCache:
             if not entry:
                 if content is None:
                     content = self.repository.verified_bytes(record)
-                cached = generate(content, dimensions, image_format)
+                cached = (generate(content, dimensions, image_format, background) if background
+                          else generate(content, dimensions, image_format))
                 entry = {"size": len(cached), "digest": hashlib.sha256(cached).hexdigest(),
                          "sources": {}, "used": time.time_ns()}
             entry["sources"][source] = proof
-            entry["used"] = time.time_ns()
+            now = time.time_ns()
+            # Warm hits refresh LRU recency at most once per interval so browsing does not rewrite index.json.
+            if now - entry["used"] > TOUCH_INTERVAL_NS:
+                entry["used"] = now
             index[key] = entry
             encoded_size = len(json.dumps(index, sort_keys=True).encode())
             required = sum(item["size"] for item in index.values()) + encoded_size + 1

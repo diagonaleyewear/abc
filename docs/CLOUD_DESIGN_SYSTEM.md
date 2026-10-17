@@ -94,6 +94,39 @@ técnico, EAN sin modelo y modelos distintos. Las cifras de producción (4.774 i
 EAN distintos y valores `modelo` distintos no vacíos (antes sin filtrar nombres de archivo, por lo que 62 estaba sobreestimado en Luxoptica). El
 valor corregido y el reparto por proveedor deben leerse ejecutando el script en producción; no se ha modificado ningún dato original.
 
+## Miniaturas
+
+La biblioteca no usa la miniatura genérica de 360×240: `image_thumbnails.generate(..., background="#f4f4f2")` convierte siempre a RGBA
+(un PNG paletizado `P` se reescalaba con NEAREST y quedaba dentado), reescala con LANCZOS, compone sobre el gris claro del marco (antes el alfa
+se aplanaba sobre negro y la silueta oscura desaparecía), guarda JPEG q90 sin submuestreo de croma y a 640×480 (≈2× el tamaño visual, retina).
+Es una copia derivada en la caché existente (clave y versión propias `ui-lanczos-flat-v1`, no invalida otras miniaturas); el original no se
+modifica. CSS: `object-fit: contain`, sin `transform`. Comparativa: [`docs/design/biblioteca-imagenes-miniaturas/`](design/biblioteca-imagenes-miniaturas).
+
+**Límite de la fuente.** Reescalar solo evita el aliasing que introduce la generación de la miniatura. Si un original ya está dentado, es pequeño o viene muy comprimido (p. ej. un JPEG de baja calidad o un PNG paletizado con pocos colores), la miniatura hereda ese defecto: nunca se amplía por encima del tamaño original y no se promete una mejora que el reescalado no puede dar. Los originales no se tocan.
+
+**Abrir el visor desde la miniatura.** En «Todas las fotografías» cada miniatura es clicable sin JavaScript ni componentes externos: el botón «Ver» (`st.button` con `on_click=_select`) sigue siendo el único control y la CSS (`button::after { position: absolute; inset: 0 }` dentro de `div[class*="st-key-lib_thumb_"]`) extiende su área a toda la ficha. Ratón, táctil, `Enter`/`Espacio` y foco usan por tanto la misma callback y el mismo visor, sin eventos duplicados, y el foco visible (`outline` 3 px) se dibuja alrededor de la ficha. El texto alternativo de cada imagen es «Fotografía <vista · mercado · proveedor>». No se usa `help=` en el botón: Streamlit duplica el botón dentro del tooltip y crearía dos paradas de tabulación. El fondo del marco es `#f4f4f2` en ambos temas y los pies de foto reservan dos líneas para que los botones queden alineados.
+
+**Rendimiento de la caché.** `ThumbnailCache._locked` solo reescribe `index.json` si su contenido cambia, y un acierto en caliente refresca la recencia LRU como máximo una vez por minuto (`TOUCH_INTERVAL_NS`). Antes, cada miniatura de una página reescribía el índice con `fsync` aunque estuviera en caché (24 escrituras por página). Una página en caliente ya no lee originales ni escribe el índice; solo se escribe al generar, evictar o cambiar una prueba de acceso. La granularidad de LRU pasa a ser de 1 minuto.
+
+## Regeneración de miniaturas
+
+Las miniaturas son derivadas (`IMAGE_THUMBNAIL_CACHE_ROOT`, `index.json` + `<sha256>.jpg`) y se direccionan por el checksum del original, de modo que los originales compartidos no se duplican. El perfil de la Biblioteca (640×480, LANCZOS, fondo `#f4f4f2`, `ui-lanczos-flat-v1`) tiene clave distinta del perfil antiguo (360×240): no se sobrescribe nada y el cambio de clave invalida las miniaturas dentadas. La Biblioteca las genera bajo demanda por página; `scripts/regenerate_image_thumbnails.py` permite precalentarlas.
+
+Ejecutar dentro del contenedor, con las mismas variables de entorno que la app:
+
+```
+python scripts/regenerate_image_thumbnails.py report                 # simulación: cuenta, espacio y tiempo estimados (no escribe)
+python scripts/regenerate_image_thumbnails.py regenerate             # simulación
+python scripts/regenerate_image_thumbnails.py regenerate --execute [--provider Kering] [--batch-size 200] [--limit N] [--resume]
+python scripts/regenerate_image_thumbnails.py verify --per-provider 20
+python scripts/regenerate_image_thumbnails.py purge-legacy [--execute]   # opcional: elimina las 360×240 antiguas
+```
+
+- Idempotente: solo genera las claves que faltan. Escritura atómica (fsync + `os.replace`). Solo lee los originales.
+- `--resume` continúa desde `regeneration-state.json`; los errores van a `regeneration-errors.jsonl` (ambos en la raíz de la caché) y no detienen el lote (salida 1).
+- `purge-legacy` borra únicamente derivados; otras pantallas (Kering) los regeneran bajo demanda.
+- No ejecutar en producción sin autorización: ejecutar antes `report` y comunicar nº de miniaturas, espacio y tiempo.
+
 ## Pendiente (fuera de este piloto)
 
 Migrar el resto de pantallas, `/imagenes-kering` (buscar/historial), `/abc-historico`, retirar el `render_luxoptica_images_page` heredado de
