@@ -323,8 +323,25 @@ def test_local_library_search_and_download_permissions(tmp_path, monkeypatch):
     with repository.connect() as connection:
         connection.execute("DELETE FROM order_eans WHERE source='Kering' AND order_id='PO/4321'")
     assert repository.search_eans("PO/4321") == []
+    with store.connect() as connection:
+        original_snapshot = connection.execute(
+            "SELECT snapshot FROM attempts WHERE number='PO/4321'"
+        ).fetchone()[0]
+    store.index_local_order_search("PO/4321", role="masterdata")
     store.index_local_order_search("PO/4321", role="masterdata")
     assert repository.search_eans("PO/4321") == [EAN]
+    with repository.connect() as connection:
+        indexed_count = connection.execute(
+            """SELECT COUNT(*) FROM order_eans
+               WHERE source='Kering' AND order_id='PO/4321' AND ean=?""",
+            (EAN,),
+        ).fetchone()[0]
+    with store.connect() as connection:
+        indexed_snapshot = connection.execute(
+            "SELECT snapshot FROM attempts WHERE number='PO/4321'"
+        ).fetchone()[0]
+    assert indexed_count == 1
+    assert indexed_snapshot == original_snapshot
     with pytest.raises(PermissionError):
         store.index_local_order_search("PO/4321", role="user")
     for index in range(13):
@@ -430,6 +447,70 @@ def test_library_product_statuses(tmp_path):
         connection.execute("UPDATE attempts SET status='Error' WHERE run_id=?", (run_id,))
         connection.execute("UPDATE runs SET status='Finalizado', ended=1 WHERE id=?", (run_id,))
     assert ui.product_library_status(store, failed_ean, []) == ("error", "Error")
+
+
+def test_partial_kering_photos_keep_missing_perspective_and_download_originals(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(
+        "IMAGE_THUMBNAIL_CACHE_ROOT",
+        str(tmp_path / "thumbnails"),
+    )
+    monkeypatch.setenv(
+        "IMAGE_THUMBNAIL_CACHE_MAX_BYTES", str(10 * 1024 * 1024)
+    )
+    monkeypatch.setenv("IMAGE_THUMBNAIL_CACHE_RESERVE_BYTES", "1")
+    ean = "0000000000010"
+    store = ImageStore(ui.data_root())
+    originals = {
+        "front.png": (photo(10), "frontal"),
+        "side.png": (photo(11), "lateral"),
+        "detail.png": (photo(12), "detalle"),
+    }
+    for name, (content, view) in originals.items():
+        store.repository.save(
+            ean,
+            name,
+            content,
+            provider="Kering",
+            origin="synthetic",
+            view=view,
+        )
+
+    records = store.repository.catalog_records(ean)
+    assert ui.product_library_status(store, ean, records) == (
+        "parcial",
+        "Parcial",
+    )
+    archive = store.repository.zip_eans_for_user([ean], role="masterdata")
+    with ZipFile(BytesIO(archive)) as zipped:
+        expected = {
+            f"{ean}/{name}": content
+            for name, (content, _) in originals.items()
+        }
+        assert set(zipped.namelist()) == set(expected)
+        actual = {name: zipped.read(name) for name in zipped.namelist()}
+        assert actual == expected
+
+    app = AppTest.from_string(
+        "import streamlit as st\n"
+        "from kering_images import ImageStore, data_root\n"
+        "from kering_images_ui import render_product_library\n"
+        "st.session_state['auth_role']='masterdata'\n"
+        f"render_product_library(ImageStore(data_root()), '{ean}')"
+    )
+    app.run()
+    assert not app.exception
+    assert any(
+        "Vistas que faltan: Perspectiva" in item.value for item in app.caption
+    )
+    assert any(
+        button.label == "Preparar descarga de fotografias disponibles"
+        for button in app.button
+    )
+    assert not any(button.label == "Guardar revision" for button in app.button)
+    app.button(key=f"kering-library-{ean}-prepare-download").click().run()
+    assert app.get("download_button") and not app.exception
 
 
 def test_pagination_stable_selection_and_queries(monkeypatch, tmp_path):
