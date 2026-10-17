@@ -294,8 +294,9 @@ def _render_product(repository, group) -> None:
     with st.container(horizontal=True, wrap=True, key="lib_thumbs"):
         for record in records:
             with st.container(key=f"lib_thumb_{record.id}"):
-                design.render(design.photo_html(_preview(previews, record), library.view_name(record.view)))
-                design.render(design.caption_html(_photo_caption(record)))
+                caption = _photo_caption(record)
+                design.render(design.photo_html(_preview(previews, record), f"Fotografía {caption}"))
+                design.render(design.caption_html(caption))
                 st.button("Ver", key=f"lib_photo_{record.id}", width="stretch",
                           on_click=_select, args=(record.id,))
     _render_zip(repository, group)

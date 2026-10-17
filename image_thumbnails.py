@@ -22,6 +22,7 @@ GENERATOR_VERSION = "exif-fit-rgb-v1"
 # Library cards: ~2x of the largest visual size (4:3 frame), flat light frame colour, high quality.
 UI_DIMENSIONS = (640, 480)
 UI_BACKGROUND = "#f4f4f2"
+TOUCH_INTERVAL_NS = 60 * 1_000_000_000
 UI_QUALITY = 90
 UI_VERSION = "ui-lanczos-flat-v1"
 DEFAULT_CAPACITY = 1024**3
@@ -160,8 +161,10 @@ class ThumbnailCache:
         with FileLock(self.root / ".cache.lock", timeout=30, mode=0o600):
             index_path = self.root / "index.json"
             try:
-                index = json.loads(index_path.read_text(encoding="utf-8"))
+                raw = index_path.read_text(encoding="utf-8")
+                index = json.loads(raw)
             except FileNotFoundError:
+                raw = None
                 index = {}
             except (ValueError, UnicodeError) as error:
                 raise ValueError("Indice de miniaturas corrupto; retirar cache regenerable") from error
@@ -176,6 +179,8 @@ class ThumbnailCache:
             (self.root / ".thumb-write.tmp").unlink(missing_ok=True)
             yield index
             encoded = json.dumps(index, sort_keys=True).encode()
+            if raw is not None and encoded.decode("ascii") == raw:
+                return
             if shutil.disk_usage(self.root).free < self.reserve + len(encoded):
                 raise OSError("Reserva local protegida; no se guarda indice de miniaturas")
             self._atomic(index_path, encoded)
@@ -241,7 +246,10 @@ class ThumbnailCache:
                 entry = {"size": len(cached), "digest": hashlib.sha256(cached).hexdigest(),
                          "sources": {}, "used": time.time_ns()}
             entry["sources"][source] = proof
-            entry["used"] = time.time_ns()
+            now = time.time_ns()
+            # Warm hits refresh LRU recency at most once per interval so browsing does not rewrite index.json.
+            if now - entry["used"] > TOUCH_INTERVAL_NS:
+                entry["used"] = now
             index[key] = entry
             encoded_size = len(json.dumps(index, sort_keys=True).encode())
             required = sum(item["size"] for item in index.values()) + encoded_size + 1

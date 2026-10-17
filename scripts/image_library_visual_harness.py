@@ -22,6 +22,60 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VIEWPORTS = {"desktop-1440": (1440, 900), "laptop-1024": (1024, 800), "tablet-768": (768, 1000), "mobile-375": (375, 812)}
 BACKGROUNDS = ((255, 255, 255), (12, 12, 12), (30, 110, 60), (214, 206, 190), None)
+SIX_EAN = "8056500000001"
+SIX_VIEWS = ("frontal", "perspectiva", "lateral", "detalle", "", "otra")
+
+
+def photos_flow(browser, port: int, theme: str, output: Path, label: str, size: tuple[int, int], name: str,
+                report: dict) -> None:
+    """Open a six-photo product, then open the viewer by clicking a thumbnail and by keyboard."""
+    tab = browser.new_page(viewport={"width": size[0], "height": size[1]})
+    tab.goto(f"http://127.0.0.1:{port}", wait_until="load")
+    tab.wait_for_selector(".cd-card", timeout=60000)
+    if size[0] <= 640:
+        tab.locator('[data-testid="stSidebarCollapseButton"] button').first.click()
+    box = tab.get_by_placeholder("EAN (completo o parcial)", exact=False)
+    box.fill(SIX_EAN)
+    box.press("Enter")
+    tab.wait_for_selector(".st-key-lib_card_" + SIX_EAN, timeout=30000)
+    tab.get_by_role("button", name="Ver fotografías").first.click()
+    tab.wait_for_selector(".st-key-lib_thumbs .cd-photo img", timeout=30000)
+    tab.wait_for_timeout(1500)
+    thumbs = tab.locator('[class*="st-key-lib_thumb_"] .cd-photo')
+    result = {"thumbnails": thumbs.count()}
+    spot = thumbs.nth(3).bounding_box()
+    result["topElement"] = tab.evaluate(
+        "([x, y]) => { const e = document.elementFromPoint(x, y); return e.tagName + '.' + e.className; }",
+        [spot["x"] + spot["width"] / 2, spot["y"] + spot["height"] / 2])
+    tab.mouse.click(spot["x"] + spot["width"] / 2, spot["y"] + spot["height"] / 2)
+    tab.get_by_text("Fotografía 4 de 6").wait_for(timeout=15000)
+    result["clickOpensViewer"] = True
+    result["viewerImages"] = tab.locator('[data-testid="stImage"]').count()
+    tab.screenshot(path=str(output / f"{label}-{theme}-photos-click-{name}.png"), full_page=True)
+    tab.wait_for_timeout(1000)
+    active = ("(document.activeElement.closest('[class*=\"st-key-lib_photo_\"]') || {className: 'none'})"
+              ".className.match(/st-key-lib_photo_(\\w+)/)?.[1] ?? 'none'")
+    result["buttonsIn101"] = tab.evaluate(
+        "[...document.querySelectorAll('.st-key-lib_photo_101 button')].map(b => b.parentElement.className + '|' + b.textContent.trim())")
+    tab.locator('.st-key-lib_photo_101 button').first.focus()
+    result["focused"] = tab.evaluate(active)
+    tab.keyboard.press("Tab")
+    result["focusedAfterTab"] = tab.evaluate(active)
+    tab.keyboard.press("Enter")
+    try:
+        tab.get_by_text(f"Fotografía 6 de 6").wait_for(timeout=15000)
+    except Exception:
+        tab.screenshot(path=str(output / "debug-keyboard.png"), full_page=True)
+        print(result)
+        raise
+    result["keyboardOpensViewer"] = True
+    result["overflowX"] = tab.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth + 1")
+    result["thumbBackground"] = tab.evaluate(
+        "getComputedStyle(document.querySelector('.cd-photo')).backgroundColor")
+    result["thumbSizes"] = tab.evaluate(
+        "[...new Set([...document.querySelectorAll('.st-key-lib_thumbs .cd-photo')].map(e => Math.round(e.getBoundingClientRect().width) + 'x' + Math.round(e.getBoundingClientRect().height)))]")
+    report[f"{theme}-photos-{name}"] = result
+    tab.close()
 
 
 def _picture(index: int) -> bytes:
@@ -59,6 +113,9 @@ def seed(repository) -> None:
         for offset, view in enumerate(present):
             repository.save(ean, f"{ean}-{view}.png", _picture(index + offset), provider=provider,
                             origin="synthetic", view=view, metadata=metadata or None)
+    for offset, view in enumerate(SIX_VIEWS):
+        repository.save(SIX_EAN, f"{SIX_EAN}-{offset}.png", _picture(offset), provider="Luxoptica",
+                        origin="synthetic", view=view, metadata={"modelo": "OX9999", "marca": "Oakley"})
 
 
 def environment(base: Path) -> dict:
@@ -176,7 +233,11 @@ def capture(output: Path, label: str) -> None:
                         tab.screenshot(path=str(output / f"{label}-dark-named-desktop-1440.png"), full_page=False)
                         tab.close()
                 finally:
-                    process.terminate()
+                    try:
+                        photos_flow(browser, port, theme, output, label, (1440, 900), "desktop-1440", report)
+                        photos_flow(browser, port, theme, output, label, (375, 812), "mobile-375", report)
+                    finally:
+                        process.terminate()
             browser.close()
     (output / f"{label}-measurements.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

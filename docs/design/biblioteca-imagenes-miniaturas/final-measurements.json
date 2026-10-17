@@ -1,0 +1,250 @@
+{
+  "dark-desktop-1440": {
+    "overflowX": false,
+    "scrollWidth": 1440,
+    "clientWidth": 1440,
+    "appBackground": "rgb(14, 17, 23)",
+    "title": "rgb(247, 246, 242)",
+    "statValue": "rgb(247, 246, 242)",
+    "statBackground": "rgb(34, 39, 50)",
+    "cardTitle": "rgb(247, 246, 242)",
+    "cardBackground": "rgb(23, 27, 36)",
+    "eyebrow": "rgb(179, 177, 171)",
+    "ean": "rgb(247, 246, 242)",
+    "cards": 24,
+    "cardWidths": [
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201
+    ],
+    "cardHeights": [
+      418,
+      408
+    ],
+    "columns": 4,
+    "filtersOverlap": false
+  },
+  "dark-laptop-1024": {
+    "overflowX": false,
+    "scrollWidth": 1024,
+    "clientWidth": 1024,
+    "appBackground": "rgb(14, 17, 23)",
+    "title": "rgb(247, 246, 242)",
+    "statValue": "rgb(247, 246, 242)",
+    "statBackground": "rgb(34, 39, 50)",
+    "cardTitle": "rgb(247, 246, 242)",
+    "cardBackground": "rgb(23, 27, 36)",
+    "eyebrow": "rgb(179, 177, 171)",
+    "ean": "rgb(247, 246, 242)",
+    "cards": 24,
+    "cardWidths": [
+      242,
+      242,
+      242,
+      242,
+      242,
+      242,
+      242,
+      242
+    ],
+    "cardHeights": [
+      449,
+      439
+    ],
+    "columns": 2,
+    "filtersOverlap": false
+  },
+  "dark-tablet-768": {
+    "overflowX": false,
+    "scrollWidth": 768,
+    "clientWidth": 768,
+    "appBackground": "rgb(14, 17, 23)",
+    "title": "rgb(247, 246, 242)",
+    "statValue": "rgb(247, 246, 242)",
+    "statBackground": "rgb(34, 39, 50)",
+    "cardTitle": "rgb(247, 246, 242)",
+    "cardBackground": "rgb(23, 27, 36)",
+    "eyebrow": "rgb(179, 177, 171)",
+    "ean": "rgb(247, 246, 242)",
+    "cards": 24,
+    "cardWidths": [
+      178,
+      178,
+      178,
+      178,
+      178,
+      178,
+      178,
+      178
+    ],
+    "cardHeights": [
+      401,
+      391
+    ],
+    "columns": 2,
+    "filtersOverlap": false
+  },
+  "dark-mobile-375": {
+    "overflowX": false,
+    "scrollWidth": 375,
+    "clientWidth": 375,
+    "appBackground": "rgb(14, 17, 23)",
+    "title": "rgb(247, 246, 242)",
+    "statValue": "rgb(247, 246, 242)",
+    "statBackground": "rgb(34, 39, 50)",
+    "cardTitle": "rgb(247, 246, 242)",
+    "cardBackground": "rgb(23, 27, 36)",
+    "eyebrow": "rgb(179, 177, 171)",
+    "ean": "rgb(247, 246, 242)",
+    "cards": 24,
+    "cardWidths": [
+      311,
+      311,
+      311,
+      311,
+      311,
+      311,
+      311,
+      311
+    ],
+    "cardHeights": [
+      501,
+      491
+    ],
+    "columns": 1,
+    "filtersOverlap": false
+  },
+  "dark-photos-desktop-1440": {
+    "thumbnails": 6,
+    "topElement": "BUTTON.st-emotion-cache-1l8vm4w eqzt73c2",
+    "clickOpensViewer": true,
+    "viewerImages": 1,
+    "buttonsIn101": [
+      "stButton st-emotion-cache-8atqhb e1zj3zg0|Ver"
+    ],
+    "focused": "101",
+    "focusedAfterTab": "102",
+    "keyboardOpensViewer": true,
+    "overflowX": false,
+    "thumbBackground": "rgb(244, 244, 242)",
+    "thumbSizes": [
+      "150x113"
+    ]
+  },
+  "dark-photos-mobile-375": {
+    "thumbnails": 6,
+    "topElement": "BUTTON.st-emotion-cache-1l8vm4w eqzt73c2",
+    "clickOpensViewer": true,
+    "viewerImages": 1,
+    "buttonsIn101": [
+      "stButton st-emotion-cache-8atqhb e1zj3zg0|Ver"
+    ],
+    "focused": "101",
+    "focusedAfterTab": "102",
+    "keyboardOpensViewer": true,
+    "overflowX": false,
+    "thumbBackground": "rgb(244, 244, 242)",
+    "thumbSizes": [
+      "164x123"
+    ]
+  },
+  "light-desktop-1440": {
+    "overflowX": false,
+    "scrollWidth": 1440,
+    "clientWidth": 1440,
+    "appBackground": "rgb(255, 255, 255)",
+    "title": "rgb(17, 17, 17)",
+    "statValue": "rgb(17, 17, 17)",
+    "statBackground": "rgb(242, 242, 242)",
+    "cardTitle": "rgb(17, 17, 17)",
+    "cardBackground": "rgb(255, 255, 255)",
+    "eyebrow": "rgb(95, 93, 88)",
+    "ean": "rgb(17, 17, 17)",
+    "cards": 24,
+    "cardWidths": [
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201
+    ],
+    "cardHeights": [
+      418,
+      408
+    ],
+    "columns": 4,
+    "filtersOverlap": false
+  },
+  "light-mobile-375": {
+    "overflowX": false,
+    "scrollWidth": 375,
+    "clientWidth": 375,
+    "appBackground": "rgb(255, 255, 255)",
+    "title": "rgb(17, 17, 17)",
+    "statValue": "rgb(17, 17, 17)",
+    "statBackground": "rgb(242, 242, 242)",
+    "cardTitle": "rgb(17, 17, 17)",
+    "cardBackground": "rgb(255, 255, 255)",
+    "eyebrow": "rgb(95, 93, 88)",
+    "ean": "rgb(17, 17, 17)",
+    "cards": 24,
+    "cardWidths": [
+      311,
+      311,
+      311,
+      311,
+      311,
+      311,
+      311,
+      311
+    ],
+    "cardHeights": [
+      501,
+      491
+    ],
+    "columns": 1,
+    "filtersOverlap": false
+  },
+  "light-photos-desktop-1440": {
+    "thumbnails": 6,
+    "topElement": "BUTTON.st-emotion-cache-4xe5pn eqzt73c2",
+    "clickOpensViewer": true,
+    "viewerImages": 1,
+    "buttonsIn101": [
+      "stButton st-emotion-cache-8atqhb e1zj3zg0|Ver"
+    ],
+    "focused": "101",
+    "focusedAfterTab": "102",
+    "keyboardOpensViewer": true,
+    "overflowX": false,
+    "thumbBackground": "rgb(244, 244, 242)",
+    "thumbSizes": [
+      "150x113"
+    ]
+  },
+  "light-photos-mobile-375": {
+    "thumbnails": 6,
+    "topElement": "BUTTON.st-emotion-cache-4xe5pn eqzt73c2",
+    "clickOpensViewer": true,
+    "viewerImages": 1,
+    "buttonsIn101": [
+      "stButton st-emotion-cache-8atqhb e1zj3zg0|Ver"
+    ],
+    "focused": "101",
+    "focusedAfterTab": "102",
+    "keyboardOpensViewer": true,
+    "overflowX": false,
+    "thumbBackground": "rgb(244, 244, 242)",
+    "thumbSizes": [
+      "164x123"
+    ]
+  }
+}

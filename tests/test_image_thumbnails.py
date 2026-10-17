@@ -142,6 +142,7 @@ def test_cached_bytes_corrupt_rebuilt_and_corrupt_original_rejected(repository):
 
 
 def test_capacity_lru_and_space_reserve(repository, monkeypatch):
+    monkeypatch.setattr(thumbnails, "TOUCH_INTERVAL_NS", -1)
     records = [save(repository, f"{index}.png", (index * 50, 20, 30)) for index in range(3)]
     cache = thumbnails.ThumbnailCache(repository)
     for record in records[:2]:

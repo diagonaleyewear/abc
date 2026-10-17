@@ -446,3 +446,87 @@ def test_library_cards_use_high_resolution_flat_previews_and_leave_originals_int
 def test_card_image_is_never_scaled_with_transforms_in_css():
     assert "transform" not in design.STYLES.split(".cd-card__media img")[1].split("}")[0]
     assert "object-fit: contain" in design.STYLES and "scale(" not in design.STYLES
+
+
+def _six_photo_product(repository):
+    views = ("frontal", "perspectiva", "lateral", "detalle", "otra", "")
+    return [add(repository, "0000000000042", view, n, provider="Luxoptica", model="OX42") for n, view in enumerate(views)]
+
+
+def test_thumbnail_and_view_button_share_one_control_and_one_callback(repository):
+    saved = _six_photo_product(repository)
+    app = run()
+    app.button(key="lib_open_0000000000042").click().run()
+    assert not app.exception
+    for number, stored in enumerate(saved):
+        button = app.button(key=f"lib_photo_{stored.id}")
+        assert button.label == "Ver"
+        button.click().run()
+        assert not app.exception and app.session_state["lib_photo"] == stored.id
+        assert any(" de 6" in item.value and "Fotografía" in item.value for item in app.caption)
+    assert len([b for b in app.button if b.key.startswith("lib_photo_") and b.key[10:].isdigit()]) == 6
+
+
+def test_thumbnails_have_descriptive_alt_text_and_all_view_labels(repository):
+    _six_photo_product(repository)
+    app = run()
+    app.button(key="lib_open_0000000000042").click().run()
+    html = " ".join(item.value for item in app.get("html"))
+    for label in ("V1 frontal", "V2", "V3 lateral", "Detalle", "Sin clasificar"):
+        assert f'alt="Fotografía {label}' in html
+    assert html.count('class="cd-photo"') == 6 and "<script" not in html
+
+
+def test_thumbnail_click_target_is_the_view_button_without_javascript():
+    styles = design.STYLES
+    assert 'st-key-lib_thumb_"]' in styles and "button::after" in styles
+    overlay = styles.split("button::after")[1].split("}")[0]
+    assert "position: absolute" in overlay and "inset: 0" in overlay and "cursor: pointer" in overlay
+    assert ":has(button:focus-visible)" in styles and "outline: 3px solid" in styles
+    assert "<script" not in styles and "onclick" not in styles
+
+
+def test_thumbnail_frame_is_uniform_light_in_both_themes():
+    for theme_styles in (design.STYLES_LIGHT, design.STYLES_DARK):
+        assert "background: #f4f4f2" in theme_styles.split("\n.cd-photo {")[1].split("}")[0]
+        assert "background: #f4f4f2" in theme_styles.split("\n.cd-card__media {")[1].split("}")[0]
+
+
+def test_rgb_palette_and_rgba_profiles_keep_colours_without_black_backgrounds():
+    red = Image.new("RGB", (800, 400), (200, 30, 30))
+    stream = BytesIO()
+    red.save(stream, "PNG")
+    with Image.open(BytesIO(thumbnails.generate(stream.getvalue(), (640, 480), "JPEG", thumbnails.UI_BACKGROUND))) as image:
+        pixel = image.convert("RGB").getpixel((320, 180))
+    assert all(abs(c - e) <= 6 for c, e in zip(pixel, (200, 30, 30)))
+    for mode in ("P", "RGBA"):
+        with Image.open(BytesIO(thumbnails.generate(_diagonal(mode), (640, 480), "JPEG", thumbnails.UI_BACKGROUND))) as image:
+            assert min(image.convert("RGB").getpixel((630, 20))) > 200
+
+
+def test_library_and_legacy_profiles_use_separate_cache_entries(repository):
+    stored = add(repository, "0000000000050", "frontal", 1)
+    cache = thumbnails.ThumbnailCache(repository)
+    proof = thumbnails.validate_visible(repository, [stored])[stored.id]
+    legacy = cache.get(stored, proof)
+    ui = cache.get(stored, proof, dimensions=thumbnails.UI_DIMENSIONS, version=thumbnails.UI_VERSION,
+                   background=thumbnails.UI_BACKGROUND)
+    assert legacy != ui
+    keys = {thumbnails.cache_key(stored), thumbnails.cache_key(
+        stored, thumbnails.UI_DIMENSIONS, "JPEG", thumbnails.UI_VERSION, thumbnails.UI_BACKGROUND)}
+    assert len(keys) == 2 and set(cache.snapshot()) == keys
+    assert len(list(cache.root.glob("*.jpg"))) == 2
+
+
+def test_warm_library_page_does_not_rewrite_the_cache_index(repository, monkeypatch):
+    saved = [add(repository, f"00000000001{n:02d}", "frontal", n) for n in range(6)]
+    run()
+    writes = []
+    original = thumbnails.ThumbnailCache._atomic
+    monkeypatch.setattr(thumbnails.ThumbnailCache, "_atomic",
+                        lambda self, path, content: (writes.append(path.name), original(self, path, content))[1])
+    monkeypatch.setattr(ImageRepository, "verified_bytes",
+                        lambda *a, **k: pytest.fail("warm render must not read originals"))
+    app = run()
+    assert not app.exception and writes == []
+    assert len(saved) == 6
