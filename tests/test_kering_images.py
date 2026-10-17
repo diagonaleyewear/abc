@@ -39,8 +39,12 @@ def no_external_network(monkeypatch, tmp_path):
             return real_socket_connect(connection, address)
         return reject(address)
 
-    monkeypatch.setattr(socket, "create_connection", reject_external_create_connection)
-    monkeypatch.setattr(socket.socket, "connect", reject_external_socket_connect)
+    monkeypatch.setattr(
+        socket, "create_connection", reject_external_create_connection
+    )
+    monkeypatch.setattr(
+        socket.socket, "connect", reject_external_socket_connect
+    )
     monkeypatch.setattr("kering_portal.sync_playwright", reject)
 from io import BytesIO
 from PIL import Image
@@ -161,8 +165,15 @@ def test_shared_batch_lock_blocks_a_second_service(tmp_path):
 def test_user_batch_submission_requires_admin_role(tmp_path):
     service = BatchService(ImageStore(tmp_path))
     with pytest.raises(PermissionError):
-        service.submit_for_user([], "viewer", "masterdata", 7, date(2026, 3, 29),
-                                date(2026, 3, 29), lambda _: None)
+        service.submit_for_user(
+            [],
+            "viewer",
+            "masterdata",
+            7,
+            date(2026, 3, 29),
+            date(2026, 3, 29),
+            lambda _: None,
+        )
     service.executor.shutdown(wait=True)
 
 
@@ -329,9 +340,11 @@ def test_order_first_ui_processes_one_pilot_and_reuses_images(tmp_path, monkeypa
     monkeypatch.setattr(ui, "service", lambda: batch)
     monkeypatch.setattr(ui, "configured_orders", lambda *args, **kwargs: [current])
     monkeypatch.setattr(ui, "create_portal", lambda _: portal)
-    app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\n"
-                              "st.session_state['auth_role']='admin'\nst.session_state['auth_user']='operator'\n"
-                              "render_kering_page(None)")
+    app = AppTest.from_string(
+        "import streamlit as st\nfrom kering_images_ui import render_kering_page\n"
+        "st.session_state['auth_role']='admin'\nst.session_state['auth_user']='operator'\n"
+        "render_kering_page(None)"
+    )
     from concurrent.futures import Future
     probe = Future()
     probe.set_result({"ok": True})
@@ -339,14 +352,22 @@ def test_order_first_ui_processes_one_pilot_and_reuses_images(tmp_path, monkeypa
     try:
         app.run()
         assert not app.exception
-        next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
+        next(
+            button
+            for button in app.button
+            if button.label == "Buscar pedidos en Odoo"
+        ).click().run()
         listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
         assert listing.iloc[0]["Procesamiento"] == "No procesado"
         button = next(button for button in app.button if button.label == "Procesar pendientes")
         assert not button.disabled
         button.click().run()
         batch.executor.submit(lambda: None).result(timeout=10)
-        next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
+        next(
+            button
+            for button in app.button
+            if button.label == "Buscar pedidos en Odoo"
+        ).click().run()
         assert not app.exception
         listing = next(frame.value for frame in app.dataframe if "Seleccionar" in frame.value.columns)
         assert listing.iloc[0]["Procesamiento"] == "Procesado"
@@ -410,7 +431,8 @@ def test_order_list_connection_failure_is_specific_and_secret_free(tmp_path, mon
     app = AppTest.from_string(
         "import streamlit as st\nfrom datetime import date\nfrom kering_images_ui import render_order_list\n"
         "st.session_state['auth_role']='admin'\n"
-        "render_order_list(None, date(2026,9,1), date(2026,10,9))")
+        "render_order_list(None, date(2026,9,1), date(2026,10,9))"
+    )
     app.run()
     assert not app.exception
     assert "ODOO_CONEXION" in app.error[0].value
@@ -703,7 +725,10 @@ def test_atomic_write_failure_recovers_without_orphan(tmp_path, monkeypatch):
     def interrupted(path, content, **kwargs):
         raise OSError("offline interrupted write")
     monkeypatch.setattr(image_repository, "atomic_write", interrupted)
-    assert process_ean(store, FakePortal(), "0001")["reason"] == "imagen_invalida"
+    assert (
+        process_ean(store, FakePortal(), "0001")["reason"]
+        == "imagen_invalida"
+    )
     assert not store.valid_views("0001")
     monkeypatch.setattr(image_repository, "atomic_write", writer)
     assert process_ean(store, FakePortal(), "0001")["reason"] == ""
@@ -720,14 +745,20 @@ def test_orders_and_history_ui_are_offline(tmp_path, monkeypatch):
     store = ImageStore(tmp_path)
     run = store.create_run([order()], "offline", 7, date(2026, 3, 29), date(2026, 3, 29))
     execute_run(store, run, lambda _: order(), FakePortal())
-    monkeypatch.setattr(ui, "configured_orders", lambda *args, **kwargs: [pilot_order()])
+    monkeypatch.setattr(
+        ui, "configured_orders", lambda *args, **kwargs: [pilot_order()]
+    )
     ui.service.clear()
     app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\nst.session_state['auth_role']='admin'\nrender_kering_page(None)")
     app.run()
     assert not app.exception
     assert app.title[0].value == "Biblioteca de fotografías de producto"
     assert not app.get("download_button")
-    next(button for button in app.button if button.label == "Buscar pedidos en Odoo").click().run()
+    next(
+        button
+        for button in app.button
+        if button.label == "Buscar pedidos en Odoo"
+    ).click().run()
     assert not app.exception
     assert any("Seleccionar" in frame.value.columns for frame in app.dataframe)
     ui.service.clear()
@@ -750,7 +781,9 @@ def test_ui_injects_configured_adapter_and_sql_scope(monkeypatch):
     monkeypatch.setattr(ui, "create_portal", factory)
     monkeypatch.setattr(ui, "service", lambda: batch)
     monkeypatch.setattr(ui, "configured_orders", reader)
-    monkeypatch.setattr(ui.st, "session_state", {"auth_role": "admin", "auth_user": "operator"})
+    monkeypatch.setattr(
+        ui.st, "session_state", {"auth_role": "admin", "auth_user": "operator"}
+    )
     assert ui.submit_orders(None, config, [order()], date(2026, 3, 29), date(2026, 3, 29)) == "offline-run"
     assert batch.submit_for_user.call_args.kwargs["portal"] is portal
     loader = batch.submit_for_user.call_args.args[-1]

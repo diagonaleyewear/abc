@@ -43,7 +43,9 @@ def admin_only() -> None:
 
 def library_only() -> None:
     if st.session_state.get("auth_role") not in {"admin", "masterdata"}:
-        st.error("La biblioteca requiere un usuario administrador o de Master Data.")
+        st.error(
+            "La biblioteca requiere un usuario administrador o de Master Data."
+        )
         st.stop()
 
 
@@ -222,7 +224,9 @@ def submit_orders(engine, config, selected, start, end):
     role = st.session_state.get("auth_role")
     user = st.session_state.get("auth_user")
     if role != "admin" or not isinstance(user, str) or not user.strip():
-        raise PermissionError("El procesamiento Kering requiere un usuario administrador")
+        raise PermissionError(
+            "El procesamiento Kering requiere un usuario administrador"
+        )
     try:
         store = service().store
         config_store = ConfigStore(data_root())
@@ -231,8 +235,15 @@ def submit_orders(engine, config, selected, start, end):
             raise ValueError("El proveedor ha cambiado")
         start = prepare_selection(store, current_config, selected, start, end)
         supplier = int(current_config["supplier_id"])
-        loader = make_loader(store, config_store, lambda: resolve_engine(engine), start, end, supplier,
-                             reader=configured_orders)
+        loader = make_loader(
+            store,
+            config_store,
+            lambda: resolve_engine(engine),
+            start,
+            end,
+            supplier,
+            reader=configured_orders,
+        )
         return service().submit_for_user(
             selected, user, role, supplier, start, end, loader,
             portal=create_portal(current_config), origin="Manual")
@@ -260,12 +271,31 @@ def _render_progress(run_id):
         results = json.loads(row["results"])
         if results:
             with st.expander(row["number"]):
-                st.dataframe([dict(EAN=ean, **result["views"], Motivo=result["reason"], Intentos=result["tries"],
-                                   Archivos=result.get("acquisition", {}).get("available_files", "-"),
-                                   Descargados=result.get("acquisition", {}).get("downloaded_files", "-"),
-                                   Reutilizados=result.get("acquisition", {}).get("reused_files", "-"))
-                              for ean, result in results.items()], hide_index=True)
-    if rows[0]["ended"] is not None and not st.session_state.get(f"kering_finished_{run_id}"):
+                st.dataframe(
+                    [
+                        dict(
+                            EAN=ean,
+                            **result["views"],
+                            Motivo=result["reason"],
+                            Intentos=result["tries"],
+                            Archivos=result.get("acquisition", {}).get(
+                                "available_files", "-"
+                            ),
+                            Descargados=result.get("acquisition", {}).get(
+                                "downloaded_files", "-"
+                            ),
+                            Reutilizados=result.get("acquisition", {}).get(
+                                "reused_files", "-"
+                            ),
+                        )
+                        for ean, result in results.items()
+                    ],
+                    hide_index=True,
+                )
+    if (
+        rows[0]["ended"] is not None
+        and not st.session_state.get(f"kering_finished_{run_id}")
+    ):
         st.session_state[f"kering_finished_{run_id}"] = True
         st.rerun()
 
@@ -285,23 +315,43 @@ def render_kering_page(engine) -> None:
 
 def render_admin_processing(engine, store) -> None:
     admin_only()
-    with st.expander("Administracion: procesamiento e historial", expanded=False):
+    with st.expander(
+        "Administracion: procesamiento e historial", expanded=False
+    ):
         try:
             config = ConfigStore(data_root()).load()
             cutoff = date.fromisoformat(config["cutoff_date"])
         except (OSError, ValueError, InvalidToken):
             st.error("No se pudo leer la configuracion Kering.")
             return
-        st.caption("La consulta a Odoo solo se realiza al pulsar «Buscar pedidos en Odoo».")
-        st.link_button("Configuracion Kering", "/config", icon=":material/settings:")
+        st.caption(
+            "La consulta a Odoo solo se realiza al pulsar "
+            "«Buscar pedidos en Odoo»."
+        )
+        st.link_button(
+            "Configuracion Kering", "/config", icon=":material/settings:"
+        )
         left, right = st.columns(2)
-        start = left.date_input("Fecha desde", cutoff, min_value=cutoff, format=DATE_FORMAT, key="kering_start")
-        end = right.date_input("Fecha hasta", max(cutoff, date.today()), min_value=cutoff,
-                               format=DATE_FORMAT, key="kering_end")
+        start = left.date_input(
+            "Fecha desde",
+            cutoff,
+            min_value=cutoff,
+            format=DATE_FORMAT,
+            key="kering_start",
+        )
+        end = right.date_input(
+            "Fecha hasta",
+            max(cutoff, date.today()),
+            min_value=cutoff,
+            format=DATE_FORMAT,
+            key="kering_end",
+        )
         number = st.text_input("Numero de pedido", key="kering_order_number")
         state = st.selectbox("Estado de imagenes", ["Todos", "Procesado", "Pendiente", "Error"],
                             key="kering_order_state")
-        refresh = st.button("Buscar pedidos en Odoo", icon=":material/search:", type="primary")
+        refresh = st.button(
+            "Buscar pedidos en Odoo", icon=":material/search:", type="primary"
+        )
         if refresh or "kering_orders_loaded" in st.session_state:
             access = None
             probe = st.session_state.get("kering_access_probe")
@@ -309,12 +359,19 @@ def render_admin_processing(engine, store) -> None:
                 try:
                     access = probe.result()
                 except Exception:
-                    st.warning("La comprobacion de acceso fallo. Repitala desde Configuracion.")
-            render_order_list(engine, start, end, number, state, refresh, access)
+                    st.warning(
+                        "La comprobacion de acceso fallo. "
+                        "Repitala desde Configuracion."
+                    )
+            render_order_list(
+                engine, start, end, number, state, refresh, access
+            )
             if st.session_state.get("kering_run"):
                 render_progress(st.session_state["kering_run"])
         else:
-            st.info("Los pedidos y controles tecnicos apareceran despues de una consulta explicita.")
+            st.info(
+                "Los pedidos y controles tecnicos apareceran despues de una consulta explicita."
+            )
         if st.checkbox("Mostrar historial tecnico", key="kering_show_history"):
             render_history(engine, config, store)
 
@@ -325,8 +382,12 @@ def page_transition(state, route):
         state["image_page_route"] = route
         for key in list(state):
             if key.endswith(("-access", "-records")) or key in {
-                    "image_gallery_access", "luxoptica_selected_image", "luxoptica_selected_bytes",
-                    "image_gallery_zip", "image_gallery_records"}:
+                "image_gallery_access",
+                "luxoptica_selected_image",
+                "luxoptica_selected_bytes",
+                "image_gallery_zip",
+                "image_gallery_records",
+            }:
                 state.pop(key, None)
         if route == "imagenes-kering":
             state.pop("kering_orders_loaded", None)
@@ -341,14 +402,39 @@ def load_order_listing(engine, store, config, start, end, number="", status="Tod
                 "Kering", str(order["name"]), order_eans(order))
     latest = latest_attempts(store)
     cache = {}
-    pairs = [(order, purchase_row(store, order, latest.get(order["id"]), cache)) for order in orders]
-    pairs = [(order, row) for order, row in pairs if number.casefold() in order["name"].casefold()
-             and (status == "Todos" or row["Procesamiento"] == status or
-                  status == "Pendiente" and row["Pendientes"] > 0 or
-                  status == "Error" and row["Procesamiento"] in {"Error", "Interrumpido"})]
-    return {"orders": [order for order, _ in pairs], "rows": [row for _, row in pairs],
-            "latest": latest, "filters": (config["supplier_id"], config["cutoff_date"], start, end, number, status),
-            "queried": datetime.now(MADRID).timestamp()}
+    pairs = [
+        (
+            order,
+            purchase_row(store, order, latest.get(order["id"]), cache),
+        )
+        for order in orders
+    ]
+    pairs = [
+        (order, row)
+        for order, row in pairs
+        if number.casefold() in order["name"].casefold()
+        and (
+            status == "Todos"
+            or row["Procesamiento"] == status
+            or status == "Pendiente" and row["Pendientes"] > 0
+            or status == "Error"
+            and row["Procesamiento"] in {"Error", "Interrumpido"}
+        )
+    ]
+    return {
+        "orders": [order for order, _ in pairs],
+        "rows": [row for _, row in pairs],
+        "latest": latest,
+        "filters": (
+            config["supplier_id"],
+            config["cutoff_date"],
+            start,
+            end,
+            number,
+            status,
+        ),
+        "queried": datetime.now(MADRID).timestamp(),
+    }
 
 
 def order_eans(order):
@@ -421,7 +507,10 @@ def render_order_list(engine, start, end, number="", status="Todos", refresh=Fal
     selected = [order for order in orders if order["id"] in selected_ids]
     allowed = set(config["test_order_ids"])
     busy = batch_busy(store)
-    permitted = bool(selected) and (not config["test_mode"] or len(selected) <= 2 and selected_ids <= allowed)
+    permitted = bool(selected) and (
+        not config["test_mode"]
+        or len(selected) <= 2 and selected_ids <= allowed
+    )
     confirmed = bool(access and access["ok"])
     blocked = ("Seleccione pedidos" if not selected else "Lote activo" if busy else
                "Modo de prueba: autorice uno o dos pedidos" if not permitted else
@@ -438,10 +527,22 @@ def render_order_list(engine, start, end, number="", status="Todos", refresh=Fal
     current_order = choices.get(current_id)
     if current_order is not None:
         detail_id = current_order["id"]
-        if st.button("Procesar pendientes", disabled=busy or not confirmed or config["test_mode"]
-                     and detail_id not in allowed, icon=":material/download:"):
-            st.session_state["kering_run"] = submit_orders(engine, config, [current_order],
-                                                           loaded["filters"][2], loaded["filters"][3])
+        if st.button(
+            "Procesar pendientes",
+            disabled=(
+                busy
+                or not confirmed
+                or config["test_mode"] and detail_id not in allowed
+            ),
+            icon=":material/download:",
+        ):
+            st.session_state["kering_run"] = submit_orders(
+                engine,
+                config,
+                [current_order],
+                loaded["filters"][2],
+                loaded["filters"][3],
+            )
         render_current_order(store, current_order, latest.get(detail_id))
 
 
@@ -453,7 +554,10 @@ def order_list_error(error, stage):
             "No se han iniciado nuevas descargas. Codigo: ODOO_CONEXION."
         )
     messages = {
-        "configuracion": "No se pudo leer la configuracion cifrada de Kering. Codigo: KERING_CONFIG.",
+        "configuracion": (
+            "No se pudo leer la configuracion cifrada de Kering. "
+            "Codigo: KERING_CONFIG."
+        ),
         "almacenamiento": "No se pudo abrir el almacenamiento Kering. Codigo: KERING_ALMACENAMIENTO.",
         "odoo": "No se pudieron leer los pedidos de Odoo. Codigo: ODOO_CONSULTA.",
         "historial": "No se pudo leer el historial Kering. Codigo: KERING_HISTORIAL.",
@@ -664,9 +768,18 @@ def render_order_zip(store, order, key):
             st.success("ZIP preparado con fotos actuales y manifiesto.")
         except (OSError, ValueError) as error:
             st.error(f"No se pudo preparar el ZIP: {error}")
-    if cached and cached["order_id"] == order["id"] and (not cached["partial"] or partial_allowed):
-        st.download_button(f"Descargar {cached['count']} fotos · ZIP", cached["bytes"],
-                           file_name=cached["name"], mime="application/zip", key=f"download-{key}")
+    if (
+        cached
+        and cached["order_id"] == order["id"]
+        and (not cached["partial"] or partial_allowed)
+    ):
+        st.download_button(
+            f"Descargar {cached['count']} fotos · ZIP",
+            cached["bytes"],
+            file_name=cached["name"],
+            mime="application/zip",
+            key=f"download-{key}",
+        )
 
 
 def cached_export_plan(repository, order):
@@ -697,8 +810,16 @@ def visible_previews(repository, records, access):
         with ThumbnailCache(repository).batch(records) as cache:
             for record in records:
                 try:
-                    previews[record.id] = thumbnail(repository, record, access[record.id], cache)
-                except (OSError, ValueError, RuntimeError, SyntaxError, Image.DecompressionBombError) as error:
+                    previews[record.id] = thumbnail(
+                        repository, record, access[record.id], cache
+                    )
+                except (
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                    SyntaxError,
+                    Image.DecompressionBombError,
+                ) as error:
                     previews[record.id] = str(error)
     except (OSError, ValueError, RuntimeError) as error:
         previews = {record.id: str(error) for record in records}
@@ -711,10 +832,16 @@ def visible_access(repository, records, key, *, refresh=False, selection=()):
     except (OSError, ValueError, RuntimeError) as error:
         st.error(f"Repositorio no disponible: {error}")
         return {record.id: None for record in records}
-    signature = (tuple((r.id, r.checksum, str(r.path), r.date) for r in records), selection)
+    signature = (
+        tuple((r.id, r.checksum, str(r.path), r.date) for r in records),
+        selection,
+    )
     previous = st.session_state.get(key)
     if refresh or previous is None or previous["signature"] != signature:
-        previous = {"signature": signature, "access": validate_visible(repository, records)}
+        previous = {
+            "signature": signature,
+            "access": validate_visible(repository, records),
+        }
         st.session_state[key] = previous
     return previous["access"]
 
@@ -731,58 +858,126 @@ def render_gallery(repository, ean, prefix="product"):
     except (OSError, ValueError, RuntimeError) as error:
         st.error(f"Repositorio no disponible: {error}")
         return
-    origins = st.multiselect("Origen", sorted({r.provider for r in records}), key=f"{prefix}-{ean}-origins")
-    views = st.multiselect("Vista", sorted({r.view for r in records}), key=f"{prefix}-{ean}-views")
-    markets = st.multiselect("Mercado", sorted({r.market or "Original" for r in records}),
-                             key=f"{prefix}-{ean}-markets")
-    filtered = [r for r in records if (not origins or r.provider in origins)
-                and (not views or r.view in views) and (not markets or (r.market or "Original") in markets)]
+    origins = st.multiselect(
+        "Origen",
+        sorted({r.provider for r in records}),
+        key=f"{prefix}-{ean}-origins",
+    )
+    views = st.multiselect(
+        "Vista",
+        sorted({r.view for r in records}),
+        key=f"{prefix}-{ean}-views",
+    )
+    markets = st.multiselect(
+        "Mercado",
+        sorted({r.market or "Original" for r in records}),
+        key=f"{prefix}-{ean}-markets",
+    )
+    filtered = [
+        record
+        for record in records
+        if (not origins or record.provider in origins)
+        and (not views or record.view in views)
+        and (not markets or (record.market or "Original") in markets)
+    ]
     covered = {r.view for r in records if r.pixels}
     missing = [view for view in VIEWS if view not in covered]
-    st.caption(f"{len(filtered)} fotos | Vistas sin registrar: {', '.join(missing) or 'ninguna'}")
+    st.caption(
+        f"{len(filtered)} fotos | Vistas sin registrar: "
+        f"{', '.join(missing) or 'ninguna'}"
+    )
     if not filtered:
         st.info("Sin fotos para estos filtros.")
         return
     pages = (len(filtered) - 1) // 12 + 1
-    page = st.number_input("Pagina de fotos", min_value=1, max_value=pages, value=1,
-                           key=f"{prefix}-{ean}-page-{pages}")
+    page = st.number_input(
+        "Pagina de fotos",
+        min_value=1,
+        max_value=pages,
+        value=1,
+        key=f"{prefix}-{ean}-page-{pages}",
+    )
     columns = st.columns(3)
     visible = filtered[(page - 1) * 12:page * 12]
-    access = visible_access(repository, visible, f"{prefix}-{ean}-access", refresh=refresh,
-                            selection=(tuple(origins), tuple(views), tuple(markets), page))
+    access = visible_access(
+        repository,
+        visible,
+        f"{prefix}-{ean}-access",
+        refresh=refresh,
+        selection=(tuple(origins), tuple(views), tuple(markets), page),
+    )
     previews = visible_previews(repository, visible, access)
     for index, record in enumerate(visible):
         with columns[index % 3]:
             preview = previews[record.id]
             if isinstance(preview, bytes):
-                st.image(preview,
-                         caption=f"{record.name} · {record.provider} · {record.view} · {record.market or 'Original'}",
-                         width="stretch")
+                st.image(
+                    preview,
+                    caption=(
+                        f"{record.name} · {record.provider} · {record.view} · "
+                        f"{record.market or 'Original'}"
+                    ),
+                    width="stretch",
+                )
             else:
                 st.warning(f"No se puede mostrar {record.name}: {preview}")
-    selected = st.selectbox("Ampliar foto", filtered, format_func=lambda r: f"{r.name} · {r.provider} · {r.market}",
-                            key=f"{prefix}-{ean}-enlarge")
+    selected = st.selectbox(
+        "Ampliar foto",
+        filtered,
+        format_func=lambda r: (
+            f"{r.name} · {r.provider} · {r.market}"
+        ),
+        key=f"{prefix}-{ean}-enlarge",
+    )
     if st.button("Ampliar", key=f"{prefix}-{ean}-show"):
         try:
-            st.image(original_for_display(repository, selected), caption=selected.name, width="stretch")
-            st.caption(f"Origen: {selected.origin} | Vista: {selected.view} | Mercado: {selected.market or 'Original'}")
+            st.image(
+                original_for_display(repository, selected),
+                caption=selected.name,
+                width="stretch",
+            )
+            st.caption(
+                f"Origen: {selected.origin} | Vista: {selected.view} | "
+                f"Mercado: {selected.market or 'Original'}"
+            )
         except (OSError, ValueError):
             st.error("No se puede abrir esta imagen.")
-    if selected.provider == "Kering" and st.session_state.get("auth_role") == "admin":
+    if (
+        selected.provider == "Kering"
+        and st.session_state.get("auth_role") == "admin"
+    ):
         with st.expander("Revisar clasificacion de la vista (sin renombrar)"):
             st.json(selected.metadata.get("view_detection", {}))
             if selected.metadata.get("view_review"):
                 st.json(selected.metadata["view_review"])
-            review = st.selectbox("Vista comprobada", ["unknown", *LIBRARY_VIEW_ORDER, "detalle"],
-                                  key=f"{prefix}-{ean}-review-view")
-            reason = st.text_input("Motivo y evidencia de la revision", key=f"{prefix}-{ean}-review-reason")
-            if st.button("Confirmar revision", disabled=not reason.strip(), key=f"{prefix}-{ean}-review-save"):
+            review = st.selectbox(
+                "Vista comprobada",
+                ["unknown", *LIBRARY_VIEW_ORDER, "detalle"],
+                key=f"{prefix}-{ean}-review-view",
+            )
+            reason = st.text_input(
+                "Motivo y evidencia de la revision",
+                key=f"{prefix}-{ean}-review-reason",
+            )
+            if st.button(
+                "Confirmar revision",
+                disabled=not reason.strip(),
+                key=f"{prefix}-{ean}-review-save",
+            ):
                 try:
                     repository.review_view_for_user(
-                        selected.id, review, role=st.session_state.get("auth_role"),
-                        reviewer=st.session_state.get("auth_user", ""), reason=reason)
+                        selected.id,
+                        review,
+                        role=st.session_state.get("auth_role"),
+                        reviewer=st.session_state.get("auth_user", ""),
+                        reason=reason,
+                    )
                     st.session_state.pop(records_key, None)
-                    st.success("Clasificacion revisada; archivo y nombre conservados. Historial registrado.")
+                    st.success(
+                        "Clasificacion revisada; "
+                        "archivo y nombre conservados. "
+                        "Historial registrado."
+                    )
                     st.rerun()
                 except (OSError, ValueError, PermissionError):
                     st.error("No se pudo guardar la revision de la vista.")
@@ -791,9 +986,14 @@ def render_gallery(repository, ean, prefix="product"):
 def render_image_search(store):
     library_only()
     with st.form("kering_library_search"):
-        entered_query = st.text_input("Buscar por EAN, modelo o pedido", key="kering_image_query")
+        entered_query = st.text_input(
+            "Buscar por EAN, modelo o pedido", key="kering_image_query"
+        )
         submitted = st.form_submit_button(
-            "Buscar fotografías", icon=":material/search:", key="kering_library_search_button")
+            "Buscar fotografías",
+            icon=":material/search:",
+            key="kering_library_search_button",
+        )
     if submitted:
         requested_query = entered_query.strip()
         if requested_query:
@@ -801,7 +1001,10 @@ def render_image_search(store):
                 store.index_local_order_search(
                     requested_query, role=st.session_state.get("auth_role"))
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
-                st.error(f"No se pudo consultar el historial local de pedidos: {error}")
+                st.error(
+                    "No se pudo consultar el historial local de pedidos: "
+                    f"{error}"
+                )
                 return
         st.session_state["kering_library_requested_query"] = requested_query
         st.session_state["kering_library_page"] = 0
@@ -812,10 +1015,14 @@ def render_image_search(store):
         return
     page = st.session_state.get("kering_library_page", 0)
     try:
-        page_results = store.repository.search_eans(query, limit=13, offset=page * 12)
+        page_results = store.repository.search_eans(
+            query, limit=13, offset=page * 12
+        )
         has_next = len(page_results) > 12
         eans = page_results[:12]
-        records_by_ean = {ean: store.repository.catalog_records(ean) for ean in eans}
+        records_by_ean = {
+            ean: store.repository.catalog_records(ean) for ean in eans
+        }
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
         st.error(f"No se pudo consultar la biblioteca local: {error}")
         return
@@ -824,20 +1031,43 @@ def render_image_search(store):
         return
     cards = []
     for ean, records in records_by_ean.items():
-        preferred = next((record for view in LIBRARY_VIEW_ORDER for record in records
-                          if record.view == view and record.pixels), None)
+        preferred = next(
+            (
+                record
+                for view in LIBRARY_VIEW_ORDER
+                for record in records
+                if record.view == view and record.pixels
+            ),
+            None,
+        )
         if preferred is None:
-            preferred = next((record for record in records if record.pixels), None)
-        model = next((str(record.metadata.get("modelo") or record.metadata.get("product_name") or "").strip()
-                      for record in records
-                      if record.metadata.get("modelo") or record.metadata.get("product_name")), "")
+            preferred = next(
+                (record for record in records if record.pixels), None
+            )
+        model = next(
+            (
+                str(
+                    record.metadata.get("modelo")
+                    or record.metadata.get("product_name")
+                    or ""
+                ).strip()
+                for record in records
+                if record.metadata.get("modelo")
+                or record.metadata.get("product_name")
+            ),
+            "",
+        )
         cards.append((ean, records, preferred, model))
     thumb_records = [item[2] for item in cards if item[2] is not None]
     previews = {}
     if thumb_records:
-        access = visible_access(store.repository, thumb_records, "kering-library-results-access")
+        access = visible_access(
+            store.repository, thumb_records, "kering-library-results-access"
+        )
         previews = visible_previews(store.repository, thumb_records, access)
-    st.caption(f"Resultados {page * 12 + 1}-{page * 12 + len(eans)} · 12 por página")
+    st.caption(
+        f"Resultados {page * 12 + 1}-{page * 12 + len(eans)} · 12 por página"
+    )
     columns = st.columns(3)
     for index, (ean, records, preferred, model) in enumerate(cards):
         with columns[index % 3]:
@@ -859,12 +1089,20 @@ def render_image_search(store):
             show_product_status(status, label)
     previous, next_page = st.columns(2)
     with previous:
-        if st.button("Resultados anteriores", disabled=page == 0, key="kering_library_previous"):
+        if st.button(
+            "Resultados anteriores",
+            disabled=page == 0,
+            key="kering_library_previous",
+        ):
             st.session_state["kering_library_page"] = page - 1
             st.session_state.pop("kering_library_selected", None)
             st.rerun()
     with next_page:
-        if st.button("Resultados siguientes", disabled=not has_next, key="kering_library_next"):
+        if st.button(
+            "Resultados siguientes",
+            disabled=not has_next,
+            key="kering_library_next",
+        ):
             st.session_state["kering_library_page"] = page + 1
             st.session_state.pop("kering_library_selected", None)
             st.rerun()
@@ -872,7 +1110,11 @@ def render_image_search(store):
         "Consultar producto",
         eans,
         format_func=lambda value: next(
-            (f"{model} · {value}" for card_ean, _, _, model in cards if card_ean == value),
+            (
+                f"{model} · {value}"
+                for card_ean, _, _, model in cards
+                if card_ean == value
+            ),
             value,
         ),
         key="kering_library_selected",
@@ -882,16 +1124,25 @@ def render_image_search(store):
 
 def product_library_status(store, ean, records):
     if not records:
-        if store.latest_product_attempt_status(ean) in {"Error", "Interrumpido"}:
+        if store.latest_product_attempt_status(ean) in {
+            "Error",
+            "Interrumpido",
+        }:
             return "error", "Error"
         return "pendiente", "Pendiente"
-    if store.blocking_view_review(ean) or any(record.provider == "Kering" and record.view == "unknown"
-                                               for record in records):
+    if store.blocking_view_review(ean) or any(
+        record.provider == "Kering" and record.view == "unknown"
+        for record in records
+    ):
         return "revision", "Pendiente de revisión"
     covered = set()
     seen_pixels = set()
     for record in records:
-        if record.view in VIEWS and record.pixels and record.pixels not in seen_pixels:
+        if (
+            record.view in VIEWS
+            and record.pixels
+            and record.pixels not in seen_pixels
+        ):
             covered.add(record.view)
             seen_pixels.add(record.pixels)
     if set(VIEWS) <= covered:
@@ -923,29 +1174,69 @@ def render_product_library(store, ean):
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
         st.error(f"No se pudo consultar el producto: {error}")
         return
-    model = next((str(record.metadata.get("modelo") or record.metadata.get("product_name") or "").strip()
-                  for record in records
-                  if record.metadata.get("modelo") or record.metadata.get("product_name")), "")
+    model = next(
+        (
+            str(
+                record.metadata.get("modelo")
+                or record.metadata.get("product_name")
+                or ""
+            ).strip()
+            for record in records
+            if record.metadata.get("modelo")
+            or record.metadata.get("product_name")
+        ),
+        "",
+    )
     st.subheader(model or "Producto")
-    st.caption(f"EAN {ean} · Última actualización: {format_image_update(records)}")
+    st.caption(
+        f"EAN {ean} · Última actualización: {format_image_update(records)}"
+    )
     show_product_status(status, label)
     if review_blocking:
-        st.info("La clasificacion de algunas fotografias requiere revision antes de confirmar las vistas.")
+        st.info(
+            "La clasificacion de algunas fotografias requiere revision "
+            "antes de confirmar las vistas."
+        )
 
     selected = {}
     used_pixels = set()
     for view in LIBRARY_VIEW_ORDER:
-        selected[view] = next((record for record in records
-                               if record.view == view and record.pixels and record.pixels not in used_pixels), None)
+        selected[view] = next(
+            (
+                record
+                for record in records
+                if record.view == view
+                and record.pixels
+                and record.pixels not in used_pixels
+            ),
+            None,
+        )
         if selected[view]:
             used_pixels.add(selected[view].pixels)
-    primary_records = [record for record in selected.values() if record is not None]
-    primary_access = visible_access(
-        store.repository, primary_records, f"kering-library-{ean}-primary-access",
-        selection=tuple((view, record.id if record else None) for view, record in selected.items()),
-    ) if primary_records else {}
-    primary_previews = visible_previews(store.repository, primary_records, primary_access)
-    labels = {"frontal": "Frontal", "perspectiva": "Perspectiva", "lateral": "Lateral"}
+    primary_records = [
+        record for record in selected.values() if record is not None
+    ]
+    primary_access = (
+        visible_access(
+            store.repository,
+            primary_records,
+            f"kering-library-{ean}-primary-access",
+            selection=tuple(
+                (view, record.id if record else None)
+                for view, record in selected.items()
+            ),
+        )
+        if primary_records
+        else {}
+    )
+    primary_previews = visible_previews(
+        store.repository, primary_records, primary_access
+    )
+    labels = {
+        "frontal": "Frontal",
+        "perspectiva": "Perspectiva",
+        "lateral": "Lateral",
+    }
     st.markdown("#### Vistas principales")
     columns = st.columns(3)
     failed_preview = False
@@ -964,8 +1255,12 @@ def render_product_library(store, ean):
                 st.error("No se pudo validar esta fotografía.")
     if failed_preview:
         show_product_status("error", "Error al validar una o mas fotografias")
-    missing = [labels[view] for view in LIBRARY_VIEW_ORDER if selected[view] is None]
-    st.caption("Vistas que faltan: " + (", ".join(missing) if missing else "ninguna"))
+    missing = [
+        labels[view] for view in LIBRARY_VIEW_ORDER if selected[view] is None
+    ]
+    st.caption(
+        "Vistas que faltan: " + (", ".join(missing) if missing else "ninguna")
+    )
 
     primary_ids = {record.id for record in primary_records}
     additional = [record for record in records if record.id not in primary_ids]
@@ -977,11 +1272,18 @@ def render_product_library(store, ean):
         page_key = f"kering-library-{ean}-additional-page"
         if st.session_state.get(page_key, 1) > pages:
             st.session_state[page_key] = pages
-        page = st.number_input("Pagina de fotografias adicionales", min_value=1, max_value=pages,
-                               value=st.session_state.get(page_key, 1), key=page_key)
+        page = st.number_input(
+            "Pagina de fotografias adicionales",
+            min_value=1,
+            max_value=pages,
+            value=st.session_state.get(page_key, 1),
+            key=page_key,
+        )
         visible = additional[(page - 1) * 12:page * 12]
         access = visible_access(
-            store.repository, visible, f"kering-library-{ean}-additional-access",
+            store.repository,
+            visible,
+            f"kering-library-{ean}-additional-access",
             selection=(page, tuple(record.id for record in visible)),
         )
         previews = visible_previews(store.repository, visible, access)
@@ -990,22 +1292,30 @@ def render_product_library(store, ean):
             with columns[index % 3]:
                 preview = previews.get(record.id)
                 if isinstance(preview, bytes):
-                    st.image(preview, caption=f"{record.view} · {record.name}", width="stretch")
+                    st.image(
+                        preview,
+                        caption=f"{record.view} · {record.name}",
+                        width="stretch",
+                    )
                 else:
                     st.error(f"No se pudo validar {record.name}.")
 
     if st.session_state.get("auth_role") == "admin":
-        candidates = [record for record in records if record.provider == "Kering"]
+        candidates = [
+            record for record in records if record.provider == "Kering"
+        ]
         if candidates:
             with st.expander("Administracion: revisar clasificacion"):
                 selected_record = st.selectbox(
-                    "Fotografia para revisar", candidates,
+                    "Fotografia para revisar",
+                    candidates,
                     format_func=lambda record: f"{record.name} · {record.view}",
                     key=f"kering-library-{ean}-review-record",
                 )
                 st.json(selected_record.metadata.get("view_detection", {}))
                 reviewed_view = st.selectbox(
-                    "Vista comprobada", ["unknown", *LIBRARY_VIEW_ORDER, "detalle"],
+                    "Vista comprobada",
+                    ["unknown", *LIBRARY_VIEW_ORDER, "detalle"],
                     key=f"kering-library-{ean}-review-view",
                 )
                 reason = st.text_input(
@@ -1018,22 +1328,32 @@ def render_product_library(store, ean):
                 ):
                     try:
                         store.repository.review_view_for_user(
-                            selected_record.id, reviewed_view, role=st.session_state.get("auth_role"),
-                            reviewer=st.session_state.get("auth_user", ""), reason=reason,
+                            selected_record.id,
+                            reviewed_view,
+                            role=st.session_state.get("auth_role"),
+                            reviewer=st.session_state.get("auth_user", ""),
+                            reason=reason,
                         )
-                        st.success("Revision guardada; el original se conserva sin renombrar.")
+                        st.success(
+                            "Revision guardada; el original se conserva sin renombrar."
+                        )
                         st.rerun()
                     except (OSError, ValueError, PermissionError):
                         st.error("No se pudo guardar la revision.")
 
-    signature = tuple((record.id, record.checksum, record.date) for record in records)
+    signature = tuple(
+        (record.id, record.checksum, record.date) for record in records
+    )
     download_key = f"kering-library-{ean}-download"
     cached = st.session_state.get(download_key)
     if cached and cached["signature"] != signature:
         st.session_state.pop(download_key, None)
         cached = None
-    if st.button("Preparar descarga de fotografias disponibles", disabled=not records,
-                 key=f"kering-library-{ean}-prepare-download"):
+    if st.button(
+        "Preparar descarga de fotografias disponibles",
+        disabled=not records,
+        key=f"kering-library-{ean}-prepare-download",
+    ):
         try:
             archive = store.repository.zip_eans_for_user(
                 [ean], role=st.session_state.get("auth_role"))
@@ -1043,9 +1363,14 @@ def render_product_library(store, ean):
                 cached = {"signature": signature, "data": archive}
                 st.session_state[download_key] = cached
         except (OSError, ValueError, RuntimeError, PermissionError):
-            st.error("No se pudo preparar la descarga. Compruebe el acceso y la integridad de las fotos.")
+            st.error(
+                "No se pudo preparar la descarga. Compruebe el acceso y la integridad de las fotos."
+            )
     if cached:
         st.download_button(
-            "Descargar fotografias", data=cached["data"], file_name=f"Kering-{ean}-fotos.zip",
-            mime="application/zip", key=f"kering-library-{ean}-download-button",
+            "Descargar fotografias",
+            data=cached["data"],
+            file_name=f"Kering-{ean}-fotos.zip",
+            mime="application/zip",
+            key=f"kering-library-{ean}-download-button",
         )

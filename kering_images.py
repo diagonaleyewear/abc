@@ -226,7 +226,12 @@ class ImageStore:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA synchronous=FULL")
             connection.create_function(
-                "casefold", 1, lambda value: value.casefold() if isinstance(value, str) else "")
+                "casefold",
+                1,
+                lambda value: (
+                    value.casefold() if isinstance(value, str) else ""
+                ),
+            )
             with connection:
                 yield connection
         finally:
@@ -339,8 +344,11 @@ class ImageStore:
             self.repository.associate_order("Kering", str(order["id"]),
                                             [line["ean"] for line in order["lines"] if line["ean"]])
             if order.get("name"):
-                self.repository.associate_order("Kering", str(order["name"]),
-                                                [line["ean"] for line in order["lines"] if line["ean"]])
+                self.repository.associate_order(
+                    "Kering",
+                    str(order["name"]),
+                    [line["ean"] for line in order["lines"] if line["ean"]],
+                )
             previous = connection.execute("SELECT COALESCE(MAX(attempt),0) FROM attempts WHERE order_id=?",
                                           (order["id"],)).fetchone()[0]
             connection.execute("""INSERT INTO attempts
@@ -359,27 +367,44 @@ class ImageStore:
 
     def executions(self):
         with self.connect() as connection:
-            return [dict(row) for row in connection.execute("SELECT * FROM runs ORDER BY started DESC")]
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM runs ORDER BY started DESC"
+                )
+            ]
 
     def history(self) -> list[dict]:
         self.recover()
         with self.connect() as connection:
             return [dict(row) for row in connection.execute("""
-                SELECT attempts.*, runs.user, runs.started, runs.ended, runs.start_date, runs.end_date, runs.origin
-                FROM attempts JOIN runs ON runs.id=attempts.run_id ORDER BY started DESC, order_id
+                SELECT attempts.*, runs.user, runs.started, runs.ended,
+                       runs.start_date, runs.end_date, runs.origin
+                FROM attempts JOIN runs ON runs.id=attempts.run_id
+                ORDER BY started DESC, order_id
             """)]
 
-    def index_local_order_search(self, query: str, *, role: str | None) -> None:
+    def index_local_order_search(
+        self, query: str, *, role: str | None
+    ) -> None:
         if role not in {"admin", "masterdata"}:
-            raise PermissionError("La busqueda de pedidos requiere acceso a la biblioteca")
+            raise PermissionError(
+                "La busqueda de pedidos requiere acceso a la biblioteca"
+            )
         query = query.strip()
         if not query or len(query) > 120:
             raise ValueError("Consulta de pedido invalida")
-        escaped = query.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        escaped = (
+            query.casefold()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
         pattern = f"%{escaped}%"
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT number, snapshot FROM attempts WHERE casefold(number) LIKE ? ESCAPE '\\'",
+                """SELECT number, snapshot FROM attempts
+                   WHERE casefold(number) LIKE ? ESCAPE '\\'""",
                 (pattern,),
             ).fetchall()
         matches = {}
@@ -389,15 +414,24 @@ class ImageStore:
             try:
                 order = json.loads(row["snapshot"])
             except json.JSONDecodeError as error:
-                raise ValueError("Snapshot de pedido local invalido") from error
-            if not isinstance(order, dict) or not isinstance(order.get("lines"), list):
+                raise ValueError(
+                    "Snapshot de pedido local invalido"
+                ) from error
+            if not isinstance(order, dict) or not isinstance(
+                order.get("lines"), list
+            ):
                 raise ValueError("Snapshot de pedido local invalido")
             eans = set()
             for line in order["lines"]:
                 if not isinstance(line, dict):
                     raise ValueError("Linea de pedido local invalida")
                 ean = line.get("ean")
-                if isinstance(ean, str) and ean.isascii() and ean.isdigit() and len(ean) <= 20:
+                if (
+                    isinstance(ean, str)
+                    and ean.isascii()
+                    and ean.isdigit()
+                    and len(ean) <= 20
+                ):
                     eans.add(ean)
             if eans:
                 matches.setdefault(str(row["number"]), set()).update(eans)
@@ -406,15 +440,30 @@ class ImageStore:
 
     def latest_product_attempt_status(self, ean: str) -> str | None:
         with self.repository.connect() as connection:
-            order_ids = sorted({str(row["order_id"]) for row in connection.execute(
-                "SELECT order_id FROM order_eans WHERE source='Kering' AND ean=?", (ean,))})
+            order_ids = sorted(
+                {
+                    str(row["order_id"])
+                    for row in connection.execute(
+                        "SELECT order_id FROM order_eans WHERE source='Kering' AND ean=?",
+                        (ean,),
+                    )
+                }
+            )
         if not order_ids:
             return None
         latest = None
         for offset in range(0, len(order_ids), 400):
             order_batch = order_ids[offset:offset + 400]
-            numeric_ids = [value for value in order_batch if value.isascii() and value.isdigit()]
-            clauses = ["attempts.number IN (" + ",".join("?" for _ in order_batch) + ")"]
+            numeric_ids = [
+                value
+                for value in order_batch
+                if value.isascii() and value.isdigit()
+            ]
+            clauses = [
+                "attempts.number IN ("
+                + ",".join("?" for _ in order_batch)
+                + ")"
+            ]
             parameters = list(order_batch)
             if numeric_ids:
                 clauses.append("CAST(attempts.order_id AS TEXT) IN ("
@@ -424,10 +473,13 @@ class ImageStore:
                 row = connection.execute(
                     "SELECT attempts.status, runs.started, attempts.attempt "
                     "FROM attempts JOIN runs ON runs.id=attempts.run_id WHERE "
-                    + " OR ".join(clauses) + " ORDER BY runs.started DESC, attempts.attempt DESC LIMIT 1",
+                    + " OR ".join(clauses)
+                    + " ORDER BY runs.started DESC, attempts.attempt DESC LIMIT 1",
                     parameters,
                 ).fetchone()
-            if row and (latest is None or (row["started"], row["attempt"]) > latest[:2]):
+            if row and (
+                latest is None or (row["started"], row["attempt"]) > latest[:2]
+            ):
                 latest = (row["started"], row["attempt"], row["status"])
         return latest[2] if latest else None
 
@@ -697,18 +749,31 @@ def execute_batch(store, run_id, loader, portal):
             execute_order(store, attempt, loader, portal, cache)
         except AccessNotConfirmed as error:
             with store.connect() as connection:
-                connection.execute("UPDATE attempts SET status='Error', error=? WHERE run_id=? AND order_id=?",
-                                   (error.code, run_id, attempt["order_id"]))
-                connection.execute("UPDATE runs SET ended=?, heartbeat=?, status='Interrumpido' WHERE id=?",
-                                   (clock.time(), clock.time(), run_id))
+                connection.execute(
+                    """UPDATE attempts SET status='Error', error=?
+                       WHERE run_id=? AND order_id=?""",
+                    (error.code, run_id, attempt["order_id"]),
+                )
+                connection.execute(
+                    """UPDATE runs SET ended=?, heartbeat=?, status='Interrumpido'
+                       WHERE id=?""",
+                    (clock.time(), clock.time(), run_id),
+                )
             return
         except Exception:
             with store.connect() as connection:
-                connection.execute("UPDATE attempts SET status='Error', error='fallo_lectura_o_proceso' WHERE run_id=? AND order_id=?",
-                                   (run_id, attempt["order_id"]))
+                connection.execute(
+                    """UPDATE attempts SET status='Error',
+                       error='fallo_lectura_o_proceso'
+                       WHERE run_id=? AND order_id=?""",
+                    (run_id, attempt["order_id"]),
+                )
     with store.connect() as connection:
-        connection.execute("UPDATE runs SET ended=?, heartbeat=?, status='Finalizado' WHERE id=?",
-                           (clock.time(), clock.time(), run_id))
+        connection.execute(
+            """UPDATE runs SET ended=?, heartbeat=?, status='Finalizado'
+               WHERE id=?""",
+            (clock.time(), clock.time(), run_id),
+        )
 
 
 class BatchService:
@@ -744,11 +809,25 @@ class BatchService:
             raise
         return run_id
 
-    def submit_for_user(self, orders, user, role, supplier, start, end, loader, portal=None,
-                        origin="Manual") -> str:
+    def submit_for_user(
+        self,
+        orders,
+        user,
+        role,
+        supplier,
+        start,
+        end,
+        loader,
+        portal=None,
+        origin="Manual",
+    ) -> str:
         if role != "admin" or not isinstance(user, str) or not user.strip():
-            raise PermissionError("El procesamiento Kering requiere un usuario administrador")
-        return self.submit(orders, user, supplier, start, end, loader, portal, origin)
+            raise PermissionError(
+                "El procesamiento Kering requiere un usuario administrador"
+            )
+        return self.submit(
+            orders, user, supplier, start, end, loader, portal, origin
+        )
 
 
 def data_root() -> Path:
@@ -760,7 +839,9 @@ def utc_interval(start: date, end: date) -> tuple[datetime, datetime]:
         raise ValueError("Intervalo de fechas invalido")
     madrid = ZoneInfo("Europe/Madrid")
     return tuple(
-        datetime.combine(day, time.min, madrid).astimezone(timezone.utc).replace(tzinfo=None)
+        datetime.combine(day, time.min, madrid)
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
         for day in (start, end + timedelta(days=1))
     )
 
@@ -815,9 +896,14 @@ class ConfigStore:
         if not config["test_mode"] and not config["full_lot_validated"]:
             raise ValueError("El lote completo requiere validar previamente descarga e historial")
         config["test_order_ids"] = ids
-        atomic_write(self.root / "config.enc", self.cipher().encrypt(json.dumps(config).encode()))
+        atomic_write(
+            self.root / "config.enc",
+            self.cipher().encrypt(json.dumps(config).encode()),
+        )
 
     def save_for_user(self, config: dict, *, role: str | None) -> None:
         if role != "admin":
-            raise PermissionError("La configuracion Kering requiere un usuario administrador")
+            raise PermissionError(
+                "La configuracion Kering requiere un usuario administrador"
+            )
         self.save(config)
