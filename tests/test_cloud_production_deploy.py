@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,8 @@ SPEC.loader.exec_module(DEPLOY)
 def policy():
     result = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
     result["controller_commit"] = "a" * 40
+    result["commit"] = "c" * 40
+    result["release_status"] = "approved"
     return result
 
 
@@ -67,12 +70,35 @@ def test_root_paths_reject_nonroot_owner_writable_files_and_symlinks(monkeypatch
     ("runner_name", "s2026"),
     ("build_run_id", True),
     ("source_sha256", {"unexpected.py": "a" * 64}),
-    ("workbook_sha256", ""),
+    ("release_status", "baseline-only"),
 ])
 def test_policy_rejects_untrusted_inputs(policy, key, value):
     policy[key] = value
     with pytest.raises(DEPLOY.DeployError):
         DEPLOY.validate_policy(policy)
+
+
+def test_checked_in_policy_is_production_baseline_not_a_redeployable_release():
+    baseline = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
+    assert baseline["previous_commit"] == "99a9f60eb6fbe11cc231b5626556e5db9b5166e9"
+    assert baseline["commit"] == baseline["previous_commit"]
+    assert baseline["release_status"] == "baseline-only"
+    with pytest.raises(DEPLOY.DeployError, match="already the current production commit"):
+        DEPLOY.validate_policy({**baseline, "controller_commit": "a" * 40})
+
+
+def test_workflow_preflight_blocks_baseline_before_github_api(monkeypatch):
+    workflow = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text()
+    start = workflow.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
+    end = workflow.index("\n          PY", start)
+    script = textwrap.dedent(workflow[start:end])
+    compile(script, "deploy-cloud-production-preflight", "exec")
+    monkeypatch.chdir(ROOT)
+    calls = []
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(SystemExit, match="No new release is approved"):
+        exec(script, {})
+    assert calls == []
 
 
 def api_responses(policy):
@@ -96,6 +122,7 @@ def api_responses(policy):
             "conclusion": "success", "event": "push", "head_branch": "main",
             "head_sha": policy["commit"], "path": ".github/workflows/deploy.yml",
         },
+        f"compare/{policy['previous_commit']}...{policy['commit']}": {"status": "ahead"},
     }
 
 
@@ -112,6 +139,7 @@ def test_gate_verifies_workflow_approval_runner_and_publication(monkeypatch, pol
     ("actions/runs/123/attempts/1", "run_attempt", 2),
     ("actions/runs/123/attempts/1/jobs?per_page=100", "jobs", []),
     ("environments/production", "protection_rules", []),
+    ("compare/99a9f60eb6fbe11cc231b5626556e5db9b5166e9..." + "c" * 40, "status", "behind"),
 ])
 def test_gate_rejects_wrong_context(monkeypatch, policy, resource, key, value):
     responses = api_responses(policy)
@@ -196,6 +224,40 @@ def test_command_failures_never_expose_compose_secrets(monkeypatch):
         DEPLOY.run(["/usr/bin/docker"])
     assert "private" not in str(error.value)
     assert DEPLOY.run(["/usr/bin/docker"], check=False, combined=True) == b"SECRET=privatepassword=private"
+
+
+@pytest.mark.parametrize("production", [False, True])
+def test_regression_uses_no_workbook_or_container_input(monkeypatch, policy, production):
+    commands = []
+    monkeypatch.setattr(DEPLOY, "VALIDATOR", Path("validator"))
+    monkeypatch.setattr(DEPLOY, "secure_path", lambda path: None)
+    monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: "synthetic validator")
+
+    def run(arguments, **kwargs):
+        commands.append((arguments, kwargs))
+        if arguments[1] == "create":
+            return b"a" * 64
+        if arguments[1] in {"start", "exec"}:
+            return json.dumps({
+                "rows": 3, "MONTURAS": 2, "GAFAS DE SOL": 1,
+                "ean_8056266003066": "MONTURAS",
+                "ean_sequence_preserved": True, "preview_xlsx_csv_match": True,
+            }).encode()
+        return b""
+
+    monkeypatch.setattr(DEPLOY, "run", run)
+    assert DEPLOY.regression(policy, production=production)["rows"] == 3
+    assert not any("data" in options for _, options in commands)
+    command = commands[0][0]
+    if production:
+        assert command[:3] == [DEPLOY.DOCKER, "exec", "--user"]
+        assert "abcd-control" in command
+    else:
+        assert command[:3] == [DEPLOY.DOCKER, "create", "--network"]
+        assert "none" in command and "--read-only" in command
+        assert "--cap-drop" in command and "--security-opt" in command
+        assert commands[1][0][:3] == [DEPLOY.DOCKER, "start", "-a"]
+        assert commands[-1][0][:3] == [DEPLOY.DOCKER, "rm", "--force"]
 
 
 @pytest.fixture
@@ -296,6 +358,14 @@ def test_candidate_failure_never_changes_live_config(monkeypatch, transaction, p
     assert transaction.changes == []
 
 
+def test_duplicate_deployment_attempt_is_rejected_before_mutation(transaction, policy, tmp_path):
+    (tmp_path / "run-123-1").mkdir()
+    with pytest.raises(FileExistsError):
+        DEPLOY.deploy(policy, {"run_id": 123, "attempt": 1})
+    assert transaction.changes == []
+    assert not any(name == "compose.private.json" for name, value in transaction.writes)
+
+
 def test_non_target_state_change_is_not_ignored(monkeypatch):
     monkeypatch.setattr(DEPLOY, "other_containers", lambda: {"service": "changed"})
     with pytest.raises(DEPLOY.DeployError):
@@ -322,6 +392,8 @@ def test_workflow_has_no_arbitrary_input_checkout_or_token_in_privileged_job():
     workflow = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text()
     assert "on:\n  workflow_dispatch:\n" in workflow
     assert "inputs:" not in workflow and "pull_request:" not in workflow
+    assert 'policy["release_status"] != "approved"' in workflow
+    assert 'comparison["status"] != "ahead"' in workflow
     job = workflow.split("  deploy-production:\n", 1)[1]
     assert "    environment: production\n" in job
     assert "    permissions: {}\n" in job
@@ -333,6 +405,7 @@ def test_workflow_has_no_arbitrary_input_checkout_or_token_in_privileged_job():
     sudoers = (ROOT / "deployment/cloud/cloud-production.sudoers").read_text()
     assert 'NOPASSWD: /usr/local/sbin/cloud-production-deploy ""' in sudoers
     assert "NOPASSWD: ALL" not in sudoers
+    assert "luxottica-regression.xlsx" not in (ROOT / "deployment/cloud/cloud_production_deploy.py").read_text()
     service = (ROOT / "deployment/cloud/cloud-production-deploy.service").read_text()
     assert "TimeoutStartSec=1200" in service and "TimeoutStopSec=300" in service
 

@@ -149,26 +149,20 @@ relación en Odoo. Para operaciones en el canal debe usarse
 5. **Organización**:
    ```
    repo/images/
-   └── VE4526U/                                      (modelo)
-      └── 8056262672563/                            (EAN)
-         ├── 0VE4526U__108_71__P21__noshad__fr.png (original)
-         ├── 0VE4526U__108_71__P21__noshad__qt.png (original)
-         ├── 0VE4526U__108_71__P21__shad__lt.png   (original)
-         ├── Farfetch/
-         │   ├── 31715787_V1.png                   (noshad__fr)
-         │   ├── 31715787_V2.png                   (noshad__qt)
-         │   └── 31715787_V3.png                   (shad__lt)
-         └── Miinto/
-            ├── <id-miinto>_V1.jpeg               (noshad__fr)
-            ├── <id-miinto>_V2.jpeg               (noshad__qt)
-            └── <id-miinto>_V3.jpeg               (shad__lt)
+   └── 8056262672563/                            (EAN)
+      ├── 0VE4526U__108_71__P21__noshad__fr.png (original)
+      ├── 0VE4526U__108_71__P21__noshad__qt.png (original)
+      └── 0VE4526U__108_71__P21__shad__lt.png   (original)
    ```
 
    Los originales se conservan en la carpeta del EAN. Los IDs de Farfetch y
-   Miinto se consultan en Odoo desde ese EAN; solo se generan las tres vistas
-   indicadas para cada mercado. Para Miinto se conserva el contenido PNG
-   original y solo se cambia la extensión del nombre a `.jpeg`, sin conversión
-   ni pérdida de calidad.
+   Miinto se consultan en Odoo desde ese EAN; las representaciones de mercado
+   del catálogo son aliases, no copias dentro del origen canónico. La
+   publicación persistente se prepara separadamente con `market_publication.py`
+   bajo `/mnt/cloud-imagenes/market-publication/<Canal>/<EAN>/`; Miinto conserva
+   los bytes PNG originales bajo `.jpeg`, sin conversión. No confundir estos
+   aliases con la copia comercial ni activar la sincronización remota sin
+   autorización.
 
 ### Monitoreo:
 - Ver archivo: `docs/Luxoptica/descargas/.mail_download_state.json`

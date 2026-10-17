@@ -24,6 +24,15 @@ del artefacto. [Fuentes de estado, límites, capturas y build](docs/CLOUD_HOME.m
 Para construir Docker/Compose desde fuentes se requieren los argumentos de
 proveniencia documentados; no activar servicios ni ejecutar migraciones al validar.
 
+### Cloud production (s2026)
+
+La producción Cloud usa publicaciones GHCR verificadas y despliegues manuales
+con aprobación protegida, limitados a `abcd-app`. No usar las guías genéricas
+de auto-deploy SSH para este servidor. La arquitectura, regresión sintética,
+política de releases, rollback e instalación administrativa están en
+[deployment/cloud/README.md](deployment/cloud/README.md). Instalar el controlador
+desde una copia revisada no despliega ni reinicia servicios.
+
 ## 🎯 ¿Qué Es?
 
 Sistema inteligente que clasifica productos en 4 categorías:

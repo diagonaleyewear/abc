@@ -2,7 +2,6 @@
 """Fixed root trust boundary. No image, path, command or Python supplied by the runner."""
 from contextlib import contextmanager
 import copy
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -22,7 +21,6 @@ STATE = Path("/var/lib/cloud-production-deploy")
 CONFIG = ETC / "compose.private.json"
 POLICY = ETC / "approved-release.json"
 VALIDATOR = ETC / "validate_luxottica.py"
-WORKBOOK = ETC / "luxottica-regression.xlsx"
 UNIT = "cloud-production-deploy.service"
 REPO = "sginfoocio/abc"
 WORKFLOW = ".github/workflows/deploy-cloud-production.yml"
@@ -114,24 +112,43 @@ def api(resource):
 
 
 def validate_policy(policy):
+    if not isinstance(policy, dict):
+        raise DeployError("Invalid approved release policy")
     if policy.get("repository") != REPO:
         raise DeployError("Repository is not approved")
+
+    def is_sha(value, length):
+        return isinstance(value, str) and re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is not None
+
     for key in ("commit", "previous_commit", "controller_commit"):
-        if not re.fullmatch(r"[0-9a-f]{40}", policy.get(key, "")):
+        if not is_sha(policy.get(key), 40):
             raise DeployError("Invalid approved commit")
-    if not re.fullmatch(r"ghcr\.io/sginfoocio/abc@sha256:[0-9a-f]{64}", policy.get("image", "")):
+    if policy["commit"] == policy["previous_commit"]:
+        raise DeployError("Release is already the current production commit")
+    if policy.get("release_status") != "approved":
+        raise DeployError("No new release is approved")
+    if not isinstance(policy.get("image"), str) or not re.fullmatch(
+        r"ghcr\.io/sginfoocio/abc@sha256:[0-9a-f]{64}", policy["image"],
+    ):
         raise DeployError("Invalid approved image")
     for key in ("build_run_id", "build_attempt"):
         if type(policy.get(key)) is not int or policy[key] < 1:
             raise DeployError("Invalid approved publication")
-    if policy.get("runner_name") != "cloud-production-s2026" or not policy.get("reviewers"):
+    reviewers = policy.get("reviewers")
+    if (
+        policy.get("runner_name") != "cloud-production-s2026"
+        or not isinstance(reviewers, list)
+        or not reviewers
+        or any(not isinstance(reviewer, str) or not reviewer for reviewer in reviewers)
+    ):
         raise DeployError("Invalid approved deployment identity")
-    if set(policy.get("source_sha256", {})) != {
+    source_hashes = policy.get("source_sha256", {})
+    if not isinstance(source_hashes, dict) or set(source_hashes) != {
         "app_enhanced.py", "app_exports.py", "transform_luxottica_masterdata.py",
     }:
         raise DeployError("Incomplete source provenance")
-    for checksum in [policy.get("workbook_sha256", ""), *policy["source_sha256"].values()]:
-        if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+    for checksum in source_hashes.values():
+        if not is_sha(checksum, 64):
             raise DeployError("Invalid approved checksum")
 
 
@@ -182,6 +199,9 @@ def validate_request(request, policy):
         and build["path"] == ".github/workflows/deploy.yml"
     ):
         raise DeployError("Approved publication has no successful main CI")
+    comparison = api(f"compare/{policy['previous_commit']}...{policy['commit']}")
+    if comparison.get("status") != "ahead":
+        raise DeployError("Release is not a forward update from production")
 
 
 def validate_config(config):
@@ -266,35 +286,38 @@ def check_health(commit, image_id):
 
 def regression(policy, production=False):
     secure_path(VALIDATOR)
-    secure_path(WORKBOOK)
-    raw = WORKBOOK.read_bytes()
-    if len(raw) > 2_000_000 or hashlib.sha256(raw).hexdigest() != policy["workbook_sha256"]:
-        raise DeployError("Original customer workbook checksum mismatch")
     script = VALIDATOR.read_text(encoding="utf-8")
     if production:
-        arguments = [DOCKER, "exec", "-i", "--user", "1037:100", "abcd-control", "python"]
+        arguments = [DOCKER, "exec", "--user", "1037:100", "abcd-control", "python"]
     else:
         arguments = [
-            DOCKER, "create", "-i", "--network", "none", "--read-only", "--user", "1037:100",
+            DOCKER, "create", "--network", "none", "--read-only", "--user", "1037:100",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128",
             "--memory", "768m", "--cpus", "1", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             "--entrypoint", "python", policy["image"],
         ]
     arguments.extend(["-c", script, json.dumps(policy), "production" if production else "candidate"])
     if production:
-        output = run(arguments, timeout=120, data=raw)
+        output = run(arguments, timeout=120)
     else:
         container_id = run(arguments).decode().strip()
         if not re.fullmatch(r"[0-9a-f]{64}", container_id):
             raise DeployError("Invalid isolated candidate identity")
         try:
-            output = run([DOCKER, "start", "-ai", container_id], timeout=120, data=raw)
+            output = run([DOCKER, "start", "-a", container_id], timeout=120)
         finally:
             # Clean up only the newly created, isolated candidate, even on timeout.
             run([DOCKER, "rm", "--force", container_id])
     result = json.loads(output)
-    if result.get("rows") != 902 or result.get("ean_8056266003066") != "MONTURAS":
-        raise DeployError("Incomplete real workbook regression")
+    if (
+        result.get("rows") != 3
+        or result.get("MONTURAS") != 2
+        or result.get("GAFAS DE SOL") != 1
+        or result.get("ean_8056266003066") != "MONTURAS"
+        or result.get("ean_sequence_preserved") is not True
+        or result.get("preview_xlsx_csv_match") is not True
+    ):
+        raise DeployError("Synthetic Luxottica regression failed")
     return result
 
 

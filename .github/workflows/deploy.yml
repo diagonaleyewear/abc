@@ -102,7 +102,7 @@ jobs:
           docker run --rm --network none -e EXPECTED_COMMIT -e EXPECTED_BUILD -e EXPECTED_PUBLISHED -e EXPECTED_VERSION "$IMAGE" python -c "
           import os
           import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
-          import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage
+          import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
           from build_info import load_build_info
           info = load_build_info()
           assert info['commit'] == os.environ['EXPECTED_COMMIT']
@@ -230,7 +230,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py app_exports.py app_navigation.py app_pages db_loader.py engine.py abcd_snapshots.py save_abcd_weekly_snapshot.py auth_session.py order_alerts.py graph_mail_downloader.py tests/test_app_exports.py tests/test_app_navigation.py tests/test_abcd_snapshots.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_graph_mail_downloader.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
           flake8 image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py --count --select=E9,F63,F7,F82 --show-source --statistics
@@ -244,13 +244,15 @@ jobs:
           flake8 cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py tests/test_cloud_dashboard.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 graph_mail_downloader.py tests/test_graph_mail_downloader.py abcd_snapshots.py tests/test_abcd_snapshots.py tests/test_abcd_snapshots_postgres.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 market_publication.py tests/test_market_publication.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 market_publication.py tests/test_market_publication.py --count --max-complexity=10 --max-line-length=127 --statistics
           flake8 kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py tests/test_kering_images.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py adyen_reconciliation.py adyen_reconciliation_ui.py tests/test_adyen_reconciliation.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 app_enhanced.py db_loader.py engine.py auth_session.py order_alerts.py run_alerta_pedidos.py watchlist_config.py adyen_reconciliation.py adyen_reconciliation_ui.py tests/test_adyen_reconciliation.py tests/test_auth_session.py tests/test_order_alerts.py tests/test_order_alert_service.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
       - name: Check syntax
         run: |
-          python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py
+          python -m py_compile deployment/cloud/cloud_production_deploy.py deployment/cloud/validate_luxottica.py deployment/cloud/runner_job_gate.py deployment/cloud/verify_compose_transition.py tests/test_cloud_production_deploy.py tests/test_validate_luxottica.py
           sh -n deployment/cloud/runner_job_gate.sh
           python -m py_compile app_enhanced.py app_exports.py app_navigation.py app_pages/alerts.py app_pages/luxoptica.py tests/test_app_exports.py tests/test_app_navigation.py
           python -m py_compile image_thumbnails.py scripts/benchmark_image_thumbnails.py scripts/smoke_image_thumbnails.py tests/test_image_thumbnails.py
@@ -261,6 +263,7 @@ jobs:
           python -m py_compile repository_storage.py image_work_storage.py scripts/nfs_repository_guard.py scripts/test_nfs_image_storage.py scripts/smoke_image_storage.py
           python -m py_compile cloud_dashboard.py process_activity.py build_info.py scripts/write_build_info.py
           python -m py_compile image_naming.py image_exports.py image_repository.py migrate_image_repository.py graph_mail_downloader.py tests/test_graph_mail_downloader.py abcd_snapshots.py tests/test_abcd_snapshots.py tests/test_abcd_snapshots_postgres.py kering_media.py tests/test_kering_image_sections.py
+          python -m py_compile market_publication.py tests/test_market_publication.py
           python -m py_compile kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py
           python -m py_compile app_enhanced.py
           python -m py_compile app_exports.py

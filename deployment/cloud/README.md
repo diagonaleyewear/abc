@@ -25,8 +25,8 @@ uses the local restricted sudo command.
 ## Trust boundaries
 
 * Runner identity: `cloud-deploy`; name `cloud-production-s2026`; label
-  `cloud-production`; no sudo/docker group, no access to private config, customer
-  workbook, NAS or root files.
+  `cloud-production`; no sudo/docker group, no access to private config, NAS or
+  root files.
 * Runner start hook rejects other repositories/events/branches/workflows/jobs.
   This is a **public repository**: do not use this runner for PRs, builds or
   general commands. Require administrative approval for **all fork workflows**.
@@ -40,10 +40,13 @@ uses the local restricted sudo command.
   attempt. Independently verifies GitHub API data: reviewed controller SHA,
   dispatch on main, correct active job/runner, explicit authorized production
   approval, protection still enabled, and successful main publication.
-* Root policy pins repository, previous/new commits, GHCR digest, publication
-  run/attempt, customer workbook checksum and exact application source hashes.
-  OCI labels alone are not treated as provenance. Candidate and deployed
-  container verify build metadata **and the pinned source bytes**.
+* Root policy pins repository, current/new commits, GHCR digest, publication
+  run/attempt and exact application source hashes. OCI labels alone are not
+  treated as provenance. Candidate and deployed container verify build metadata
+  **and the pinned source bytes**.
+* The in-container regression uses a small, versioned synthetic fixture with a
+  pinned checksum. It tests both collection mappings, EAN preservation,
+  `8056266003066`, and preview/XLSX/CSV consistency without customer data.
 * Root configuration is an independently reviewed, normalized Compose snapshot.
   The existing private config is owned under application-managed directories;
   it cannot safely be a mutable instruction source for a privileged runner.
@@ -75,7 +78,6 @@ Additional root-only files/directories:
 * `/etc/cloud-production/compose.private.json` root:root 0600: reviewed effective
   snapshot, all existing service settings preserved, no external include,
   extends, env_file, build, configs/secrets or relative bind paths.
-* `/etc/cloud-production/luxottica-regression.xlsx` root:root 0600.
 * `/var/lib/cloud-production-deploy` root:root 0700: locks, request, result,
   per-run configuration backups, container identities and receipts.
 
@@ -89,6 +91,56 @@ These commands are for an administrator **after reviewing/authorizing the
 installation and the exact source commit**. They are not a request to run
 unreviewed code as root. Execute in an administrative session; do not grant a
 general sudo shell to the runner.
+
+### Updating the controller already installed on s2026
+
+This repository already has the dedicated runner and systemd units installed.
+For this controller update, do **not** repeat runner registration, install or
+start its service, change sudoers, replace the Compose snapshot, reload units,
+start the deploy worker, dispatch a workflow or restart any application service.
+The runner's present online/offline state has not been verified; check it
+read-only before any later dispatch, and do not activate it as part of this
+update.
+
+After the PR is reviewed and merged, stage the exact reviewed `main` commit
+under a root-only directory outside the runner workspace. Confirm production
+still reports healthy at `99a9f60...` and there is no active production
+workflow. Install only the root helper, its synthetic regression validator and
+the baseline-only policy. This example deliberately leaves release dispatch
+disabled:
+
+```sh
+umask 077
+SOURCE=/root/cloud-deploy-review/deployment/cloud
+CONTROLLER_SHA=REPLACE_WITH_REVIEWED_40_CHARACTER_MAIN_COMMIT
+python3 - "$SOURCE/approved-release.json" "$CONTROLLER_SHA" <<'PY'
+import json, os, pathlib, re, sys
+
+source, controller = pathlib.Path(sys.argv[1]), sys.argv[2]
+assert re.fullmatch(r"[0-9a-f]{40}", controller)
+policy = json.loads(source.read_text(encoding="utf-8"))
+assert policy["release_status"] == "baseline-only"
+assert policy["commit"] == policy["previous_commit"] == "99a9f60eb6fbe11cc231b5626556e5db9b5166e9"
+policy["controller_commit"] = controller
+target = pathlib.Path("/etc/cloud-production/approved-release.json.new")
+target.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+os.chown(target, 0, 0)
+os.chmod(target, 0o600)
+os.replace(target, "/etc/cloud-production/approved-release.json")
+PY
+install -o root -g root -m 0755 "$SOURCE/cloud_production_deploy.py" /usr/local/sbin/cloud-production-deploy
+install -o root -g root -m 0600 "$SOURCE/validate_luxottica.py" /etc/cloud-production/validate_luxottica.py
+```
+
+Review the staged source and file hashes before installation. The policy and
+controller SHA must refer to the reviewed merged revision. No `daemon-reload`
+is needed for these two Python files; verify their owner/mode and leave the
+runner service and all application services untouched. `release_status` must
+remain `baseline-only` until a *different, forward* main publication has been
+reviewed and its digest/build/source hashes installed in both policies. Before
+that future dispatch, inspect (do not start or restart) the dedicated runner
+unit and GitHub runner status; separately authorize any activation if it is
+offline.
 
 1. Stage an inspected copy of this directory under a root-only review directory.
    Set `SOURCE` to it and `CONTROLLER_SHA` to the exact reviewed commit that
@@ -112,6 +164,8 @@ general sudo shell to the runner.
    assert re.fullmatch(r"[0-9a-f]{40}", sys.argv[1])
    path = pathlib.Path("/etc/cloud-production/approved-release.json")
    data = json.loads(path.read_text())
+   assert data["release_status"] == "baseline-only"
+   assert data["commit"] == data["previous_commit"] == "99a9f60eb6fbe11cc231b5626556e5db9b5166e9"
    data["controller_commit"] = sys.argv[1]
    path.write_text(json.dumps(data, indent=2) + "\n")
    PY
@@ -138,7 +192,7 @@ general sudo shell to the runner.
    private `docker compose ... config --format json` round trip: effective values
    must remain identical. No environment-dependent `.env` is used by the helper.
    Verify app user `1037:100`, project `cloud-nas`, container `abcd-control`,
-   and the current image ID/commit `2082ee541ab3`.
+   and the current image ID/commit `99a9f60eb6fb`.
 
    **Mandatory read-only transition gate, before installing the drop-in:**
 
@@ -159,23 +213,10 @@ general sudo shell to the runner.
    These checks cannot be reported as passed until the administrator runs them
    against the actual private files.
 
-3. Stage the original 84 KB customer workbook once on **local root-only disk**,
-   not Git, GHCR, public Actions artifacts, NAS or a new Docker volume:
-
-   ```sh
-   install -o root -g root -m 0600 /root/reviewed-client-file.xlsx \
-     /etc/cloud-production/luxottica-regression.xlsx
-   sha256sum /etc/cloud-production/luxottica-regression.xlsx
-   # Must be 2aa51dcaf42b3653bc1c1a97b25a8cb6e906dfd3bc402c594a091cb58cc98e04
-   ```
-
-   The original currently exists on the operator workstation, not in hosted
-   CI. A single private local fixture is needed for the requested **in-container**
-   before/after verification; it is streamed over stdin, never mounted into the
-   candidate. No DB/Odoo access is made. If in future a real customer workbook
-   is already available in approved private CI, review a checksum-bound receipt
-   alternative rather than copying it unnecessarily. Do not replace real-file
-   validation with a simulated 902-row dataset.
+3. The Luxottica regression fixture is source-controlled, synthetic and
+   checksum-pinned in `validate_luxottica.py`. Do not copy a customer workbook
+   to the server, Actions, GHCR, NAS or a Docker volume. The in-container test
+   uses no network, database or Odoo access.
 
 4. After the equivalence check passes, install unit and drop-in without starting
    a deployment or restarting Cloud:
@@ -221,7 +262,8 @@ general sudo shell to the runner.
    **not** use `--no-recreate`, because it must replace `abcd-app` only. It retains
    `--no-deps` and cannot update Kering, monitors, alerts or Mustotal.
 
-5. Create a separate runner account. Confirm it has no supplementary docker,
+5. (First-time setup only; do not repeat for the controller update above.)
+   Create a separate runner account. Confirm it has no supplementary docker,
    sudo, users/NAS groups, no login credentials, and cannot read private config:
 
    ```sh
@@ -307,10 +349,9 @@ is necessary for this public repository.
 ## Transaction, validation and recovery
 
 Before mutation: check all root paths/config, current healthy commit, expected
-Cloud/Mustotal containers; retain image under
-`cloud-production:rollback-2082ee541ab3230d7a87ecd67b0d15b69cf36e66`;
+Cloud/Mustotal containers; retain the current image under a rollback tag;
 save private config/container snapshots; pull **pinned digest**; check label,
-build/source identity and real workbook in an isolated candidate
+build/source identity and the synthetic regression in an isolated candidate
 (`--network none`, read-only, UID 1037:100, no host mounts).
 
 Only `services.abcd-app.image` changes in the controlled JSON, with an atomic
@@ -324,8 +365,8 @@ never edited. Compose is always:
 ```
 
 Afterward: exact image ID/commit, running/healthy and Streamlit health endpoint;
-original customer workbook using the persisted dictionary; 902 rows, 464/438,
-EAN `8056266003066` as MONTURAS, no EAN loss, matching preview/XLSX/CSV categories;
+synthetic regression using the persisted dictionary; both collection mappings,
+EAN `8056266003066` as MONTURAS, no EAN loss, matching preview/XLSX/CSV values;
 startup logs, and **all** non-target container IDs/images/running/health states
 unchanged. Running monitor/Kering proves process state, not a new supplier
 transaction: do not trigger supplier downloads, alerts or Mustotal writes.
@@ -349,12 +390,26 @@ No database migration is performed; no volumes, images or customer files are del
 
 ## Future releases
 
-Do not accept an image/command/path from a dispatch input. Publish with existing
-CI, verify the digest, build identity and real regression first. Review/update
-the repository policy, source hashes, expected previous commit, fixture/validator
-expectations if applicable, and the root-installed policy/controller SHA.
-The first release's real 902-row fixture is intentional; a different regression
-contract requires an explicitly reviewed validator update, not a silent fallback.
-The runner cannot change these files. Retain rollback images until a separate
-authorized retention decision. A newer main commit cannot silently deploy under
-an older controller authorization.
+Do not accept an image/command/path from a dispatch input. Before a future
+release, publish it through CI and update the reviewed policy with that build's
+commit, GHCR digest, run/attempt and exact application source hashes. Keep
+`previous_commit` equal to the verified production commit (`99a9f60...` until
+production is intentionally updated), set `release_status` to `approved`, and
+ensure the target is a descendant of production. A same-commit replay, a
+behind/diverged commit, or any mismatch is rejected before mutation. The
+checked-in policy is intentionally `baseline-only`: it records the deployed
+`99a9f60...` release and cannot dispatch/redeploy it. For each later release,
+review the successful `main` build's exact image digest and run/attempt, record
+the new commit and SHA256 of `app_enhanced.py`, `app_exports.py` and
+`transform_luxottica_masterdata.py`, and set the candidate status to `approved`
+in both the reviewed repository policy and root-installed policy. Keep
+`controller_commit` pinned to the reviewed main revision containing the workflow.
+The hosted preflight and root helper independently check the publication and
+forward commit ancestry. The runner cannot change the root-installed policy.
+Install the reviewed controller, validator and baseline policy manually as root
+from a separately staged, reviewed source tree; add the exact reviewed main
+commit as `controller_commit`. Do not enable a candidate in the checked-in
+policy until a new successful publication exists. Do not install from the
+runner's checkout, start a deployment, or restart Cloud as part of installation.
+Retain rollback images until a separate authorized retention decision. A newer
+main commit cannot silently deploy under an older controller authorization.
