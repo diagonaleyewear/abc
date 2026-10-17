@@ -3,7 +3,7 @@
 Colour/radius/font values come from the public Vytria theme (theme.css, custom.css):
 body text #42403B, page tint #fbfbfa, neutral #f2f2f2, border #d9d9d9, accent #003399,
 highlight #FFCB03, radii 0/4px, Arial sans body with Cormorant Garamond for display text.
-The font file is not bundled (licence unverified): headings fall back to Georgia.
+The font file is not bundled (licence unverified): headings fall back to Times New Roman (lining figures, so references such as GU1060S stay legible; Georgia uses old-style figures).
 
 All styles target our own `cd-*` classes. No Streamlit-internal selectors are used.
 Builders return escaped HTML strings so they can be tested without Streamlit.
@@ -21,7 +21,7 @@ TOKENS = {
     },
     "font": {
         "body": 'Arial, "Helvetica Neue", Helvetica, sans-serif',
-        "display": '"Cormorant Garamond", Georgia, "Times New Roman", serif',
+        "display": '"Cormorant Garamond", "Times New Roman", Georgia, serif',
     },
     "space": {"xs": "4px", "sm": "8px", "md": "16px", "lg": "24px", "xl": "32px"},
     "radius": {"sm": "0", "md": "4px"},

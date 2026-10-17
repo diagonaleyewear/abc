@@ -25,7 +25,7 @@ Valores tomados del tema público de vytria.com (`theme.css`, `custom.css`):
 | `highlight` | `#FFCB03` | acento de aviso |
 | `radius` | 0 / 4 px | Vytria usa esquinas casi rectas |
 | fuente cuerpo | Arial / sans-serif | `font-family` real del tema |
-| fuente títulos | Cormorant Garamond → Georgia | Cormorant se usa en Vytria; **el fichero de fuente no se incluye** (licencia sin verificar), se usa fallback serif |
+| fuente títulos | Cormorant Garamond → Times New Roman | Cormorant se usa en Vytria; **el fichero de fuente no se incluye** (licencia sin verificar), se usa fallback serif con cifras lining (Georgia usa cifras antiguas y deforma referencias como GU1060S) |
 
 Valores propios (no extraídos): `success #1e6b3a`, `warning #7a5200`, `danger #b3361a` (elegidos para contraste AA sobre
 blanco), escala de espaciado 4/8/16/24/32, altura de control 40 px (objetivo táctil 44 px), breakpoints 640/1024 px.

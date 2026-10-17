@@ -102,7 +102,8 @@ def _read_filters(groups) -> library.LibraryFilters:
         availability = st.selectbox(
             "Fotografías", [library.ALL, *library.AVAILABILITY_FILTERS[1:]], key="lib_availability")
     with columns[4]:
-        st.selectbox("Por página", library.PAGE_SIZES, index=1, key="lib_size")
+        st.session_state.setdefault("lib_size", library.PAGE_SIZES[1])
+        st.selectbox("Por página", library.PAGE_SIZES, key="lib_size")
     return library.LibraryFilters(query, provider, market, view, availability)
 
 

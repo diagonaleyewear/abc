@@ -209,3 +209,17 @@ def test_browsing_never_builds_zip_or_contacts_providers(repository, monkeypatch
     app = run()
     app.button(key="image_gallery_refresh").click().run()
     assert not app.exception and zipper.call_count == 0
+
+
+def test_images_route_uses_only_the_new_library_page():
+    import ast
+    from pathlib import Path
+    import app_pages.luxoptica as luxoptica
+    from app_pages import image_library_page
+
+    assert luxoptica.render_images_page is image_library_page.render_images_page
+    tree = ast.parse((Path(__file__).parents[1] / "app_enhanced.py").read_text(encoding="utf-8"))
+    assert "render_luxoptica_images_page" not in {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    page = next(n for n in tree.body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], "id", "") == "LUXOPTICA_IMAGES_PAGE")
+    assert "render_images_page" in ast.unparse(page) and "repositorio-imagenes" in ast.unparse(page)

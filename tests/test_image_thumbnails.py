@@ -3,6 +3,7 @@ from io import BytesIO
 import json
 import multiprocessing
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -181,7 +182,9 @@ def worker(root):
     return thumbnails.ThumbnailCache(repository).get(record, access(repository, record))
 
 
-def test_multiprocess_atomic_single_generation(repository):
+def test_multiprocess_atomic_single_generation(repository, monkeypatch):
+    # AppTest leaves __main__.__file__ on its temporary script; spawn would re-run that page in every worker.
+    monkeypatch.delattr(sys.modules["__main__"], "__file__", raising=False)
     record = save(repository)
     with ProcessPoolExecutor(max_workers=4, mp_context=multiprocessing.get_context("spawn")) as pool:
         results = list(pool.map(worker, [str(repository.root)] * 8))
