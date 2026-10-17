@@ -109,6 +109,12 @@ workflow. Install only the root helper, its synthetic regression validator and
 the baseline-only policy. This example deliberately leaves release dispatch
 disabled:
 
+The controller's GitHub API client requires the verified system CA bundle at
+`/etc/ssl/certs/ca-certificates.crt`. Confirm that file is present and valid
+before a later authorized installation. TLS certificate and hostname
+verification remain enabled; do not replace this trust store with an insecure
+context or bypass HTTPS verification.
+
 ```sh
 umask 077
 SOURCE=/root/cloud-deploy-review/deployment/cloud

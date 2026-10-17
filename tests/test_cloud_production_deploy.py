@@ -1,13 +1,24 @@
 import copy
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import ipaddress
 import importlib.util
 import json
 import os
 from pathlib import Path
+import ssl
 import stat
 import subprocess
 import textwrap
+from threading import Thread
 from types import SimpleNamespace
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 import pytest
 
 
@@ -124,6 +135,127 @@ def api_responses(policy):
         },
         f"compare/{policy['previous_commit']}...{policy['commit']}": {"status": "ahead"},
     }
+
+
+def write_test_certificate(directory, name):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+            critical=False,
+        )
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    certificate_path = directory / f"{name}.pem"
+    key_path = directory / f"{name}.key"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ))
+    return certificate_path, key_path
+
+
+class JsonHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+def route_github_requests_to(monkeypatch, address):
+    actual_urlopen = urlopen
+
+    def open_local(request, *, timeout, context):
+        assert request.full_url.startswith("https://api.github.com/")
+        assert context.check_hostname is True
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        local_url = f"https://127.0.0.1:{address[1]}"
+        local_request = Request(
+            request.full_url.replace("https://api.github.com", local_url, 1),
+            headers=dict(request.header_items()),
+        )
+        return actual_urlopen(local_request, timeout=timeout, context=context)
+
+    monkeypatch.setattr(DEPLOY.urllib.request, "urlopen", open_local)
+
+
+def start_test_https_server(certificate_path, key_path):
+    server = HTTPServer(("127.0.0.1", 0), JsonHandler)
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(certificate_path, key_path)
+    server.socket = server_context.wrap_socket(server.socket, server_side=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_github_api_uses_verified_ca_bundle_and_hostname_check(monkeypatch, tmp_path):
+    certificate, key = write_test_certificate(tmp_path, "trusted")
+    monkeypatch.setattr(DEPLOY, "CA_BUNDLE", str(certificate))
+    server, thread = start_test_https_server(certificate, key)
+    route_github_requests_to(monkeypatch, server.server_address)
+    try:
+        assert DEPLOY.api("rate_limit") == {"ok": True}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_untrusted_github_certificate_aborts_deploy_before_mutation(monkeypatch, tmp_path, policy):
+    trusted_certificate, _ = write_test_certificate(tmp_path, "trusted")
+    server_certificate, server_key = write_test_certificate(tmp_path, "untrusted")
+    monkeypatch.setattr(DEPLOY, "CA_BUNDLE", str(trusted_certificate))
+    server, thread = start_test_https_server(server_certificate, server_key)
+    route_github_requests_to(monkeypatch, server.server_address)
+    reads = []
+    monkeypatch.setattr(DEPLOY, "read_json", lambda path: reads.append(path))
+    try:
+        with pytest.raises(URLError) as error:
+            DEPLOY.deploy(policy, {"run_id": 123, "attempt": 1})
+        assert isinstance(error.value.reason, ssl.SSLCertVerificationError)
+        assert reads == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("ca_file,expected_error", [
+    ("missing", FileNotFoundError),
+    ("invalid", ssl.SSLError),
+])
+def test_invalid_ca_bundle_fails_before_github_request(
+    monkeypatch, tmp_path, ca_file, expected_error,
+):
+    bundle = tmp_path / "ca-bundle.pem"
+    if ca_file == "invalid":
+        bundle.write_text("not a certificate bundle", encoding="ascii")
+    monkeypatch.setattr(DEPLOY, "CA_BUNDLE", str(bundle))
+    requests = []
+    monkeypatch.setattr(DEPLOY.urllib.request, "urlopen", lambda *args, **kwargs: requests.append(args))
+
+    with pytest.raises(expected_error):
+        DEPLOY.api("rate_limit")
+    assert requests == []
 
 
 def test_gate_verifies_workflow_approval_runner_and_publication(monkeypatch, policy):

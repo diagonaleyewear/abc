@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import signal
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -27,6 +28,7 @@ WORKFLOW = ".github/workflows/deploy-cloud-production.yml"
 JOB = "Deploy approved abcd-app"
 DOCKER = "/usr/bin/docker"
 SYSTEMCTL = "/usr/bin/systemctl"
+CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root", "LANG": "C.UTF-8"}
 
 
@@ -107,7 +109,8 @@ def api(resource):
         f"https://api.github.com/repos/{REPO}/{resource}",
         headers={"Accept": "application/vnd.github+json", "User-Agent": "cloud-production-deploy"},
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    context = ssl.create_default_context(cafile=CA_BUNDLE)
+    with urllib.request.urlopen(request, timeout=20, context=context) as response:
         return json.load(response)
 
 
