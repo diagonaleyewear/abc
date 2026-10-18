@@ -34,7 +34,7 @@ blanco), escala de espaciado 4/8/16/24/32, altura de control 40 px (objetivo tá
 
 | Componente | Función | Notas |
 |---|---|---|
-| Cabecera | `page_header_html` | título, subtítulo y contadores (imágenes, EAN, modelos) |
+| Cabecera | `page_header_html` / `page_title` | título, subtítulo y contadores; `page_title` inyecta estilos y sustituye a `st.title` |
 | Tarjeta de producto | `product_card_html` | miniatura 4:3 `object-fit: contain` sobre fondo neutro, alturas uniformes, textos truncados con elipsis |
 | Insignias de vista | `view_badges_html` | V1/V2/V3 presentes o ausentes |
 | Galería / foto | `photo_html`, `caption_html` | misma proporción que las tarjetas |
@@ -128,6 +128,14 @@ python scripts/regenerate_image_thumbnails.py purge-legacy [--execute]   # opcio
 - No ejecutar en producción sin autorización: ejecutar antes `report` y comunicar nº de miniaturas, espacio y tiempo.
 
 ## Pendiente (fuera de este piloto)
+
+Cabeceras: todas las pantallas enrutadas (Master Data, ABC, Pendiente Luxoptica, Alerta de Pedidos, Conciliación Odoo, Configuración,
+`/imagenes-kering`) usan `cloud_design.page_title(titulo, subtitulo="", stats=())` en lugar de `st.title` (`h1` y estilos del sistema).
+El login, la barra lateral y la cabecera con logo de `cloud_dashboard` conservan su propia presentación. Un test impide reintroducir `st.title`
+en esas pantallas. Nota de release: `app_enhanced.py` figura en `source_sha256` de la política, por lo que su hash cambia.
+
+Aún sin migrar: tablas (`st.dataframe`), formularios, botones y estados vacíos/errores de las pantallas heredadas, `/abc-historico` y el tema
+global; pantalla a pantalla en PRs posteriores.
 
 Migrar el resto de pantallas, `/imagenes-kering` (buscar/historial), `/abc-historico`, retirar el `render_luxoptica_images_page` heredado de
 `app_enhanced.py` (código muerto), ZIP por pedido (#38), fuente de marca con licencia, tema global (`.streamlit/config.toml`).

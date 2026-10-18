@@ -461,7 +461,8 @@ def test_library_role_is_read_only_and_does_not_query_odoo(monkeypatch):
     )
     app.run()
     assert not app.exception
-    assert app.title[0].value == "Biblioteca de fotografías de producto"
+    assert any("Biblioteca de fotografías de producto" in item.value and "cd-header__title" in item.value
+               for item in app.get("html"))
     assert reader.call_count == 0
     assert not any(
         button.label == "Buscar pedidos en Odoo" for button in app.button
