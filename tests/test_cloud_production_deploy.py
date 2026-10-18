@@ -91,13 +91,13 @@ def test_policy_rejects_untrusted_inputs(policy, key, value):
 
 def test_checked_in_policy_pins_the_published_forward_release():
     release = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
-    assert release["previous_commit"] == "79e728f1330da42d6b1fd299049179e6fd210416"
-    assert release["commit"] == "c03674a048b26cdb2f27fb262cc2633ebadbd295"
+    assert release["previous_commit"] == "c03674a048b26cdb2f27fb262cc2633ebadbd295"
+    assert release["commit"] == "64276b40d2bfa42bc7ff349a4390dadd62638eb0"
     assert release["image"] == (
         "ghcr.io/sginfoocio/abc@sha256:"
-        "94be3e8a32c00ec04110c267096afdaccfcabebda9cda8c84359f57ae9b24bcb"
+        "04ac4836361e59a59fb2f354f1dc05ce5aa71bbc427a0f603a017d87f29a01ec"
     )
-    assert release["build_run_id"] == 39043468756
+    assert release["build_run_id"] == 39065951026
     assert release["build_attempt"] == 1
     assert release["release_status"] == "approved"
     assert release["source_sha256"] == {
@@ -109,8 +109,8 @@ def test_checked_in_policy_pins_the_published_forward_release():
 
 
 @pytest.mark.parametrize("comparison_status,build_sha", [
-    ("ahead", "c03674a048b26cdb2f27fb262cc2633ebadbd295"),
-    ("behind", "c03674a048b26cdb2f27fb262cc2633ebadbd295"),
+    ("ahead", "64276b40d2bfa42bc7ff349a4390dadd62638eb0"),
+    ("behind", "64276b40d2bfa42bc7ff349a4390dadd62638eb0"),
     ("ahead", "b" * 40),
 ])
 def test_workflow_preflight_checks_release_ancestry_and_publication(
@@ -144,12 +144,12 @@ def test_workflow_preflight_checks_release_ancestry_and_publication(
     if comparison_status != "ahead":
         with pytest.raises(SystemExit, match="not a forward update"):
             exec(script, {})
-    elif build_sha != "c03674a048b26cdb2f27fb262cc2633ebadbd295":
+    elif build_sha != "64276b40d2bfa42bc7ff349a4390dadd62638eb0":
         with pytest.raises(SystemExit, match="no matching successful main publication"):
             exec(script, {})
     else:
         exec(script, {})
-        assert "94be3e8a32c00ec04110c267096afdaccfcabebda9cda8c84359f57ae9b24bcb" in summary.read_text()
+        assert "04ac4836361e59a59fb2f354f1dc05ce5aa71bbc427a0f603a017d87f29a01ec" in summary.read_text()
     assert len(calls) == (1 if comparison_status != "ahead" else 2)
 
 
@@ -312,7 +312,7 @@ def test_gate_verifies_workflow_approval_runner_and_publication(monkeypatch, pol
     ("actions/runs/123/attempts/1", "run_attempt", 2),
     ("actions/runs/123/attempts/1/jobs?per_page=100", "jobs", []),
     ("environments/production", "protection_rules", []),
-    ("compare/79e728f1330da42d6b1fd299049179e6fd210416..." + "c" * 40, "status", "behind"),
+    ("compare/c03674a048b26cdb2f27fb262cc2633ebadbd295..." + "c" * 40, "status", "behind"),
 ])
 def test_gate_rejects_wrong_context(monkeypatch, policy, resource, key, value):
     responses = api_responses(policy)
