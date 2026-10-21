@@ -1,5 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
+import json
+from pathlib import Path
+import subprocess
+import sys
 import threading
 import time
 
@@ -121,6 +125,42 @@ def test_graph_pagination_rejects_cycles_and_caps_pages(monkeypatch) -> None:
         raise AssertionError("Se excedió el máximo de páginas permitido")
 
 
+def test_graph_collection_rejects_incomplete_or_malformed_pages(monkeypatch) -> None:
+    for payload in ({}, {"value": None}, {"value": ["not-an-object"]}):
+        monkeypatch.setattr(
+            graph.requests,
+            "get",
+            lambda *args, _payload=payload, **kwargs: StubResponse(_payload),
+        )
+        try:
+            graph._list_graph_collection(
+                "token", "https://graph.microsoft.com/v1.0/messages"
+            )
+        except RuntimeError as exc:
+            assert "colección" in str(exc)
+        else:
+            raise AssertionError(f"Se aceptó una página incompleta: {payload!r}")
+
+    monkeypatch.setattr(
+        graph.requests,
+        "get",
+        lambda *args, **kwargs: StubResponse(
+            {
+                "value": [],
+                "@odata.nextLink": "",
+            }
+        ),
+    )
+    try:
+        graph._list_graph_collection(
+            "token", "https://graph.microsoft.com/v1.0/messages"
+        )
+    except RuntimeError as exc:
+        assert "nextLink inválido" in str(exc)
+    else:
+        raise AssertionError("Se aceptó un nextLink vacío")
+
+
 def test_graph_retries_429_using_retry_after(monkeypatch) -> None:
     responses = [
         StubResponse(status_code=429, headers={"Retry-After": "0"}),
@@ -205,6 +245,69 @@ def test_state_write_is_atomic_when_replace_fails(tmp_path, monkeypatch) -> None
 
     assert graph._load_state(state_file) == {"processed_message_ids": ["old"]}
     assert list(tmp_path.iterdir()) == [state_file]
+
+
+def test_mail_state_lock_prevents_lost_updates_across_processes(tmp_path) -> None:
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    release = tmp_path / "release"
+    state_file = tmp_path / "state.json"
+    script = """
+import json
+import sys
+import time
+from pathlib import Path
+from filelock import FileLock
+import graph_mail_downloader as graph
+
+root = Path(sys.argv[1])
+worker_id = sys.argv[2]
+(root / "ready" / worker_id).touch()
+release = root / "release"
+deadline = time.monotonic() + 10
+while not release.exists():
+    if time.monotonic() > deadline:
+        raise TimeoutError("parent did not release workers")
+    time.sleep(0.01)
+with FileLock(root / ".mail.lock", timeout=10):
+    state_file = root / "state.json"
+    state = graph._load_state(state_file) if state_file.exists() else {
+        "processed_message_ids": []
+    }
+    state["processed_message_ids"].append(worker_id)
+    time.sleep(0.1)
+    graph._save_state(state_file, state)
+"""
+    project = Path(__file__).resolve().parents[1]
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), worker_id],
+            cwd=project,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for worker_id in ("message-a", "message-b")
+    ]
+    try:
+        deadline = time.monotonic() + 15
+        while len(list(ready.iterdir())) < 2 and time.monotonic() < deadline:
+            if any(process.poll() is not None for process in processes):
+                break
+            time.sleep(0.02)
+        assert len(list(ready.iterdir())) == 2
+        release.touch()
+        outputs = [process.communicate(timeout=15) for process in processes]
+        assert [process.returncode for process in processes] == [0, 0], outputs
+    finally:
+        release.touch()
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert set(state["processed_message_ids"]) == {"message-a", "message-b"}
 
 
 def test_corrupt_state_fails_closed(tmp_path) -> None:
@@ -306,6 +409,39 @@ def test_streamed_attachment_enforces_limit_without_publishing_partial_file(tmp_
 
     assert not (tmp_path / "file.zip").exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_interrupted_attachment_is_not_published_and_can_be_retried(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(graph, "repository_root", lambda: tmp_path)
+    monkeypatch.setattr(graph, "work_root", lambda _root: tmp_path)
+    monkeypatch.setattr(graph, "check_work_root", lambda _root: None)
+    monkeypatch.setenv("GRAPH_IMAGE_MAX_ARCHIVE_BYTES", "100")
+    monkeypatch.setenv("IMAGE_REPOSITORY_WORK_RESERVE_BYTES", "1")
+
+    def interrupted():
+        yield b"partial"
+        raise OSError("synthetic network interruption")
+
+    try:
+        graph._save_streamed_attachment(interrupted(), tmp_path, "resume.zip")
+    except OSError as exc:
+        assert "synthetic network interruption" in str(exc)
+    else:
+        raise AssertionError("La interrupción simulada debía propagarse")
+
+    assert not (tmp_path / "resume.zip").exists()
+    assert not list(tmp_path.glob("*.part"))
+    recovered = graph._save_streamed_attachment(
+        [b"complete", b"-archive"], tmp_path, "resume.zip"
+    )
+    repeated = graph._save_streamed_attachment(
+        [b"complete", b"-archive"], tmp_path, "resume.zip"
+    )
+    assert recovered == repeated
+    assert recovered.read_bytes() == b"complete-archive"
+    assert list(tmp_path.glob("*.zip")) == [recovered]
 
 
 def test_zip_link_download_uses_streaming_and_publishes_complete_file(tmp_path, monkeypatch) -> None:

@@ -184,12 +184,16 @@ def _list_graph_collection(
             payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("La respuesta de Microsoft Graph tiene un formato inválido")
-        page_values = payload.get("value", [])
-        if not isinstance(page_values, list):
+        if "value" not in payload or not isinstance(payload["value"], list):
             raise RuntimeError("La colección de Microsoft Graph tiene un formato inválido")
+        page_values = payload["value"]
+        if any(not isinstance(item, dict) for item in page_values):
+            raise RuntimeError("La colección de Microsoft Graph contiene un elemento inválido")
         values.extend(page_values)
         next_url = payload.get("@odata.nextLink")
-        if next_url is not None and not isinstance(next_url, str):
+        if next_url is not None and (
+            not isinstance(next_url, str) or not next_url.strip()
+        ):
             raise RuntimeError("Microsoft Graph devolvió un @odata.nextLink inválido")
 
     return values
