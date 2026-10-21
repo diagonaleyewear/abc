@@ -1,11 +1,13 @@
 import copy
 from datetime import datetime, timedelta, timezone
+import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import ipaddress
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import ssl
 import stat
 import subprocess
@@ -30,13 +32,28 @@ DEPLOY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(DEPLOY)
 
 
+RELEASE = {
+    "repository": "sginfoocio/abc",
+    "commit": "c" * 40,
+    "controller_commit": "a" * 40,
+    "image": "ghcr.io/sginfoocio/abc@sha256:" + "d" * 64,
+    "previous_commit": "b" * 40,
+    "release_status": "approved",
+    "build_run_id": 39636988747,
+    "build_attempt": 1,
+    "runner_name": "cloud-production-s2026",
+    "reviewers": ["sginfoocio"],
+    "source_sha256": {
+        "app_enhanced.py": "1" * 64,
+        "app_exports.py": "2" * 64,
+        "transform_luxottica_masterdata.py": "3" * 64,
+    },
+}
+
+
 @pytest.fixture
 def policy():
-    result = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
-    result["controller_commit"] = "a" * 40
-    result["commit"] = "c" * 40
-    result["release_status"] = "approved"
-    return result
+    return copy.deepcopy(RELEASE)
 
 
 @pytest.fixture
@@ -89,68 +106,436 @@ def test_policy_rejects_untrusted_inputs(policy, key, value):
         DEPLOY.validate_policy(policy)
 
 
-def test_checked_in_policy_pins_the_published_forward_release():
-    release = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
-    assert release["previous_commit"] == "cc16dcbe1f740278a8d556f0344556d8d2f2f798"
-    assert release["commit"] == "704edfa6a9128e50d9153ed924f5a3c6724f8ac1"
-    assert release["image"] == (
-        "ghcr.io/sginfoocio/abc@sha256:"
-        "eb947ce7aa6f5b1fdbf8398402741e5dfeab0c5bf16205edda5adb243d1f9cc2"
-    )
-    assert release["build_run_id"] == 39636988747
-    assert release["build_attempt"] == 1
-    assert release["release_status"] == "approved"
-    assert release["source_sha256"] == {
-        "app_enhanced.py": "d59779d94794d139cb98e7108e166a811a76e57f406e92a05e9a47f34b493a14",
-        "app_exports.py": "05fb1557f5cdfe68f1890bd0443fb193d53f2858b0fbfd06174f08e054f60704",
-        "transform_luxottica_masterdata.py": "4e435ddadb6362f7ef7f2cd245b54c5fb439ddae903f1a4bdd70788d8256d609",
-    }
-    DEPLOY.validate_policy({**release, "controller_commit": "a" * 40})
+AUTHORITY = json.loads((ROOT / "deployment/cloud/release-authority.json").read_text())
+COMMIT = "c" * 40
+IMAGE = "ghcr.io/sginfoocio/abc@sha256:" + "d" * 64
 
 
-@pytest.mark.parametrize("comparison_status,build_sha", [
-    ("ahead", "704edfa6a9128e50d9153ed924f5a3c6724f8ac1"),
-    ("behind", "704edfa6a9128e50d9153ed924f5a3c6724f8ac1"),
-    ("ahead", "b" * 40),
+def test_checked_in_authority_is_static_and_names_no_release():
+    DEPLOY.validate_authority(AUTHORITY)
+    assert not {"commit", "previous_commit", "image", "build_run_id", "source_sha256"} & set(AUTHORITY)
+    workflow_blob = subprocess.check_output(
+        ["git", "hash-object", "--path", ".github/workflows/deploy-cloud-production.yml", "--stdin"],
+        input=(ROOT / ".github/workflows/deploy-cloud-production.yml").read_bytes().replace(b"\r\n", b"\n"),
+        cwd=ROOT,
+    ).decode().strip()
+    assert AUTHORITY["workflow_blob_sha"] == workflow_blob
+
+
+@pytest.mark.parametrize("key,value", [
+    ("repository", "another/repository"), ("runner_name", "s2026"),
+    ("image_repository", "ghcr.io/attacker/abc"), ("workflow_blob_sha", "main"),
+    ("reviewers", []), ("source_files", ["app_enhanced.py"]),
+    ("source_files", ["app_enhanced.py", "app_enhanced.py", "app_exports.py"]),
+    ("authority_version", 2),
 ])
-def test_workflow_preflight_checks_release_ancestry_and_publication(
-    monkeypatch, tmp_path, comparison_status, build_sha,
-):
-    workflow = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text()
-    start = workflow.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
-    end = workflow.index("\n          PY", start)
-    script = textwrap.dedent(workflow[start:end])
-    compile(script, "deploy-cloud-production-preflight", "exec")
-    monkeypatch.chdir(ROOT)
+def test_authority_rejects_untrusted_values(key, value):
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.validate_authority({**AUTHORITY, key: value})
+
+
+def test_checked_in_authority_declares_the_single_approver_exception_explicitly():
+    assert AUTHORITY["reviewers"] == ["sginfoocio"]
+    assert AUTHORITY["require_prevent_self_review"] is False
+    assert AUTHORITY["single_approver_exception"]["scope"] == "self-review-only"
+
+
+@pytest.mark.parametrize("change", [
+    {"single_approver_exception": None},
+    {"single_approver_exception": {}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "scope": "all-checks"}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "accepted_by": "someone"}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "approver": "other"}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "extra": True}},
+    {"reviewers": ["sginfoocio", "second"]},
+    {"require_prevent_self_review": "false"},
+    {"require_prevent_self_review": True},
+])
+def test_self_review_is_tolerated_only_through_the_exact_exception(change):
+    candidate = {**AUTHORITY, **change}
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.validate_authority(candidate)
+
+
+def test_authority_with_prevent_self_review_needs_no_exception():
+    candidate = {key: value for key, value in AUTHORITY.items() if key != "single_approver_exception"}
+    DEPLOY.validate_authority({**candidate, "require_prevent_self_review": True, "reviewers": ["a", "b"]})
+
+
+BUILD_RUN = 39700000000
+
+
+def publication(**changes):
+    """GitHub facts describing one genuine successful main publication of COMMIT."""
+    repo = {"full_name": "sginfoocio/abc"}
+    run = {
+        "id": BUILD_RUN, "run_attempt": 1, "path": ".github/workflows/deploy.yml", "event": "push",
+        "head_branch": "main", "head_sha": COMMIT, "conclusion": "success",
+        "repository": repo, "head_repository": repo,
+    }
+    job = {
+        "id": 555, "run_id": BUILD_RUN, "name": "build-and-push", "conclusion": "success",
+        "steps": [{"name": name, "conclusion": "success"} for name in sorted(DEPLOY.BUILD_STEPS)],
+    }
+    note = {
+        "title": "cloud-image-identity", "annotation_level": "notice",
+        "message": f"{IMAGE} {COMMIT} actions-{BUILD_RUN}-1",
+    }
+    facts = {"runs": [run], "runs_total": None, "jobs": [job], "jobs_total": None, "notes": [note]}
+    for key, value in changes.items():
+        if key in {"run", "job", "note"}:
+            target = {"run": run, "job": job, "note": note}[key]
+            target.update(value)
+        else:
+            facts[key] = value
+    return facts
+
+
+def resolver_api(monkeypatch, *, main_head=COMMIT, blob=None, facts=None, sources=None, head_sha=COMMIT):
     calls = []
+    sources = sources or {name: name.encode() for name in AUTHORITY["source_files"]}
+    facts = facts or publication()
 
+    def api(resource, raw=False):
+        calls.append(resource)
+        if resource.startswith("actions/runs/123/attempts/1"):
+            return {"head_sha": head_sha, "head_branch": "main"}
+        if resource == "branches/main":
+            return {"commit": {"sha": main_head}}
+        if resource.startswith("contents/.github/workflows/"):
+            return {"sha": blob or AUTHORITY["workflow_blob_sha"]}
+        if resource.startswith("contents/"):
+            assert raw
+            return sources[resource.split("/", 1)[1].split("?")[0]]
+        if resource.startswith("actions/workflows/deploy.yml/runs?"):
+            assert f"head_sha={COMMIT}" in resource and "event=push" in resource and "branch=main" in resource
+            total = len(facts["runs"]) if facts["runs_total"] is None else facts["runs_total"]
+            return {"total_count": total, "workflow_runs": facts["runs"]}
+        if resource.startswith(f"actions/runs/{BUILD_RUN}/attempts/1/jobs"):
+            total = len(facts["jobs"]) if facts["jobs_total"] is None else facts["jobs_total"]
+            return {"total_count": total, "jobs": facts["jobs"]}
+        if resource.startswith("check-runs/555/annotations"):
+            return facts["notes"]
+        raise AssertionError(resource)
+
+    monkeypatch.setattr(DEPLOY, "api", api)
+    monkeypatch.setattr(DEPLOY, "inspect_container", lambda name: {"Config": {"Labels": {
+        "org.opencontainers.image.revision": "b" * 40,
+    }}})
+    return calls
+
+
+def test_resolver_derives_release_from_verified_github_facts(monkeypatch):
+    resolver_api(monkeypatch)
+    release = DEPLOY.resolve_release(AUTHORITY, {"run_id": 123, "attempt": 1})
+    DEPLOY.validate_policy(release)
+    assert release["commit"] == release["controller_commit"] == COMMIT
+    assert release["previous_commit"] == "b" * 40
+    assert release["image"] == IMAGE
+    assert (release["build_run_id"], release["build_attempt"]) == (39700000000, 1)
+    assert release["source_sha256"] == {
+        name: hashlib.sha256(name.encode()).hexdigest() for name in AUTHORITY["source_files"]
+    }
+
+
+@pytest.mark.parametrize("override", [
+    {"main_head": "e" * 40},
+    {"blob": "f" * 40},
+    {"facts": publication(runs=[])},
+    {"facts": publication(runs=[publication()["runs"][0]] * 2)},
+    {"facts": publication(runs_total=2)},
+    {"facts": publication(jobs=[])},
+    {"facts": publication(jobs_total=3)},
+    {"facts": publication(notes=[])},
+    {"facts": publication(notes=[{"title": "other", "message": "x"}])},
+    {"head_sha": "not-a-sha"},
+])
+def test_resolver_rejects_unverifiable_release(monkeypatch, override):
+    resolver_api(monkeypatch, **override)
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.resolve_release(AUTHORITY, {"run_id": 123, "attempt": 1})
+
+
+FORGERIES = [
+    {"run": {"conclusion": "failure"}},
+    {"run": {"event": "pull_request"}},
+    {"run": {"head_branch": "feature"}},
+    {"run": {"head_sha": "e" * 40}},
+    {"run": {"path": ".github/workflows/other.yml"}},
+    {"run": {"id": "39700000000"}},
+    {"run": {"head_repository": {"full_name": "attacker/abc"}}},
+    {"run": {"repository": {"full_name": "attacker/abc"}}},
+    {"job": {"conclusion": "failure"}},
+    {"job": {"name": "other-job"}},
+    {"job": {"run_id": 1}},
+    {"job": {"steps": []}},
+    {"job": {"steps": [{"name": "Publish image identity annotation", "conclusion": "success"}]}},
+    {"note": {"message": f"ghcr.io/attacker/abc@sha256:{'d' * 64} {COMMIT} actions-{BUILD_RUN}-1"}},
+    {"note": {"message": f"{IMAGE.replace('@sha256:', ':latest@sha256:')} {COMMIT} actions-{BUILD_RUN}-1"}},
+    {"note": {"message": f"{IMAGE} {'e' * 40} actions-{BUILD_RUN}-1"}},
+    {"note": {"message": f"{IMAGE} {COMMIT} actions-1-1"}},
+    {"note": {"message": f"{IMAGE} {COMMIT} actions-{BUILD_RUN}-2"}},
+    {"note": {"message": f"{IMAGE} {COMMIT}"}},
+    {"note": {"message": IMAGE}},
+]
+
+
+@pytest.mark.parametrize("change", FORGERIES)
+def test_resolver_rejects_forged_or_inconsistent_publication(monkeypatch, change):
+    resolver_api(monkeypatch, facts=publication(**change))
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.resolve_release(AUTHORITY, {"run_id": 123, "attempt": 1})
+
+
+def test_duplicate_or_conflicting_identity_annotations_are_rejected(monkeypatch):
+    note = publication()["notes"][0]
+    other = {**note, "message": f"{IMAGE.replace('d' * 64, 'e' * 64)} {COMMIT} actions-{BUILD_RUN}-1"}
+    for notes in ([note, note], [note, other], [other, note]):
+        resolver_api(monkeypatch, facts=publication(notes=notes))
+        with pytest.raises(DEPLOY.DeployError):
+            DEPLOY.resolve_release(AUTHORITY, {"run_id": 123, "attempt": 1})
+
+
+def test_full_annotation_page_is_treated_as_incomplete(monkeypatch):
+    note = publication()["notes"][0]
+    filler = [{"title": "noise", "message": "x"}] * 99
+    resolver_api(monkeypatch, facts=publication(notes=filler + [note]))
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.resolve_release(AUTHORITY, {"run_id": 123, "attempt": 1})
+
+
+def test_unrelated_annotations_do_not_block_the_genuine_identity(monkeypatch):
+    note = publication()["notes"][0]
+    resolver_api(monkeypatch, facts=publication(notes=[{"title": "Node 20", "message": "deprecated"}, note]))
+    assert DEPLOY.resolve_release(AUTHORITY, {"run_id": 123, "attempt": 1})["image"] == IMAGE
+
+
+@pytest.mark.parametrize("request_body", [
+    {"run_id": 123, "attempt": 1, "image": IMAGE}, {"run_id": "123", "attempt": 1},
+    {"run_id": 123, "attempt": True}, {"run_id": 123},
+])
+def test_resolver_accepts_only_numeric_workflow_identity(monkeypatch, request_body):
+    calls = resolver_api(monkeypatch)
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.resolve_release(AUTHORITY, request_body)
+    assert calls == []
+
+
+def test_missing_current_revision_label_blocks_release(monkeypatch):
+    resolver_api(monkeypatch)
+    monkeypatch.setattr(DEPLOY, "inspect_container", lambda name: {"Config": {"Labels": {}}})
+    release = DEPLOY.resolve_release(AUTHORITY, {"run_id": 123, "attempt": 1})
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.validate_policy(release)
+
+
+def job_condition(workflow, job):
+    """Return the raw `if:` expression of a top-level job, read from the real YAML text."""
+    lines = workflow.splitlines()
+    start = lines.index(f"  {job}:")
+    body = []
+    for line in lines[start + 1:]:
+        if line.startswith("  ") and not line.startswith("   ") and line.strip():
+            break
+        body.append(line)
+    text = "\n".join(body)
+    block = text.index("    if: >-\n") + len("    if: >-\n")
+    expression = []
+    for line in text[block:].splitlines():
+        if not line.startswith("      "):
+            break
+        expression.append(line.strip())
+    return " ".join(expression)
+
+
+def evaluate_condition(expression, context):
+    """Evaluate the GitHub expression subset used by the workflow against a context dict."""
+    def lookup(path):
+        value = context
+        for part in path.split("."):
+            value = value.get(part, "") if isinstance(value, dict) else ""
+        return value
+
+    python = re.sub(
+        r"\b(?:github|vars)(?:\.[A-Za-z_]+)+",
+        lambda match: f"lookup({match.group(0)!r})",
+        expression,
+    ).replace("&&", " and ").replace("||", " or ")
+    return bool(eval(python, {"lookup": lookup}))
+
+
+def run_event(event, **overrides):
+    """Context GitHub gives the production workflow, which always runs from the default branch head."""
+    context = {
+        "github": {
+            "repository": "sginfoocio/abc", "ref": "refs/heads/main", "sha": COMMIT,
+            "event_name": event,
+            "event": {"workflow_run": {
+                "conclusion": "success", "event": "push", "head_branch": "main", "head_sha": COMMIT,
+                "head_repository": {"full_name": "sginfoocio/abc"},
+            }},
+        },
+        "vars": {"CLOUD_AUTO_DEPLOY": "true"},
+    }
+    for path, value in overrides.items():
+        target = context
+        *parents, leaf = path.split("__")
+        for part in parents:
+            target = target[part]
+        if value is None:
+            target.pop(leaf, None)
+        else:
+            target[leaf] = value
+    return context
+
+
+PRODUCTION_WORKFLOW = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text()
+
+
+@pytest.mark.parametrize("event,overrides,expected", [
+    ("workflow_run", {}, True),
+    ("workflow_run", {"vars__CLOUD_AUTO_DEPLOY": None}, False),
+    ("workflow_run", {"vars__CLOUD_AUTO_DEPLOY": "false"}, False),
+    ("workflow_run", {"vars__CLOUD_AUTO_DEPLOY": "TRUE"}, False),
+    ("workflow_run", {"github__event__workflow_run__conclusion": "failure"}, False),
+    ("workflow_run", {"github__event__workflow_run__conclusion": "cancelled"}, False),
+    ("workflow_run", {"github__event__workflow_run__event": "pull_request"}, False),
+    ("workflow_run", {"github__event__workflow_run__head_branch": "feature"}, False),
+    ("workflow_run", {"github__event__workflow_run__head_repository": {"full_name": "fork/abc"}}, False),
+    # An old run, or the first of two consecutive merges: main has moved on.
+    ("workflow_run", {"github__event__workflow_run__head_sha": "e" * 40}, False),
+    ("workflow_run", {"github__ref": "refs/heads/feature"}, False),
+    ("workflow_run", {"github__repository": "fork/abc"}, False),
+    ("workflow_dispatch", {"vars__CLOUD_AUTO_DEPLOY": None}, True),
+    ("workflow_dispatch", {"github__ref": "refs/heads/feature"}, False),
+    ("pull_request", {}, False),
+    ("pull_request_target", {}, False),
+    ("push", {}, False),
+    ("schedule", {}, False),
+])
+def test_production_workflow_trigger_conditions_behave_as_designed(event, overrides, expected):
+    condition = job_condition(PRODUCTION_WORKFLOW, "verify-release")
+    assert evaluate_condition(condition, run_event(event, **overrides)) is expected
+
+
+def test_only_the_verified_job_can_reach_the_protected_environment():
+    lines = PRODUCTION_WORKFLOW.splitlines()
+    assert lines.count("    environment: production") == 1
+    deploy = PRODUCTION_WORKFLOW[PRODUCTION_WORKFLOW.index("  deploy-production:"):]
+    assert "    needs: verify-release" in deploy and "    environment: production" in deploy
+    assert "    if:" not in deploy
+    assert "inputs" not in PRODUCTION_WORKFLOW and "github.event.workflow_run.head" not in deploy
+
+
+def workflow_permissions(workflow):
+    """Map of scope -> level for the top-level `permissions:` block."""
+    lines = workflow.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == "permissions:")
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    scopes = {}
+    for line in lines[start + 1:]:
+        if not line.strip() or len(line) - len(line.lstrip()) <= indent:
+            break
+        scope, level = (part.strip() for part in line.split(":", 1))
+        scopes[scope] = level
+    return scopes
+
+
+def test_workflows_hold_least_privilege_permissions():
+    production = workflow_permissions(PRODUCTION_WORKFLOW)
+    build = workflow_permissions((ROOT / ".github/workflows/deploy.yml").read_text())
+    assert production == {"contents": "read", "actions": "read"}
+    assert "statuses" not in build and "checks" not in build
+    assert set(build.values()) <= {"read", "write"} and build.get("contents") == "read"
+    assert {scope for scope, level in build.items() if level == "write"} <= {"packages"}
+
+
+def test_identity_annotation_is_emitted_only_after_verification_on_main():
+    workflow = (ROOT / ".github/workflows/deploy.yml").read_text()
+    verify = workflow.index("name: Verify built artifact identity and runtime imports")
+    publish = workflow.index("name: Publish image identity annotation")
+    assert verify < publish
+    block = workflow[publish:workflow.index("      - name:", publish + 1)]
+    assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in block
+    assert "::notice title=cloud-image-identity::" in block
+    assert "GITHUB_RUN_ATTEMPT" in block and "PUBLISHED_COMMIT" in block
+
+
+def test_runner_job_only_invokes_the_root_controller():
+    workflow = PRODUCTION_WORKFLOW
+    assert workflow.count("sudo -n -- /usr/local/sbin/cloud-production-deploy") == 1
+    assert "docker " not in workflow
+    assert "permissions: {}" in workflow
+
+
+def preflight_script():
+    start = PRODUCTION_WORKFLOW.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
+    end = PRODUCTION_WORKFLOW.index("\n          PY", start)
+    return textwrap.dedent(PRODUCTION_WORKFLOW[start:end])
+
+
+def preflight_gh(facts, main_head=COMMIT):
     def gh_api(arguments, **kwargs):
-        endpoint = arguments[-1]
-        calls.append(endpoint)
-        if "/compare/" in endpoint:
-            return json.dumps({"status": comparison_status}).encode()
-        return json.dumps({
-            "conclusion": "success",
-            "event": "push",
-            "head_branch": "main",
-            "head_sha": build_sha,
-            "path": ".github/workflows/deploy.yml",
-            "run_attempt": 1,
-        }).encode()
+        endpoint = arguments[-1].split("repos/sginfoocio/abc/", 1)[1]
+        if endpoint == "branches/main":
+            return json.dumps({"commit": {"sha": main_head}}).encode()
+        if endpoint.startswith("actions/workflows/deploy.yml/runs?"):
+            runs = facts["runs"]
+            total = len(runs) if facts["runs_total"] is None else facts["runs_total"]
+            return json.dumps({"total_count": total, "workflow_runs": runs}).encode()
+        if endpoint.startswith(f"actions/runs/{BUILD_RUN}/attempts/1/jobs"):
+            jobs = facts["jobs"]
+            total = len(jobs) if facts["jobs_total"] is None else facts["jobs_total"]
+            return json.dumps({"total_count": total, "jobs": jobs}).encode()
+        if endpoint.startswith("check-runs/555/annotations"):
+            return json.dumps(facts["notes"]).encode()
+        raise AssertionError(endpoint)
+    return gh_api
 
+
+@pytest.mark.parametrize("scenario,main_head,facts", [
+    ("ok", COMMIT, publication()),
+    ("not_main_head", "e" * 40, publication()),
+    ("no_run", COMMIT, publication(runs=[])),
+    ("two_runs", COMMIT, publication(runs=[publication()["runs"][0]] * 2)),
+    ("incomplete_runs", COMMIT, publication(runs_total=2)),
+    ("failed_run", COMMIT, publication(run={"conclusion": "failure"})),
+    ("wrong_sha", COMMIT, publication(run={"head_sha": "e" * 40})),
+    ("foreign_repo", COMMIT, publication(run={"head_repository": {"full_name": "fork/abc"}})),
+    ("failed_job", COMMIT, publication(job={"conclusion": "failure"})),
+    ("incomplete_jobs", COMMIT, publication(jobs_total=2)),
+    ("no_annotation", COMMIT, publication(notes=[])),
+    ("duplicate_annotation", COMMIT, publication(notes=publication()["notes"] * 2)),
+    ("annotation_other_commit", COMMIT, publication(note={"message": f"{IMAGE} {'e' * 40} actions-{BUILD_RUN}-1"})),
+    ("annotation_other_run", COMMIT, publication(note={"message": f"{IMAGE} {COMMIT} actions-1-1"})),
+    ("annotation_mutable_tag", COMMIT, publication(note={"message": f"ghcr.io/sginfoocio/abc:latest {COMMIT} actions-{BUILD_RUN}-1"})),
+])
+def test_workflow_preflight_requires_verifiable_publication(monkeypatch, tmp_path, scenario, main_head, facts):
+    script = preflight_script()
+    compile(script, "deploy-cloud-production-preflight", "exec")
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    monkeypatch.setattr(subprocess, "check_output", gh_api)
-    if comparison_status != "ahead":
-        with pytest.raises(SystemExit, match="not a forward update"):
-            exec(script, {})
-    elif build_sha != "704edfa6a9128e50d9153ed924f5a3c6724f8ac1":
-        with pytest.raises(SystemExit, match="no matching successful main publication"):
-            exec(script, {})
-    else:
+    monkeypatch.setenv("GITHUB_SHA", COMMIT)
+    monkeypatch.setattr(subprocess, "check_output", preflight_gh(facts, main_head))
+    if scenario == "ok":
         exec(script, {})
-        assert "eb947ce7aa6f5b1fdbf8398402741e5dfeab0c5bf16205edda5adb243d1f9cc2" in summary.read_text()
-    assert len(calls) == (1 if comparison_status != "ahead" else 2)
+        assert IMAGE in summary.read_text()
+    else:
+        with pytest.raises(SystemExit):
+            exec(script, {})
+        assert not summary.exists()
+
+
+def test_workflow_preflight_fails_closed_when_github_is_unavailable(monkeypatch, tmp_path):
+    def failing(arguments, **kwargs):
+        raise subprocess.CalledProcessError(1, arguments)
+
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+    monkeypatch.setenv("GITHUB_SHA", COMMIT)
+    monkeypatch.setattr(subprocess, "check_output", failing)
+    with pytest.raises(subprocess.CalledProcessError):
+        exec(preflight_script(), {})
+    assert not (tmp_path / "summary.md").exists()
 
 
 def api_responses(policy):
@@ -169,7 +554,10 @@ def api_responses(policy):
         }],
         "environments/production": {"protection_rules": [{
             "type": "required_reviewers", "reviewers": [{"reviewer": {"login": "sginfoocio"}}],
-        }]},
+        }], "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}},
+        "environments/production/deployment-branch-policies": {
+            "total_count": 1, "branch_policies": [{"name": "main", "type": "branch"}],
+        },
         f"actions/runs/{policy['build_run_id']}/attempts/1": {
             "conclusion": "success", "event": "push", "head_branch": "main",
             "head_sha": policy["commit"], "path": ".github/workflows/deploy.yml",
@@ -344,6 +732,141 @@ def test_gate_requires_explicit_administrative_approval(monkeypatch, policy, rev
 def test_gate_accepts_no_image_paths_or_commands(policy, workflow_request):
     with pytest.raises(DEPLOY.DeployError):
         DEPLOY.validate_request(workflow_request, policy)
+
+
+@pytest.mark.parametrize("compare", ["behind", "diverged", "identical"])
+def test_gate_blocks_downgrade_divergence_and_redeploy(monkeypatch, policy, compare):
+    responses = api_responses(policy)
+    responses[f"compare/{policy['previous_commit']}...{policy['commit']}"]["status"] = compare
+    monkeypatch.setattr(DEPLOY, "api", responses.__getitem__)
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+
+
+@pytest.mark.parametrize("environment,branches", [
+    ({"deployment_branch_policy": None}, None),
+    ({"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}},
+     {"total_count": 2, "branch_policies": [{"name": "main", "type": "branch"}, {"name": "*", "type": "branch"}]}),
+    ({"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}},
+     {"total_count": 1, "branch_policies": [{"name": "v1", "type": "tag"}]}),
+    ({"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": False}}, None),
+])
+def test_gate_requires_environment_restricted_to_main(monkeypatch, policy, environment, branches):
+    responses = api_responses(policy)
+    responses["environments/production"].update(environment)
+    if branches is not None:
+        responses["environments/production/deployment-branch-policies"] = branches
+    monkeypatch.setattr(DEPLOY, "api", responses.__getitem__)
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+
+
+@pytest.mark.parametrize("prevent,accepted", [(False, False), (True, True)])
+def test_gate_enforces_self_review_prevention_when_policy_requires_it(monkeypatch, policy, prevent, accepted):
+    responses = api_responses(policy)
+    responses["environments/production"]["protection_rules"][0]["prevent_self_review"] = prevent
+    monkeypatch.setattr(DEPLOY, "api", responses.__getitem__)
+    policy["require_prevent_self_review"] = True
+    if accepted:
+        DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+    else:
+        with pytest.raises(DEPLOY.DeployError):
+            DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+
+
+def test_single_approver_exception_still_requires_every_other_gate(monkeypatch, policy):
+    policy["require_prevent_self_review"] = AUTHORITY["require_prevent_self_review"]
+    responses = api_responses(policy)
+    monkeypatch.setattr(DEPLOY, "api", responses.__getitem__)
+    DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+    for mutate in (
+        lambda r: r["actions/runs/123/approvals"].clear(),
+        lambda r: r["environments/production"].update(protection_rules=[]),
+        lambda r: r["environments/production"].update(deployment_branch_policy=None),
+        lambda r: r["actions/runs/123/attempts/1"].update(event="pull_request"),
+    ):
+        broken = api_responses(policy)
+        mutate(broken)
+        monkeypatch.setattr(DEPLOY, "api", broken.__getitem__)
+        with pytest.raises(DEPLOY.DeployError):
+            DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, limit=-1):
+        return self.body[:limit]
+
+
+def http_error(code):
+    from urllib.error import HTTPError
+    return HTTPError("https://api.github.com/x", code, "error", {}, None)
+
+
+def stub_urlopen(monkeypatch, outcomes):
+    attempts = []
+
+    def urlopen(request, timeout, context):
+        attempts.append(request.headers)
+        outcome = outcomes[min(len(attempts), len(outcomes)) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return FakeResponse(outcome)
+
+    monkeypatch.setattr(DEPLOY.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(DEPLOY.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(DEPLOY.ssl, "create_default_context", lambda cafile: None)
+    return attempts
+
+
+def test_github_api_retries_one_transient_server_error_then_succeeds(monkeypatch):
+    attempts = stub_urlopen(monkeypatch, [http_error(502), b'{"ok": true}'])
+    assert DEPLOY.api("rate_limit") == {"ok": True}
+    assert len(attempts) == 2 and attempts[0]["X-github-api-version"] == "2022-11-28"
+
+
+@pytest.mark.parametrize("code", [401, 403, 404, 429])
+def test_github_api_fails_closed_without_retrying_client_errors(monkeypatch, code):
+    attempts = stub_urlopen(monkeypatch, [http_error(code)])
+    with pytest.raises(Exception) as caught:
+        DEPLOY.api("rate_limit")
+    assert getattr(caught.value, "code", None) == code and len(attempts) == 1
+
+
+def test_github_api_gives_up_after_a_second_server_error(monkeypatch):
+    attempts = stub_urlopen(monkeypatch, [http_error(503)])
+    with pytest.raises(Exception):
+        DEPLOY.api("rate_limit")
+    assert len(attempts) == 2
+
+
+def test_github_api_rejects_oversized_and_malformed_responses(monkeypatch):
+    stub_urlopen(monkeypatch, [b" " * (DEPLOY.MAX_JSON_BYTES + 1)])
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.api("actions/runs/1")
+    stub_urlopen(monkeypatch, [b'{"truncated": '])
+    with pytest.raises(ValueError):
+        DEPLOY.api("actions/runs/1")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="flock and root-owned state are POSIX only")
+def test_concurrent_deployments_are_mutually_exclusive(monkeypatch, tmp_path):
+    monkeypatch.setattr(DEPLOY, "STATE", tmp_path)
+    monkeypatch.setattr(DEPLOY, "secure_path", lambda path: None)
+    with DEPLOY.lock("transaction.lock"):
+        with pytest.raises(DEPLOY.DeployError):
+            with DEPLOY.lock("transaction.lock"):
+                raise AssertionError("second deployment must not start")
+    with DEPLOY.lock("transaction.lock"):
+        pass
 
 
 def test_only_app_image_changes_without_mutating_other_config(config, policy):
@@ -586,8 +1109,7 @@ def test_workflow_has_no_arbitrary_input_checkout_or_token_in_privileged_job():
     workflow = (ROOT / ".github/workflows/deploy-cloud-production.yml").read_text()
     assert "on:\n  workflow_dispatch:\n" in workflow
     assert "inputs:" not in workflow and "pull_request:" not in workflow
-    assert 'policy["release_status"] != "approved"' in workflow
-    assert 'comparison["status"] != "ahead"' in workflow
+    assert "comparison" not in workflow  # ancestry is verified by the root controller
     job = workflow.split("  deploy-production:\n", 1)[1]
     assert "    environment: production\n" in job
     assert "    permissions: {}\n" in job
@@ -615,6 +1137,9 @@ def test_runner_hook_rejects_other_jobs_and_pull_requests():
             "sginfoocio/abc/.github/workflows/deploy-cloud-production.yml@refs/heads/main",
     }
     assert hook.allowed(environment)
+    assert hook.allowed({**environment, "GITHUB_EVENT_NAME": "workflow_run"})
+    for event in ("push", "pull_request", "schedule", "workflow_call"):
+        assert not hook.allowed({**environment, "GITHUB_EVENT_NAME": event})
     for key in environment:
         assert not hook.allowed({**environment, key: "untrusted"})
     assert not hook.allowed({})

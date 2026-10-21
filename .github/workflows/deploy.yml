@@ -175,6 +175,15 @@ jobs:
             echo 'Production was NOT changed. Use Deploy Cloud Production and approve production.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Publish image identity annotation
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          PUBLISHED_COMMIT: ${{ steps.provenance.outputs.commit }}
+          PUBLISHED_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          case "$PUBLISHED_DIGEST" in sha256:[0-9a-f]*) ;; *) echo "Invalid digest" >&2; exit 1;; esac
+          echo "::notice title=cloud-image-identity::${REGISTRY}/${IMAGE_NAME}@${PUBLISHED_DIGEST} ${PUBLISHED_COMMIT} actions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
   tests:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'push'

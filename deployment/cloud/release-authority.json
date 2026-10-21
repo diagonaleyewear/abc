@@ -1,0 +1,22 @@
+{
+  "authority_version": 1,
+  "repository": "sginfoocio/abc",
+  "runner_name": "cloud-production-s2026",
+  "image_repository": "ghcr.io/sginfoocio/abc",
+  "workflow_blob_sha": "d91848bfbde7b1568441da4f579bcbda85b06794",
+  "require_prevent_self_review": false,
+  "single_approver_exception": {
+    "scope": "self-review-only",
+    "approver": "sginfoocio",
+    "accepted_by": "sginfoocio",
+    "note": "Single responsible approver; production approval stays mandatory but gives no author/approver separation."
+  },
+  "reviewers": [
+    "sginfoocio"
+  ],
+  "source_files": [
+    "app_enhanced.py",
+    "app_exports.py",
+    "transform_luxottica_masterdata.py"
+  ]
+}
