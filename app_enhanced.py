@@ -497,6 +497,11 @@ def _get_remember_days() -> int:
 
 def _make_auth_token(username: str, secret: str, password: str, days: int) -> str:
     """Genera un token firmado con expiración para recordar la sesión."""
+    if len(secret) < AUTH_COOKIE_SECRET_MIN_LENGTH:
+        raise ValueError(
+            f"{AUTH_COOKIE_SECRET_ENV} debe tener al menos "
+            f"{AUTH_COOKIE_SECRET_MIN_LENGTH} caracteres."
+        )
     signing_key = derive_session_signing_key(secret, username, password)
     return create_auth_token(username, signing_key, days)
 
@@ -600,7 +605,7 @@ def _render_login() -> None:
                     existing_claims.session_id,
                     existing_claims.expires_at,
                 )
-            if recordarme:
+            if recordarme and can_remember:
                 token = _make_auth_token(
                     username,
                     cookie_secret,

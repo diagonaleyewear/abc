@@ -17,8 +17,8 @@ La aplicación admite dos perfiles:
 - **Administrador**: credenciales `APP_USERNAME` y `APP_PASSWORD`; acceso a
   todas las áreas.
 - **Master Data**: credenciales `MASTERDATA_USERNAME` y
-  `MASTERDATA_PASSWORD`; acceso únicamente a Importador Masterdata,
-  Diccionario y Dry-run Odoo.
+  `MASTERDATA_PASSWORD`; acceso a Importador Masterdata, Diccionario y Dry-run
+  Odoo, además de la biblioteca Kering en modo de consulta y descarga local.
 
 En Docker, las cuatro variables deben estar definidas en el `.env` del host.
 No se guardan contraseñas en el repositorio:
@@ -30,9 +30,28 @@ MASTERDATA_USERNAME=usuario_masterdata
 MASTERDATA_PASSWORD=********
 ```
 
-El usuario limitado no verá en el menú Análisis ABC, Alertas ni Configuración.
-Si intenta acceder directamente a una página restringida, la aplicación lo
-bloquea igualmente.
+Las sesiones recordadas requieren además `AUTH_COOKIE_SECRET`, independiente
+de las contraseñas y con al menos 32 caracteres. Genera un valor aleatorio
+criptográficamente seguro (por ejemplo, 32 bytes aleatorios codificados como
+hexadecimal) y guárdalo únicamente en el gestor de secretos o `.env` protegido
+del host. Si falta o no alcanza la longitud mínima, el inicio de sesión normal
+sigue disponible, pero no se emiten cookies de sesión recordada; no se usa
+`APP_PASSWORD` como alternativa. La revocación y el límite de intentos se
+guardan en el SQLite persistente configurado por `AUTH_STATE_PATH`. Al desplegar
+esta política, las cookies antiguas firmadas con `APP_PASSWORD` o con un secreto
+inferior a 32 caracteres dejan de ser válidas y el usuario debe iniciar sesión
+de nuevo; no se conserva una sesión recordada insegura.
+
+En la biblioteca Kering, Master Data puede buscar fotografías y pedidos
+almacenados localmente por EAN, modelo o pedido y descargar las fotografías
+disponibles en ZIP. Esta vista no consulta Odoo ni Kering y no permite procesar
+pedidos ni administrar la configuración Kering; esas operaciones requieren el
+rol administrador.
+
+El usuario limitado no verá en el menú Análisis ABC, Alertas, Configuración ni
+las operaciones administrativas de los repositorios. Si intenta acceder
+directamente a una página u operación restringida, la aplicación la bloquea
+igualmente.
 
 ## Entradas
 - Archivo Excel de Luxottica.
