@@ -19,6 +19,7 @@ from kering_portal import KeringPortal
 from kering_jobs import prepare_selection, make_loader, schedule_status
 from image_repository import ImageRepository
 from image_exports import order_export_plan, prepare_order_zip, repository_signature
+from cloud_design import page_title
 from image_thumbnails import ThumbnailCache, validate_visible
 from repository_storage import check_image_root
 
@@ -302,7 +303,10 @@ def _render_progress(run_id):
 
 def render_kering_page(engine) -> None:
     library_only()
-    st.title("Biblioteca de fotografías de producto")
+    page_title(
+        "Biblioteca de fotografías de producto",
+        "Busca por EAN, modelo o pedido y descarga las fotografías ya guardadas.",
+    )
     try:
         batch = service()
     except (OSError, ValueError, RuntimeError, sqlite3.Error):

@@ -8,6 +8,7 @@ from decimal import Decimal
 import streamlit as st
 
 from adyen_reconciliation import ReportError, concept, decimal_text, process_reports
+from cloud_design import page_title
 
 
 RESULT_KEY = "adyen_reconciliation_result"
@@ -31,7 +32,7 @@ def render_reconciliation_page() -> None:
         st.error("Este apartado requiere un usuario administrador.")
         st.stop()
 
-    st.title("Conciliación Odoo")
+    page_title("Conciliación Odoo")
     adyen = st.file_uploader(
         "Informe de liquidación Adyen", type=["xls", "xlsx", "csv"],
         key="adyen_settlement_upload", on_change=clear_results,

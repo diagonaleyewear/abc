@@ -241,3 +241,9 @@ def render(markup: str) -> None:
     import streamlit as st
 
     st.html(markup)
+
+
+def page_title(title: str, subtitle: str = "", stats: tuple[tuple[str, str], ...] = ()) -> None:
+    """Cabecera de página común: sustituye a `st.title` con el mismo `h1` del sistema de diseño."""
+    inject_styles()
+    render(page_header_html(title, subtitle, stats))
