@@ -79,14 +79,47 @@ Migration order:
    it is kept for recovery).
 
 Administrator checks (not verifiable without admin access, so **not** assumed):
-branch protection on `main` (required `tests`/`build-and-push`, independent
-review, no force pushes); `production` requires reviewers; enabling
-"prevent self-review" (needs a second reviewer, then set
-`require_prevent_self_review` to `true` in the authority and reinstall); Actions
-permissions of the repository; restricting who can write packages in GHCR.
-Verified publicly on 2026-10-22: `production` requires reviewer `sginfoocio`
-only (self-review currently allowed), admins cannot bypass, and deployments are
-limited to the `main` branch.
+required status checks and independent review on `main`; Actions permissions of
+the repository; restricting who can write packages in GHCR; runner group
+restriction of the production runner to this repository/workflow.
+
+Protection status, read from the public GitHub API on 2026-10-21:
+
+| Item | Status |
+|---|---|
+| `production` requires reviewer `sginfoocio` only | Verified |
+| `production` admin bypass | Verified: `can_admins_bypass=false` |
+| `production` deployments limited to the `main` branch (custom branch policy `main`) | Verified |
+| `production` `prevent_self_review` | Verified: `false` (accepted exception, below) |
+| Branch protection / rulesets on `main` | **Verified absent**: the branch reports `protected=false` with no required checks and no rules. Not configured. |
+| Required reviews and required CI checks on `main` | **Not enforced** (follows from the above) |
+| Repository Actions permissions, GHCR package write access, runner group | Not verifiable without admin access |
+
+Because `main` is unprotected, `CLOUD_AUTO_DEPLOY` must stay off until an
+administrator enables at least required status checks (`tests`,
+`build-and-push`) and a pull-request requirement on `main`. Until then the only
+human gate is the `production` approval.
+
+### Single-approver exception (accepted organisational risk)
+
+The organisation cannot provide a second production reviewer. The authority
+therefore declares an explicit, narrowly scoped exception
+(`single_approver_exception` with `require_prevent_self_review=false`). The
+controller accepts it only when `scope` is `self-review-only`, `reviewers` is
+exactly the named approver and the exception is accepted by that same approver;
+any other shape, a second reviewer without the exception, or the exception
+combined with `require_prevent_self_review=true` fails closed. The exception
+relaxes nothing else: the `production` approval, the environment protection,
+the `main`-only deployment restriction, run/commit/digest provenance, source
+hashes, the forward-only check, locking, health check and rollback are all still
+required (see `tests/test_cloud_production_deploy.py`).
+
+This configuration gives **no separation between author and approver**: the same
+person can merge, trigger and approve. It is an accepted organisational risk,
+not an independent review. Whether GitHub lets the triggering user approve their
+own deployment under `prevent_self_review=false` is **not yet verified**; it is
+checked during the manual validation run (step 2 above). If GitHub refuses, set
+nothing to auto and do not weaken the controller.
 
 If `deploy-cloud-production.yml` is ever edited, its new blob SHA
 (`git rev-parse HEAD:.github/workflows/deploy-cloud-production.yml`) must be
@@ -133,8 +166,11 @@ per-release `approved-release.json`.
 - Trust in `deploy.yml` (what gets built) rests on branch protection and review.
 - The GitHub API is queried unauthenticated; rate limiting and incomplete
   responses fail closed.
-- With a single reviewer, that person approves their own production deployments;
-  add a second reviewer and enable prevent-self-review to get independent approval.
+- With a single reviewer, the same person authors, merges and approves
+  production deployments (accepted exception above). If a second reviewer ever
+  exists, enable prevent-self-review and set `require_prevent_self_review=true`
+  (removing the exception block) in the authority, then reinstall it.
+- `main` currently has no branch protection (see the table above).
 - `workflow_run` executes the workflow of the default-branch head; the controller
   and the workflow condition both require the triggering commit to equal that
   head, so reruns of old workflows and the first of two consecutive merges are

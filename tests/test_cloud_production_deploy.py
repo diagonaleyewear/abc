@@ -134,6 +134,34 @@ def test_authority_rejects_untrusted_values(key, value):
         DEPLOY.validate_authority({**AUTHORITY, key: value})
 
 
+def test_checked_in_authority_declares_the_single_approver_exception_explicitly():
+    assert AUTHORITY["reviewers"] == ["sginfoocio"]
+    assert AUTHORITY["require_prevent_self_review"] is False
+    assert AUTHORITY["single_approver_exception"]["scope"] == "self-review-only"
+
+
+@pytest.mark.parametrize("change", [
+    {"single_approver_exception": None},
+    {"single_approver_exception": {}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "scope": "all-checks"}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "accepted_by": "someone"}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "approver": "other"}},
+    {"single_approver_exception": {**AUTHORITY["single_approver_exception"], "extra": True}},
+    {"reviewers": ["sginfoocio", "second"]},
+    {"require_prevent_self_review": "false"},
+    {"require_prevent_self_review": True},
+])
+def test_self_review_is_tolerated_only_through_the_exact_exception(change):
+    candidate = {**AUTHORITY, **change}
+    with pytest.raises(DEPLOY.DeployError):
+        DEPLOY.validate_authority(candidate)
+
+
+def test_authority_with_prevent_self_review_needs_no_exception():
+    candidate = {key: value for key, value in AUTHORITY.items() if key != "single_approver_exception"}
+    DEPLOY.validate_authority({**candidate, "require_prevent_self_review": True, "reviewers": ["a", "b"]})
+
+
 BUILD_RUN = 39700000000
 
 
@@ -742,6 +770,24 @@ def test_gate_enforces_self_review_prevention_when_policy_requires_it(monkeypatc
     if accepted:
         DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
     else:
+        with pytest.raises(DEPLOY.DeployError):
+            DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+
+
+def test_single_approver_exception_still_requires_every_other_gate(monkeypatch, policy):
+    policy["require_prevent_self_review"] = AUTHORITY["require_prevent_self_review"]
+    responses = api_responses(policy)
+    monkeypatch.setattr(DEPLOY, "api", responses.__getitem__)
+    DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
+    for mutate in (
+        lambda r: r["actions/runs/123/approvals"].clear(),
+        lambda r: r["environments/production"].update(protection_rules=[]),
+        lambda r: r["environments/production"].update(deployment_branch_policy=None),
+        lambda r: r["actions/runs/123/attempts/1"].update(event="pull_request"),
+    ):
+        broken = api_responses(policy)
+        mutate(broken)
+        monkeypatch.setattr(DEPLOY, "api", broken.__getitem__)
         with pytest.raises(DEPLOY.DeployError):
             DEPLOY.validate_request({"run_id": 123, "attempt": 1}, policy)
 

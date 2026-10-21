@@ -167,6 +167,21 @@ def validate_authority(authority):
         or len(authority["source_files"]) != len(SOURCE_FILES)
     ):
         raise DeployError("Invalid release authority")
+    exception = authority.get("single_approver_exception")
+    if authority["require_prevent_self_review"]:
+        if exception is not None:
+            raise DeployError("Single-approver exception conflicts with required self-review prevention")
+    elif not (
+        # Explicit, narrowly scoped exception: only self-review is tolerated, for one named approver.
+        isinstance(exception, dict)
+        and set(exception) == {"scope", "approver", "accepted_by", "note"}
+        and exception["scope"] == "self-review-only"
+        and isinstance(exception["approver"], str) and exception["approver"]
+        and reviewers == [exception["approver"]]
+        and exception["accepted_by"] == exception["approver"]
+        and isinstance(exception["note"], str) and exception["note"]
+    ):
+        raise DeployError("Self-review is only allowed through an explicit single-approver exception")
 
 
 def published_image(commit):
