@@ -184,10 +184,6 @@ jobs:
           case "$PUBLISHED_DIGEST" in sha256:[0-9a-f]*) ;; *) echo "Invalid digest" >&2; exit 1;; esac
           echo "::notice title=cloud-image-identity::${REGISTRY}/${IMAGE_NAME}@${PUBLISHED_DIGEST} ${PUBLISHED_COMMIT} actions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
-      - name: TEMP annotation channel probe
-        if: github.event_name == 'pull_request'
-        run: echo "::notice title=cloud-image-identity-probe::probe ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
   tests:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'push'
