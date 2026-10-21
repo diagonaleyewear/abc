@@ -15,6 +15,7 @@ import zipfile
 from typing import Any, Callable
 from collections.abc import Iterable
 from urllib.parse import unquote, urlparse
+import logging
 
 import requests
 from sqlalchemy import bindparam, create_engine, text
@@ -37,6 +38,7 @@ M365_MAILBOX_ENV = "M365_MAILBOX"
 M365_DOWNLOAD_ROOT_ENV = "M365_DOWNLOAD_ROOT"
 GRAPH_MAX_ATTEMPTS = 4
 GRAPH_MAX_PAGES = 1000
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -116,6 +118,8 @@ def _sleep_with_checkpoints(seconds: float) -> None:
 def _request_with_retries(
     request_method: Callable[..., requests.Response],
     url: str,
+    *,
+    operation: str = "Graph request",
     **kwargs: Any,
 ) -> requests.Response:
     for attempt in range(GRAPH_MAX_ATTEMPTS):
@@ -123,12 +127,25 @@ def _request_with_retries(
         try:
             response = request_method(url, **kwargs)
         except requests.RequestException:
+            LOGGER.warning(
+                "Graph transport error operation=%s attempt=%d/%d",
+                operation,
+                attempt + 1,
+                GRAPH_MAX_ATTEMPTS,
+            )
             if attempt + 1 >= GRAPH_MAX_ATTEMPTS:
                 raise
             _sleep_with_checkpoints(min(2**attempt, 30))
             continue
 
         if response.status_code in {408, 429, 500, 502, 503, 504}:
+            LOGGER.warning(
+                "Graph transient response operation=%s attempt=%d/%d status=%d",
+                operation,
+                attempt + 1,
+                GRAPH_MAX_ATTEMPTS,
+                response.status_code,
+            )
             if attempt + 1 >= GRAPH_MAX_ATTEMPTS:
                 try:
                     response.raise_for_status()
@@ -142,6 +159,13 @@ def _request_with_retries(
         try:
             response.raise_for_status()
         except requests.HTTPError:
+            LOGGER.error(
+                "Graph permanent response operation=%s attempt=%d/%d status=%d",
+                operation,
+                attempt + 1,
+                GRAPH_MAX_ATTEMPTS,
+                response.status_code,
+            )
             response.close()
             raise
         return response
@@ -160,6 +184,8 @@ def _list_graph_collection(
     token: str,
     first_url: str,
     timeout: int = 30,
+    *,
+    operation: str = "Graph collection",
 ) -> list[dict[str, Any]]:
     headers = _graph_headers(token)
     values: list[dict[str, Any]] = []
@@ -180,16 +206,21 @@ def _list_graph_collection(
             next_url,
             headers=headers,
             timeout=request_timeout(timeout),
+            operation=operation,
         )) as response:
             payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("La respuesta de Microsoft Graph tiene un formato inválido")
-        page_values = payload.get("value", [])
-        if not isinstance(page_values, list):
+        if "value" not in payload or not isinstance(payload["value"], list):
             raise RuntimeError("La colección de Microsoft Graph tiene un formato inválido")
+        page_values = payload["value"]
+        if any(not isinstance(item, dict) for item in page_values):
+            raise RuntimeError("La colección de Microsoft Graph contiene un elemento inválido")
         values.extend(page_values)
         next_url = payload.get("@odata.nextLink")
-        if next_url is not None and not isinstance(next_url, str):
+        if next_url is not None and (
+            not isinstance(next_url, str) or not next_url.strip()
+        ):
             raise RuntimeError("Microsoft Graph devolvió un @odata.nextLink inválido")
 
     return values
@@ -207,6 +238,7 @@ def _get_access_token(config: M365Config) -> str:
             "grant_type": "client_credentials",
         },
         timeout=request_timeout(30),
+        operation="access token",
     )) as response:
         response.raise_for_status()
         payload = response.json()
@@ -225,7 +257,9 @@ def _inbox_messages_url(mailbox: str, top: int) -> str:
 
 
 def _list_inbox_messages(token: str, mailbox: str, top: int) -> list[dict[str, Any]]:
-    return _list_graph_collection(token, _inbox_messages_url(mailbox, top))
+    return _list_graph_collection(
+        token, _inbox_messages_url(mailbox, top), operation="inbox messages"
+    )
 
 
 def _attachments_url(mailbox: str, message_id: str) -> str:
@@ -245,7 +279,11 @@ def _message_body_url(mailbox: str, message_id: str) -> str:
 
 
 def _list_attachments(token: str, mailbox: str, message_id: str) -> list[dict[str, Any]]:
-    return _list_graph_collection(token, _attachments_url(mailbox, message_id))
+    return _list_graph_collection(
+        token,
+        _attachments_url(mailbox, message_id),
+        operation=f"attachments message_id={message_id}",
+    )
 
 
 def _get_message_body(token: str, mailbox: str, message_id: str) -> str:
@@ -255,6 +293,7 @@ def _get_message_body(token: str, mailbox: str, message_id: str) -> str:
         _message_body_url(mailbox, message_id),
         headers=_graph_headers(token),
         timeout=request_timeout(30),
+        operation=f"message body message_id={message_id}",
     )) as response:
         return response.json().get("body", {}).get("content", "")
 
@@ -297,6 +336,7 @@ def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
         headers={**_graph_headers(token), "Content-Type": "application/json"},
         json={"isRead": True},
         timeout=request_timeout(30),
+        operation=f"mark read message_id={message_id}",
     )) as response:
         response.raise_for_status()
 
@@ -687,7 +727,9 @@ def _save_streamed_attachment(chunks: Iterable[bytes], target_dir: Path, file_na
             staged.unlink()
 
 
-def _download_zip_link(url: str, target_dir: Path) -> Path | None:
+def _download_zip_link(
+    url: str, target_dir: Path, *, message_id: str = "unknown"
+) -> Path | None:
     checkpoint()
     with closing(_request_with_retries(
         requests.get,
@@ -695,6 +737,7 @@ def _download_zip_link(url: str, target_dir: Path) -> Path | None:
         allow_redirects=True,
         stream=True,
         timeout=request_timeout(120),
+        operation=f"image ZIP message_id={message_id}",
     )) as response:
         final_path = unquote(urlparse(response.url).path)
         if not final_path.lower().endswith(".zip"):
@@ -825,7 +868,9 @@ def _download_luxoptica_mail_attachments(
             links = _find_download_links(body)
             for link in links:
                 checkpoint()
-                archive_path = _download_zip_link(link, target_dir)
+                archive_path = _download_zip_link(
+                    link, target_dir, message_id=message_id
+                )
                 if archive_path is None:
                     continue
                 saved_paths.append(str(archive_path))
@@ -871,6 +916,7 @@ def _download_luxoptica_mail_attachments(
                 headers=_graph_headers(token),
                 timeout=request_timeout(60),
                 stream=True,
+                operation=f"attachment message_id={message_id} attachment_id={att_id}",
             )) as value_resp:
                 content_length = int(value_resp.headers.get("content-length", "0") or 0)
                 if content_length > archive_limit():
