@@ -54,7 +54,7 @@ def verify_auth_token(
     if not hmac.compare_digest(username, expected_user):
         return None
     current_time = int(time.time()) if now is None else int(now)
-    if expires_at < current_time:
+    if expires_at <= current_time:
         return None
     return AuthTokenClaims(username, expires_at, session_id)
 

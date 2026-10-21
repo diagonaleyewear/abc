@@ -37,7 +37,10 @@ hexadecimal) y guárdalo únicamente en el gestor de secretos o `.env` protegido
 del host. Si falta o no alcanza la longitud mínima, el inicio de sesión normal
 sigue disponible, pero no se emiten cookies de sesión recordada; no se usa
 `APP_PASSWORD` como alternativa. La revocación y el límite de intentos se
-guardan en el SQLite persistente configurado por `AUTH_STATE_PATH`.
+guardan en el SQLite persistente configurado por `AUTH_STATE_PATH`. Al desplegar
+esta política, las cookies antiguas firmadas con `APP_PASSWORD` o con un secreto
+inferior a 32 caracteres dejan de ser válidas y el usuario debe iniciar sesión
+de nuevo; no se conserva una sesión recordada insegura.
 
 El usuario limitado no verá en el menú Análisis ABC, Alertas ni Configuración.
 Si intenta acceder directamente a una página restringida, la aplicación lo
