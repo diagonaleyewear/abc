@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from check_pedidos_vigilados import find_matching_orders
+from cloud_design import page_title
 from db_config import load_env_file
 from graph_mail_downloader import send_alert_email
 from order_alerts import (
@@ -196,7 +197,7 @@ def render_alerts_page(
 ) -> None:
     render_sidebar_shell("Alerta Pedidos")
     require_admin_access()
-    st.title("Alerta de Pedidos de Clientes Vigilados")
+    page_title("Alerta de Pedidos de Clientes Vigilados")
     st.caption(
         "Mantén aquí la lista de clientes a vigilar. Se busca coincidencia en el nombre del cliente "
         "o en la dirección de entrega. Cuando se detecte un pedido, se enviará un email de alerta."

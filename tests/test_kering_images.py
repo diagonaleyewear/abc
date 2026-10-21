@@ -752,7 +752,8 @@ def test_orders_and_history_ui_are_offline(tmp_path, monkeypatch):
     app = AppTest.from_string("import streamlit as st\nfrom kering_images_ui import render_kering_page\nst.session_state['auth_role']='admin'\nrender_kering_page(None)")
     app.run()
     assert not app.exception
-    assert app.title[0].value == "Biblioteca de fotografías de producto"
+    assert any("Biblioteca de fotografías de producto" in item.value and "cd-header__title" in item.value
+               for item in app.get("html"))
     assert not app.get("download_button")
     next(
         button

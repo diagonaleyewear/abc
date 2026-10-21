@@ -215,7 +215,7 @@ def save_masterdata_dictionary(rules: list[dict[str, str]]) -> None:
 
 def render_master_dictionary_page() -> None:
     render_sidebar_shell("Master Data")
-    st.title("Diccionario Masterdata")
+    cloud_page_title("Diccionario Masterdata")
     st.caption("Define transformaciones personalizadas por columna y valor exacto.")
     st.info("Las columnas del Excel origen son fijas y se cargan automáticamente.")
     source_columns = sorted(EXPECTED_OUTPUT_COLUMNS, key=str.casefold)
@@ -809,7 +809,7 @@ def render_odoo_reconciliation_page() -> None:
 def render_settings_page() -> None:
     render_sidebar_shell("Configuración")
     require_admin_access()
-    st.title("Configuración")
+    cloud_page_title("Configuración")
     render_kering_settings(get_db_engine)
     st.divider()
     st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")
@@ -911,7 +911,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
         abc_page = "📊 Inicio"
 
     if abc_page == "📊 Inicio":
-        st.title("ABC")
+        cloud_page_title("ABC")
         st.markdown(
             """
             ### Bienvenido al sistema ABCD
@@ -978,7 +978,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
         st.dataframe(summary, use_container_width=True)
 
     elif abc_page == "🔍 Buscar Producto":
-        st.title("Buscar Producto")
+        cloud_page_title("Buscar Producto")
         with st.spinner("Cargando datos..."):
             df = load_data_cached()
             df_classified = run_abcd_engine(df.copy())
@@ -1046,7 +1046,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
                 st.dataframe(results[display_cols].head(10), use_container_width=True, hide_index=True)
 
     elif abc_page == "📈 Reportes ABCD":
-        st.title("Reportes ABCD")
+        cloud_page_title("Reportes ABCD")
         with st.spinner("Cargando datos..."):
             df = load_data_cached()
             df_classified = run_abcd_engine(df.copy())
@@ -1105,7 +1105,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
                 )
 
     elif abc_page == "📅 Histórico Semanal":
-        st.title("Histórico semanal ABCD")
+        cloud_page_title("Histórico semanal ABCD")
         st.caption("Guarda una foto semanal del análisis ABCD y consulta snapshots anteriores.")
         engine = get_db_engine()
 
@@ -1211,7 +1211,7 @@ def render_abc_page(abc_page: str | None = None) -> None:
             )
 
     else:
-        st.title("Análisis Detallado de Productos")
+        cloud_page_title("Análisis Detallado de Productos")
         with st.spinner("Cargando datos..."):
             df = load_data_cached()
             df_classified = run_abcd_engine(df.copy())
@@ -1336,7 +1336,7 @@ def render_luxoptica_pending_panel() -> None:
 def render_luxoptica_pending_page() -> None:
     render_sidebar_shell("Repositorio de imágenes")
     require_admin_access()
-    st.title("Pendiente Luxoptica")
+    cloud_page_title("Pendiente Luxoptica")
     st.caption("Revisa y procesa manualmente las copias pendientes para Farfetch y Miinto.")
     render_luxoptica_pending_panel()
     render_footer()
@@ -1351,7 +1351,7 @@ def render_master_page(master_page: str | None = None) -> None:
     available_files = sorted(masterdata_dir.glob("*transformado.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
 
     if master_page == "📥 Importador Masterdata":
-        st.title("Importador Masterdata")
+        cloud_page_title("Importador Masterdata")
         st.caption("Flujo web: cargar Excel origen, transformar, revisar advertencias y descargar el MASTERDATA.")
         dictionary_rules = load_masterdata_dictionary()
         if dictionary_rules:
@@ -1682,7 +1682,7 @@ def render_master_page(master_page: str | None = None) -> None:
             render_luxoptica_pending_panel()
 
     else:
-        st.title("Dry-run Odoo")
+        cloud_page_title("Dry-run Odoo")
         st.caption("Usa un MASTERDATA ya transformado para clasificar altas y actualizaciones sin grabar nada.")
         output_df = st.session_state.get("masterdata_transform_output_df")
         source_name = st.session_state.get("masterdata_transform_source_name", "origen.xlsx")
@@ -1867,7 +1867,7 @@ def _render_order_alert_service_status() -> None:
 def render_alerta_pedidos_page() -> None:
     render_sidebar_shell("Alerta Pedidos")
     require_admin_access()
-    st.title("Alerta de Pedidos de Clientes Vigilados")
+    cloud_page_title("Alerta de Pedidos de Clientes Vigilados")
     st.caption(
         "Mantén aquí la lista de clientes a vigilar. Se busca coincidencia en el nombre del cliente "
         "o en la dirección de entrega. Cuando se detecte un pedido, se enviará un email de alerta."
@@ -2063,5 +2063,6 @@ navigation = build_navigation(
 from kering_images_ui import page_transition
 page_transition(st.session_state, navigation.url_path)
 from cloud_dashboard import dashboard_transition
+from cloud_design import page_title as cloud_page_title
 dashboard_transition(st.session_state, navigation.url_path)
 navigation.run()
