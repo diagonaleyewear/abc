@@ -384,9 +384,14 @@ class ImageStore:
                 ORDER BY started DESC, order_id
             """)]
 
-    def index_local_order_search(
+    def local_order_matches(
         self, query: str, *, role: str | None
-    ) -> None:
+    ) -> list[tuple[str, dict, set[str]]]:
+        """Pedidos del historial local cuyo numero contiene la consulta.
+
+        Devuelve (numero, snapshot, EAN validos) del intento mas reciente
+        primero; no consulta Odoo ni el portal Kering.
+        """
         if role not in {"admin", "masterdata"}:
             raise PermissionError(
                 "La busqueda de pedidos requiere acceso a la biblioteca"
@@ -404,10 +409,11 @@ class ImageStore:
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT number, snapshot FROM attempts
-                   WHERE casefold(number) LIKE ? ESCAPE '\\'""",
+                   WHERE casefold(number) LIKE ? ESCAPE '\\'
+                   ORDER BY attempt DESC, run_id DESC""",
                 (pattern,),
             ).fetchall()
-        matches = {}
+        matches = []
         for row in rows:
             if not isinstance(row["snapshot"], str):
                 raise ValueError("Snapshot de pedido local invalido")
@@ -433,8 +439,26 @@ class ImageStore:
                     and len(ean) <= 20
                 ):
                     eans.add(ean)
+            matches.append((str(row["number"]), order, eans))
+        return matches
+
+    def search_local_orders(
+        self, query: str, *, role: str | None, limit: int = 5
+    ) -> list[dict]:
+        """Un pedido por identificador (ultimo intento) para exportar su ZIP."""
+        orders = {}
+        for _, order, eans in self.local_order_matches(query, role=role):
+            if eans and order.get("id") is not None:
+                orders.setdefault(str(order["id"]), order)
+        return list(orders.values())[:limit]
+
+    def index_local_order_search(
+        self, query: str, *, role: str | None
+    ) -> None:
+        matches = {}
+        for number, _, eans in self.local_order_matches(query, role=role):
             if eans:
-                matches.setdefault(str(row["number"]), set()).update(eans)
+                matches.setdefault(number, set()).update(eans)
         for number, eans in matches.items():
             self.repository.associate_order("Kering", number, list(eans))
 

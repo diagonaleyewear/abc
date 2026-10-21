@@ -747,7 +747,16 @@ def render_order_zip(store, order, key):
     st.caption(f"{count} fotos registradas; integridad y contenido se comprueban al preparar ZIP.")
     if partial:
         st.warning("Contenido parcial segun catalogo: faltan vistas requeridas o hay lineas sin EAN.")
-        st.write({ean: missing for ean, missing in products.items() if missing})
+        no_photos = [ean for ean in products if not any(
+            record.pixels for record in store.repository.catalog_records(ean))]
+        if no_photos:
+            st.write("EAN sin fotografias: " + ", ".join(no_photos))
+        for ean, missing in products.items():
+            if missing and ean not in no_photos:
+                st.write(f"{ean}: vistas pendientes {', '.join(missing)}")
+        unlabeled = sum(1 for line in order["lines"] if not line["ean"])
+        if unlabeled:
+            st.write(f"Lineas sin EAN: {unlabeled}")
     partial_allowed = st.checkbox("Permitir exportacion parcial", key=f"partial-{key}")
     cached = st.session_state.get("kering_prepared_zip")
     catalog_signature = json.dumps([
@@ -1018,6 +1027,7 @@ def render_image_search(store):
         st.info("Busca en las fotografías y pedidos almacenados localmente.")
         return
     page = st.session_state.get("kering_library_page", 0)
+    render_matching_orders(store, query)
     try:
         page_results = store.repository.search_eans(
             query, limit=13, offset=page * 12
@@ -1124,6 +1134,28 @@ def render_image_search(store):
         key="kering_library_selected",
     )
     render_product_library(store, ean)
+
+
+def render_matching_orders(store, query):
+    try:
+        orders = store.search_local_orders(
+            query, role=st.session_state.get("auth_role")
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, PermissionError) as error:
+        st.error(f"No se pudieron consultar los pedidos locales: {error}")
+        return
+    if not orders:
+        return
+    st.subheader("Pedidos coincidentes")
+    st.caption(
+        "Fotos disponibles ahora en el repositorio para los EAN del pedido; "
+        "no se consulta Kering ni se descarga nada."
+    )
+    for order in orders:
+        with st.expander(
+            f"Pedido {order.get('name', order['id'])}", expanded=len(orders) == 1
+        ):
+            render_order_zip(store, order, f"search-{order['id']}")
 
 
 def product_library_status(store, ean, records):

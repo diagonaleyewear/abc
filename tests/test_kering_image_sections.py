@@ -259,6 +259,37 @@ def test_one_listing_query_filters_reentry_and_no_export_on_render(monkeypatch, 
     assert reader.call_count == 1 and not app.exception
 
 
+def test_order_search_offers_order_zip_with_missing_and_duplicate_eans(monkeypatch, tmp_path):
+    missing_ean = "0000000000099"
+    store = ImageStore(tmp_path / "kering")
+    store.repository.save(EAN, "a.png", photo(1), provider="Other", origin="offline")
+    snapshot = order((EAN, EAN, missing_ean), number=77)
+    store.create_run([snapshot], "admin", 7, date(2026, 10, 1), date(2026, 10, 1))
+    monkeypatch.setattr(
+        ui, "configured_orders", Mock(side_effect=AssertionError("No Odoo in search")))
+    with pytest.raises(PermissionError):
+        store.search_local_orders("PO/77", role="user")
+    found = store.search_local_orders("po/77", role="masterdata")
+    assert [item["id"] for item in found] == [77]
+    app = AppTest.from_string(
+        "import streamlit as st\n"
+        "from kering_images import ImageStore, data_root\n"
+        "from kering_images_ui import render_image_search\n"
+        "st.session_state['auth_role']='masterdata'\n"
+        "render_image_search(ImageStore(data_root()))"
+    )
+    app.run()
+    app.text_input(key="kering_image_query").set_value("PO/77").run()
+    app.button(key="kering_library_search_button").click().run()
+    assert not app.exception
+    assert any(item.value == "Pedidos coincidentes" for item in app.subheader)
+    text = " ".join(item.value for item in app.markdown)
+    assert missing_ean in text and "EAN sin fotografias" in text
+    app.checkbox(key="partial-search-77").check().run()
+    app.button(key="prepare-search-77").click().run()
+    assert not app.exception and app.get("download_button")
+
+
 def test_search_leading_zeros_and_zip_cache_invalidation(monkeypatch, tmp_path):
     store = ImageStore(tmp_path / "kering")
     record, _ = store.repository.save(
