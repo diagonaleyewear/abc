@@ -2,6 +2,7 @@
 """Fixed root trust boundary. No image, path, command or Python supplied by the runner."""
 from contextlib import contextmanager
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -20,11 +21,20 @@ import urllib.request
 ETC = Path("/etc/cloud-production")
 STATE = Path("/var/lib/cloud-production-deploy")
 CONFIG = ETC / "compose.private.json"
-POLICY = ETC / "approved-release.json"
+AUTHORITY = ETC / "release-authority.json"
 VALIDATOR = ETC / "validate_luxottica.py"
 UNIT = "cloud-production-deploy.service"
 REPO = "sginfoocio/abc"
 WORKFLOW = ".github/workflows/deploy-cloud-production.yml"
+BUILD_WORKFLOW = ".github/workflows/deploy.yml"
+STATUS_CONTEXT = "cloud-production/published-image"
+IMAGE_REPOSITORY = "ghcr.io/sginfoocio/abc"
+SOURCE_FILES = {"app_enhanced.py", "app_exports.py", "transform_luxottica_masterdata.py"}
+TRIGGER_EVENTS = {"workflow_dispatch", "workflow_run"}
+MAX_SOURCE_BYTES = 8 * 1024 * 1024
+PUBLICATION = re.compile(
+    rf"({re.escape(IMAGE_REPOSITORY)}@sha256:[0-9a-f]{{64}}) actions-([1-9][0-9]{{0,15}})-([1-9][0-9]{{0,5}})"
+)
 JOB = "Deploy approved abcd-app"
 DOCKER = "/usr/bin/docker"
 SYSTEMCTL = "/usr/bin/systemctl"
@@ -104,14 +114,96 @@ def run(arguments, timeout=60, data=None, check=True, combined=False):
     return result.stdout + result.stderr if combined else result.stdout
 
 
-def api(resource):
+def api(resource, raw=False):
     request = urllib.request.Request(
         f"https://api.github.com/repos/{REPO}/{resource}",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "cloud-production-deploy"},
+        headers={
+            "Accept": "application/vnd.github.raw" if raw else "application/vnd.github+json",
+            "User-Agent": "cloud-production-deploy",
+        },
     )
     context = ssl.create_default_context(cafile=CA_BUNDLE)
     with urllib.request.urlopen(request, timeout=20, context=context) as response:
+        if raw:
+            content = response.read(MAX_SOURCE_BYTES + 1)
+            if len(content) > MAX_SOURCE_BYTES:
+                raise DeployError("Source file is unexpectedly large")
+            return content
         return json.load(response)
+
+
+def is_sha(value, length):
+    return isinstance(value, str) and re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is not None
+
+
+def validate_authority(authority):
+    """Static root-owned authority: who may deploy where. It never names a release."""
+    if not isinstance(authority, dict) or authority.get("authority_version") != 1:
+        raise DeployError("Invalid release authority")
+    reviewers = authority.get("reviewers")
+    if (
+        authority.get("repository") != REPO
+        or authority.get("runner_name") != "cloud-production-s2026"
+        or authority.get("image_repository") != IMAGE_REPOSITORY
+        or not is_sha(authority.get("workflow_blob_sha"), 40)
+        or not isinstance(reviewers, list) or not reviewers
+        or any(not isinstance(reviewer, str) or not reviewer for reviewer in reviewers)
+        or not isinstance(authority.get("source_files"), list)
+        or set(authority["source_files"]) != SOURCE_FILES
+        or len(authority["source_files"]) != len(SOURCE_FILES)
+    ):
+        raise DeployError("Invalid release authority")
+
+
+def published_image(commit):
+    """The build workflow records image digest and build identity as a commit status."""
+    statuses = [
+        item for item in api(f"commits/{commit}/statuses?per_page=100")
+        if item.get("context") == STATUS_CONTEXT
+    ]
+    if not statuses:
+        raise DeployError("Commit has no recorded publication")
+    latest = statuses[0]  # The API lists the newest status first.
+    match = PUBLICATION.fullmatch(latest.get("description") or "")
+    if (
+        latest.get("state") != "success"
+        or (latest.get("creator") or {}).get("login") != "github-actions[bot]"
+        or match is None
+        or latest.get("target_url") != f"https://github.com/{REPO}/actions/runs/{match[2]}"
+    ):
+        raise DeployError("Recorded publication is not trustworthy")
+    return match[1], int(match[2]), int(match[3])
+
+
+def resolve_release(authority, request):
+    """Derive the release from verifiable GitHub facts; nothing release-specific is pre-installed."""
+    validate_authority(authority)
+    if set(request) != {"run_id", "attempt"} or any(
+        type(value) is not int or value < 1 for value in request.values()
+    ):
+        raise DeployError("Only numeric workflow identity is accepted")
+    workflow = api(f"actions/runs/{request['run_id']}/attempts/{request['attempt']}")
+    commit = workflow.get("head_sha")
+    if not is_sha(commit, 40) or workflow.get("head_branch") != "main":
+        raise DeployError("Workflow does not run a main commit")
+    if api("branches/main")["commit"]["sha"] != commit:
+        raise DeployError("Only the current main head can be deployed")
+    if api(f"contents/{WORKFLOW}?ref={commit}").get("sha") != authority["workflow_blob_sha"]:
+        raise DeployError("Deployment workflow differs from the administratively approved one")
+    labels = inspect_container("abcd-control")["Config"]["Labels"]
+    previous = labels.get("org.opencontainers.image.revision")
+    image, build_run_id, build_attempt = published_image(commit)
+    sources = {
+        name: hashlib.sha256(api(f"contents/{name}?ref={commit}", raw=True)).hexdigest()
+        for name in sorted(authority["source_files"])
+    }
+    return {
+        "repository": REPO, "controller_commit": commit, "commit": commit,
+        "previous_commit": previous, "release_status": "approved", "image": image,
+        "build_run_id": build_run_id, "build_attempt": build_attempt,
+        "runner_name": authority["runner_name"], "reviewers": authority["reviewers"],
+        "source_sha256": sources,
+    }
 
 
 def validate_policy(policy):
@@ -119,9 +211,6 @@ def validate_policy(policy):
         raise DeployError("Invalid approved release policy")
     if policy.get("repository") != REPO:
         raise DeployError("Repository is not approved")
-
-    def is_sha(value, length):
-        return isinstance(value, str) and re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is not None
 
     for key in ("commit", "previous_commit", "controller_commit"):
         if not is_sha(policy.get(key), 40):
@@ -164,7 +253,7 @@ def validate_request(request, policy):
     workflow = api(f"actions/runs/{run_id}/attempts/{attempt}")
     if not (
         workflow["repository"]["full_name"] == REPO
-        and workflow["event"] == "workflow_dispatch"
+        and workflow["event"] in TRIGGER_EVENTS
         and workflow["head_branch"] == "main"
         and workflow["head_sha"] == policy["controller_commit"]
         and workflow["path"] == WORKFLOW
@@ -403,7 +492,7 @@ def worker():
     with lock("transaction.lock"):
         request = read_json(STATE / "request.json")
         try:
-            result = deploy(read_json(POLICY), request)
+            result = deploy(resolve_release(read_json(AUTHORITY), request), request)
         except Exception as error:
             print(f"Deployment worker failed: {type(error).__name__}", file=sys.stderr)
             result = {**request, "status": "failed_requires_review", "production_changed": "unknown"}
@@ -417,7 +506,7 @@ def submit():
         raise DeployError("Oversized workflow identity")
     request = json.loads(raw)
     with lock("submission.lock"):
-        policy = read_json(POLICY)
+        policy = resolve_release(read_json(AUTHORITY), request)
         validate_policy(policy)
         validate_request(request, policy)
         unit = run([SYSTEMCTL, "show", UNIT, "--property=ActiveState", "--value"]).decode().strip()

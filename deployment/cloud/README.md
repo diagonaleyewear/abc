@@ -1,4 +1,94 @@
-# Cloud production: manual, approved, app-only releases
+# Cloud production: approved, app-only releases
+
+## Automated release pipeline (supersedes per-release policy edits)
+
+Every release no longer needs a root edit on `s2026`. Responsibilities are split:
+
+| Concern | Where it lives | Who can change it |
+|---|---|---|
+| Application code | `main` (PR, branch protection, independent review) | Developers |
+| Authorization policy (static: repository, runner, reviewers, image repository, source file names, pinned deploy-workflow blob) | `/etc/cloud-production/release-authority.json`, template `release-authority.json` | Administrator, only when the policy itself changes |
+| Artifact identity (image digest + build run/attempt) | Commit status `cloud-production/published-image` written by `deploy.yml` after build, verification and push | GitHub Actions on `main` only |
+| Privileged controller | `/usr/local/sbin/cloud-production-deploy` (root) | Administrator |
+| Production approval | GitHub environment `production` (required reviewers) | Authorized reviewers |
+
+Flow: merge to `main` -> `deploy.yml` (tests, build, push to GHCR, identity
+checks, status) -> `deploy-cloud-production.yml` (only when repository variable
+`CLOUD_AUTO_DEPLOY` is `true`; otherwise manual `workflow_dispatch`) -> hosted
+preflight -> `production` approval -> dedicated runner -> root controller.
+
+The runner sends only `{run_id, attempt}`. The controller then derives and
+verifies everything itself, using the public GitHub API over verified TLS:
+
+1. The run is this repository's `deploy-cloud-production.yml`, on `main`,
+   triggered by `workflow_dispatch` or `workflow_run`, in progress, on the
+   `cloud-production-s2026` runner, approved in `production` by an authorized
+   reviewer, and the environment still has required reviewers.
+2. Its commit is the *current head of `main`* and the workflow file at that
+   commit has exactly the blob SHA pinned in the root authority.
+3. The commit has a successful `cloud-production/published-image` status created
+   by `github-actions[bot]`, whose description is exactly
+   `ghcr.io/sginfoocio/abc@sha256:<64 hex> actions-<run>-<attempt>` and whose URL
+   points at that run. The referenced run must be a successful `deploy.yml` push
+   run on `main` for the same commit.
+4. `previous_commit` is read from the running `abcd-control` revision label and
+   must be an ancestor of the commit (forward update only); same-commit replays
+   are rejected.
+5. SHA-256 of `app_enhanced.py`, `app_exports.py` and
+   `transform_luxottica_masterdata.py` are computed from the commit and compared
+   with the pulled image (label, build identity and synthetic Luxottica
+   regression) before any change.
+6. Only `abcd-app` is replaced; health, other-service identity and logs are
+   verified; any failure restores the retained `cloud-production:rollback-<previous>`
+   image automatically.
+
+No image, tag, path or command comes from workflow inputs. Automatic triggering
+is inert until `CLOUD_AUTO_DEPLOY=true` is set by a repository administrator;
+unset it to stop automation immediately.
+
+### One-time administrative installation (replaces the per-release step)
+
+From a root-only copy of a reviewed, merged `main` revision (never a
+runner-writable checkout), install the new controller, runner gate and static
+authority, then verify owner/mode. Do not restart services or the runner.
+
+```sh
+SOURCE=/root/cloud-deploy-review/deployment/cloud
+install -o root -g root -m 0755 "$SOURCE/cloud_production_deploy.py" /usr/local/sbin/cloud-production-deploy
+install -o root -g root -m 0644 "$SOURCE/runner_job_gate.py" /usr/local/libexec/cloud-runner-job-gate.py
+install -o root -g root -m 0600 "$SOURCE/release-authority.json" /etc/cloud-production/release-authority.json
+```
+
+Then, as repository admin: confirm the `production` environment requires
+reviewers (enable "prevent self-review" if a second reviewer exists), confirm
+branch protection on `main`, and only when ready set `CLOUD_AUTO_DEPLOY=true`.
+The old `/etc/cloud-production/approved-release.json` is no longer read and may
+be archived. If `deploy-cloud-production.yml` is ever edited, its new blob SHA
+(`git rev-parse HEAD:.github/workflows/deploy-cloud-production.yml`) must be
+re-installed in the authority; until then deployments fail closed.
+
+### Rollback
+
+Automatic: the controller restores the retained rollback image on any failure.
+Manual: stop automation (`CLOUD_AUTO_DEPLOY` unset), then an administrator
+re-tags/pins `cloud-production:rollback-<previous_commit>` in
+`/etc/cloud-production/compose.private.json` and runs the documented app-only
+Compose command. Rolling back the *pipeline* itself: re-install the previous
+controller and authority files and leave automation disabled.
+
+### Residual risks
+
+- A commit status can be written by any workflow with `statuses: write`; the
+  controller therefore treats it only as a hint and re-verifies run, labels,
+  build identity and source hashes. Keep `deploy.yml` changes under review.
+- Trust in `deploy.yml` (what gets built) rests on branch protection and review.
+- The GitHub API is queried unauthenticated; rate limiting fails closed.
+- With a single reviewer, that person approves their own production deployments;
+  add a second reviewer and enable prevent-self-review to get independent approval.
+
+> The sections below are historical runbooks written for the earlier per-release
+> policy (`approved-release.json`). Where they conflict with this section, this
+> section applies.
 
 ## Current audit status (2026-10-21)
 
@@ -97,7 +187,7 @@ uses the local restricted sudo command.
 | `runner_job_gate.py` | `/usr/local/libexec/cloud-runner-job-gate.py` root:root 0644 |
 | `validate_luxottica.py` | `/etc/cloud-production/validate_luxottica.py` root:root 0600 |
 | `verify_compose_transition.py` | `/usr/local/libexec/cloud-verify-compose-transition.py` root:root 0700; administrative read-only check, no sudoers grant |
-| `approved-release.json` | `/etc/cloud-production/approved-release.json` root:root 0600; add reviewed `controller_commit` |
+| `release-authority.json` | `/etc/cloud-production/release-authority.json` root:root 0600 (static; replaces per-release `approved-release.json`) |
 | `cloud-production.sudoers` | `/etc/sudoers.d/cloud-production` root:root 0440 |
 | `cloud-production-deploy.service` | `/etc/systemd/system/cloud-production-deploy.service` root:root 0644 |
 | `cloud-image-services.override.conf` | `/etc/systemd/system/cloud-image-services.service.d/cloud-production.conf` root:root 0644 |

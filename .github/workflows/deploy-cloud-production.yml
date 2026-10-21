@@ -2,6 +2,11 @@ name: Deploy Cloud Production
 
 on:
   workflow_dispatch:
+  # Inert unless the repository variable CLOUD_AUTO_DEPLOY is exactly "true".
+  workflow_run:
+    workflows: ["Deploy to Production"]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -13,61 +18,52 @@ concurrency:
 
 jobs:
   verify-release:
-    if: github.repository == 'sginfoocio/abc' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'sginfoocio/abc' && github.ref == 'refs/heads/main' && (
+        github.event_name == 'workflow_dispatch' || (
+          vars.CLOUD_AUTO_DEPLOY == 'true'
+          && github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == 'main'
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Check approved publication
+      - name: Check verifiable publication of this main commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import json, subprocess
-          import re
-          from pathlib import Path
-          policy = json.loads(Path("deployment/cloud/approved-release.json").read_text())
-          if policy.get("repository") != "sginfoocio/abc":
-              raise SystemExit("Release policy repository mismatch.")
-          if any(not isinstance(policy.get(key), str) or not re.fullmatch(r"[0-9a-f]{40}", policy[key])
-                 for key in ("commit", "previous_commit")):
-              raise SystemExit("Release policy commit is invalid.")
-          if not re.fullmatch(r"ghcr[.]io/sginfoocio/abc@sha256:[0-9a-f]{64}", policy.get("image", "")):
-              raise SystemExit("Release policy image digest is invalid.")
-          if any(type(policy.get(key)) is not int or policy[key] < 1
-                 for key in ("build_run_id", "build_attempt")):
-              raise SystemExit("Release policy publication identity is invalid.")
-          expected_sources = {"app_enhanced.py", "app_exports.py", "transform_luxottica_masterdata.py"}
-          sources = policy.get("source_sha256")
-          if not isinstance(sources, dict) or set(sources) != expected_sources or any(
-              not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
-              for value in sources.values()
-          ):
-              raise SystemExit("Release policy source hashes are invalid.")
-          if policy["release_status"] != "approved":
-              raise SystemExit("No new release is approved; update the reviewed release policy.")
-          if policy["commit"] == policy["previous_commit"]:
-              raise SystemExit("The approved commit is already the production version.")
-          comparison = json.loads(subprocess.check_output([
-              "gh", "api", f"repos/sginfoocio/abc/compare/{policy['previous_commit']}...{policy['commit']}"
+          import json, os, re, subprocess
+          commit = os.environ["GITHUB_SHA"]
+          statuses = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/sginfoocio/abc/commits/{commit}/statuses?per_page=100"
           ]))
-          if comparison["status"] != "ahead":
-              raise SystemExit("The approved release is not a forward update from production.")
+          statuses = [item for item in statuses if item.get("context") == "cloud-production/published-image"]
+          if not statuses:
+              raise SystemExit("This commit has no recorded image publication.")
+          latest = statuses[0]
+          match = re.fullmatch(
+              r"(ghcr[.]io/sginfoocio/abc@sha256:[0-9a-f]{64}) actions-([1-9][0-9]*)-([1-9][0-9]*)",
+              latest.get("description") or "",
+          )
+          if latest.get("state") != "success" or match is None:
+              raise SystemExit("The recorded image publication is not valid.")
           run = json.loads(subprocess.check_output([
-              "gh", "api", f"repos/sginfoocio/abc/actions/runs/{policy['build_run_id']}/attempts/{policy['build_attempt']}"
+              "gh", "api", f"repos/sginfoocio/abc/actions/runs/{match[2]}/attempts/{match[3]}"
           ]))
           if not (
               run.get("conclusion") == "success" and run.get("event") == "push"
-              and run.get("head_branch") == "main" and run.get("head_sha") == policy["commit"]
+              and run.get("head_branch") == "main" and run.get("head_sha") == commit
               and run.get("path") == ".github/workflows/deploy.yml"
-              and run.get("run_attempt") == policy["build_attempt"]
+              and run.get("run_attempt") == int(match[3])
           ):
-              raise SystemExit("Pinned image has no matching successful main publication.")
-          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write(f"## Approved Cloud release\nCommit: `{policy['commit']}`\n\n")
-              summary.write(f"Image: `{policy['image']}`\n\n")
+              raise SystemExit("Recorded image has no matching successful main publication.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"## Cloud release candidate\nCommit: `{commit}`\n\n")
+              summary.write(f"Image: `{match[1]}`\n\n")
+              summary.write("The root controller re-derives and re-verifies all identities. ")
               summary.write("Target: `cloud-nas / abcd-app` only. Awaiting production approval.\n")
           PY
 

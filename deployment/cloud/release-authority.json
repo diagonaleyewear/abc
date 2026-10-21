@@ -1,0 +1,15 @@
+{
+  "authority_version": 1,
+  "repository": "sginfoocio/abc",
+  "runner_name": "cloud-production-s2026",
+  "image_repository": "ghcr.io/sginfoocio/abc",
+  "workflow_blob_sha": "45fd9a940eba2b9e98201c95cdd11ac781496bb9",
+  "reviewers": [
+    "sginfoocio"
+  ],
+  "source_files": [
+    "app_enhanced.py",
+    "app_exports.py",
+    "transform_luxottica_masterdata.py"
+  ]
+}
