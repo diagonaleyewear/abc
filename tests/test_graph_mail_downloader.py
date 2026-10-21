@@ -176,6 +176,29 @@ def test_graph_retries_429_using_retry_after(monkeypatch) -> None:
     assert delays == [0.0]
 
 
+def test_graph_retry_logs_attempt_context_without_request_secrets(
+    monkeypatch, caplog
+) -> None:
+    responses = [
+        StubResponse(status_code=503),
+        StubResponse({"ok": True}),
+    ]
+    monkeypatch.setattr(
+        graph.requests, "get", lambda *args, **kwargs: responses.pop(0)
+    )
+    monkeypatch.setattr(graph, "_sleep_with_checkpoints", lambda _delay: None)
+
+    graph._request_with_retries(
+        graph.requests.get,
+        "https://graph.microsoft.com/v1.0/messages?access_token=synthetic-secret",
+        operation="attachment message_id=m-1 attachment_id=a-1",
+    )
+
+    assert "message_id=m-1 attachment_id=a-1" in caplog.text
+    assert "attempt=1/4 status=503" in caplog.text
+    assert "synthetic-secret" not in caplog.text
+
+
 def test_graph_retries_are_bounded(monkeypatch) -> None:
     calls = []
     delays = []
