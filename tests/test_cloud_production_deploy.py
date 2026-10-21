@@ -91,17 +91,17 @@ def test_policy_rejects_untrusted_inputs(policy, key, value):
 
 def test_checked_in_policy_pins_the_published_forward_release():
     release = json.loads((ROOT / "deployment/cloud/approved-release.json").read_text())
-    assert release["previous_commit"] == "64276b40d2bfa42bc7ff349a4390dadd62638eb0"
-    assert release["commit"] == "cc16dcbe1f740278a8d556f0344556d8d2f2f798"
+    assert release["previous_commit"] == "cc16dcbe1f740278a8d556f0344556d8d2f2f798"
+    assert release["commit"] == "704edfa6a9128e50d9153ed924f5a3c6724f8ac1"
     assert release["image"] == (
         "ghcr.io/sginfoocio/abc@sha256:"
-        "f7386cd994578edffc22cb4f10dd3f7afcc54d013d8d85fd5f336a2b0bcfb5a5"
+        "eb947ce7aa6f5b1fdbf8398402741e5dfeab0c5bf16205edda5adb243d1f9cc2"
     )
-    assert release["build_run_id"] == 39582467698
+    assert release["build_run_id"] == 39636988747
     assert release["build_attempt"] == 1
     assert release["release_status"] == "approved"
     assert release["source_sha256"] == {
-        "app_enhanced.py": "163b89e8751ef6fea9e25c3e87e026a5c542ec410e402160fc383a975c46ebbe",
+        "app_enhanced.py": "d59779d94794d139cb98e7108e166a811a76e57f406e92a05e9a47f34b493a14",
         "app_exports.py": "05fb1557f5cdfe68f1890bd0443fb193d53f2858b0fbfd06174f08e054f60704",
         "transform_luxottica_masterdata.py": "4e435ddadb6362f7ef7f2cd245b54c5fb439ddae903f1a4bdd70788d8256d609",
     }
@@ -109,8 +109,8 @@ def test_checked_in_policy_pins_the_published_forward_release():
 
 
 @pytest.mark.parametrize("comparison_status,build_sha", [
-    ("ahead", "cc16dcbe1f740278a8d556f0344556d8d2f2f798"),
-    ("behind", "cc16dcbe1f740278a8d556f0344556d8d2f2f798"),
+    ("ahead", "704edfa6a9128e50d9153ed924f5a3c6724f8ac1"),
+    ("behind", "704edfa6a9128e50d9153ed924f5a3c6724f8ac1"),
     ("ahead", "b" * 40),
 ])
 def test_workflow_preflight_checks_release_ancestry_and_publication(
@@ -144,12 +144,12 @@ def test_workflow_preflight_checks_release_ancestry_and_publication(
     if comparison_status != "ahead":
         with pytest.raises(SystemExit, match="not a forward update"):
             exec(script, {})
-    elif build_sha != "cc16dcbe1f740278a8d556f0344556d8d2f2f798":
+    elif build_sha != "704edfa6a9128e50d9153ed924f5a3c6724f8ac1":
         with pytest.raises(SystemExit, match="no matching successful main publication"):
             exec(script, {})
     else:
         exec(script, {})
-        assert "f7386cd994578edffc22cb4f10dd3f7afcc54d013d8d85fd5f336a2b0bcfb5a5" in summary.read_text()
+        assert "eb947ce7aa6f5b1fdbf8398402741e5dfeab0c5bf16205edda5adb243d1f9cc2" in summary.read_text()
     assert len(calls) == (1 if comparison_status != "ahead" else 2)
 
 
