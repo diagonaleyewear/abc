@@ -33,6 +33,34 @@ política de releases, rollback e instalación administrativa están en
 [deployment/cloud/README.md](deployment/cloud/README.md). Instalar el controlador
 desde una copia revisada no despliega ni reinicia servicios.
 
+#### Estado verificado de la automatización (2026-10-22)
+
+Comprobado con la API pública de GitHub y los runs de Actions; no se modificó nada.
+
+| Control | Estado | Evidencia / acción |
+|---|---|---|
+| Último despliegue | OK | Run `39686097507` (`workflow_dispatch`), commit `7280911`, `deployed`, `healthy`, rollback `not_needed`, otros servicios `unchanged`. |
+| `workflow_run` | Inerte, comportamiento correcto | Run `39684575122` terminó `skipped` (ambos jobs sin ejecutarse) tras publicar `7280911`, coherente con `CLOUD_AUTO_DEPLOY` distinto de `true`. |
+| `CLOUD_AUTO_DEPLOY` | **No verificable sin permisos de administración** | La API de variables exige autenticación. Comprobarlo en *Settings → Secrets and variables → Actions → Variables*. **Debe seguir sin definir o distinto de `true`.** |
+| Entorno `production` | OK | Revisor requerido `sginfoocio` (`prevent_self_review: false`: excepción de aprobador único), `can_admins_bypass: false`, política de ramas personalizada. |
+| Rama `main` | **FALTA** | `protected: false`; no exige PR ni checks. |
+| Despliegues desde PR/forks | No posibles por diseño | El workflow solo admite `workflow_dispatch` o `workflow_run` con `event == push`, `head_branch == main` y repositorio idéntico; `permissions` mínimos. |
+| Duplicados | Controlados | `concurrency: cloud-production-abcd-app` y la verificación exige exactamente una publicación correcta del `HEAD` de `main`. |
+| Entorno `SERVER_HOST` | Revisar | Entorno heredado (2026-06-23) sin reglas y con bypass de administradores; no lo usa el workflow Cloud. Eliminarlo o protegerlo si ya no se usa. |
+
+**La activación automática debe permanecer detenida** hasta configurar la protección de `main`
+(*Settings → Branches → Add branch ruleset* o regla clásica para `main`):
+
+1. Require a pull request before merging (al menos 1 aprobación o, si se mantiene un único
+   mantenedor, PR obligatoria sin aprobación documentando la excepción).
+2. Require status checks to pass: `tests` y `build-and-push` del workflow *Deploy to Production*,
+   con *Require branches to be up to date*.
+3. Block force pushes y deletions; *Do not allow bypassing the above settings*.
+4. Confirmar en *Environments → production → Deployment branches* que solo se permite `main`.
+
+Después, y solo con autorización expresa, definir `CLOUD_AUTO_DEPLOY=true` y verificar con un
+merge real que aparece una única ejecución `workflow_run` pendiente de aprobación.
+
 ## 🎯 ¿Qué Es?
 
 Sistema inteligente que clasifica productos en 4 categorías:
