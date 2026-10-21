@@ -531,6 +531,25 @@ def test_candidate_failure_never_changes_live_config(monkeypatch, transaction, p
     assert transaction.changes == []
 
 
+def test_missing_private_config_aborts_before_container_inspection_or_mutation(monkeypatch, policy):
+    calls = []
+    monkeypatch.setattr(DEPLOY, "validate_request", lambda *args: calls.append("validate_request"))
+
+    def missing_config(path):
+        calls.append("read_config")
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(DEPLOY, "read_json", missing_config)
+    monkeypatch.setattr(DEPLOY, "inspect_container", lambda *args: calls.append("inspect_container"))
+    monkeypatch.setattr(DEPLOY, "atomic_json", lambda *args: calls.append("atomic_json"))
+    monkeypatch.setattr(DEPLOY, "compose", lambda: calls.append("compose"))
+
+    with pytest.raises(FileNotFoundError):
+        DEPLOY.deploy(policy, {"run_id": 123, "attempt": 1})
+
+    assert calls == ["validate_request", "read_config"]
+
+
 def test_duplicate_deployment_attempt_is_rejected_before_mutation(transaction, policy, tmp_path):
     (tmp_path / "run-123-1").mkdir()
     with pytest.raises(FileExistsError):

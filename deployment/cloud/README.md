@@ -1,6 +1,36 @@
 # Cloud production: manual, approved, app-only releases
 
+## Current audit status (2026-10-21)
+
+The latest reviewed `main` is `da9dc9a833569f45f43cd85e58f3164a3845b2ef`.
+Its post-merge workflow run `39574406488` completed successfully for both
+`tests` and `build-and-push`; this proves CI and GHCR publication, not production
+deployment. The checked-in `approved-release.json` still says `approved` for
+commit `64276b40d2bfa42bc7ff349a4390dadd62638eb0`, image digest
+`sha256:04ac4836361e59a59fb2f354f1dc05ce5aa71bbc427a0f603a017d87f29a01ec`,
+and publication run `39065951026`. Do not infer that this policy is installed
+on the host or that its image is running.
+
+The `s2026` hostname did not resolve during the read-only audit on 2026-10-21.
+Consequently, live containers, effective Compose configuration, NAS mounts,
+alert scheduling, disk space, recent logs and the installed root policy remain
+unverified. GitHub environment protection settings also require independent
+verification before any release dispatch. Do not use the historical host,
+commit, or digest examples below as current production facts.
+
+The `deploy.yml` workflow runs tests and publishes to GHCR; it does not deploy.
+Production is a separate manual `workflow_dispatch` using the `production`
+environment and the dedicated runner. The hosted preflight and root helper
+validate the pinned publication and deployment request; the helper changes
+only the app image, waits for health, and rolls back on a failed transition.
+No SSH deployment secrets are used by this flow. Never dispatch until the
+installed policy, environment protection, live production state, candidate
+digest and rollback target have all been checked and explicitly approved.
+
 ## Scope and diagnosis
+
+The following incident is historical context for the earlier SSH deployment
+workflow, not a statement about the current production version:
 
 Run 159 (`38772528737`) published commit
 `99a9f60eb6fbe11cc231b5626556e5db9b5166e9`; tests/build succeeded but
@@ -85,12 +115,19 @@ The systemd drop-in makes future boot use the controlled configuration, avoiding
 an unnoticed return to the old image. Installing/reloading it must **not restart**
 `cloud-image-services.service` (which owns all Cloud services).
 
-## Administrative installation proposal (not automatic)
+## Archived administrative installation proposal — do not execute
 
-These commands are for an administrator **after reviewing/authorizing the
-installation and the exact source commit**. They are not a request to run
-unreviewed code as root. Execute in an administrative session; do not grant a
-general sudo shell to the runner.
+> **Historical runbook, not an approved procedure.** The commands below assume
+> a production baseline at `99a9f60...` and a `baseline-only` policy, which
+> conflict with the currently checked-in policy and have not been verified on
+> `s2026`. They also assume installed host files and services whose current
+> state could not be inspected. Do not execute these commands or treat their
+> assumptions as production facts. Replace this section only after a
+> read-only host audit, review of the installed policy and configuration, and
+> explicit administrative authorization.
+
+The historical proposal is retained below for audit context only. It is not a
+request to install or change any host configuration.
 
 ### Updating the controller already installed on s2026
 
@@ -398,24 +435,24 @@ No database migration is performed; no volumes, images or customer files are del
 
 Do not accept an image/command/path from a dispatch input. Before a future
 release, publish it through CI and update the reviewed policy with that build's
-commit, GHCR digest, run/attempt and exact application source hashes. Keep
-`previous_commit` equal to the verified production commit (`99a9f60...` until
-production is intentionally updated), set `release_status` to `approved`, and
-ensure the target is a descendant of production. A same-commit replay, a
-behind/diverged commit, or any mismatch is rejected before mutation. The
-checked-in policy is intentionally `baseline-only`: it records the deployed
-`99a9f60...` release and cannot dispatch/redeploy it. For each later release,
-review the successful `main` build's exact image digest and run/attempt, record
-the new commit and SHA256 of `app_enhanced.py`, `app_exports.py` and
-`transform_luxottica_masterdata.py`, and set the candidate status to `approved`
-in both the reviewed repository policy and root-installed policy. Keep
-`controller_commit` pinned to the reviewed main revision containing the workflow.
-The hosted preflight and root helper independently check the publication and
-forward commit ancestry. The runner cannot change the root-installed policy.
-Install the reviewed controller, validator and baseline policy manually as root
-from a separately staged, reviewed source tree; add the exact reviewed main
-commit as `controller_commit`. Do not enable a candidate in the checked-in
-policy until a new successful publication exists. Do not install from the
-runner's checkout, start a deployment, or restart Cloud as part of installation.
-Retain rollback images until a separate authorized retention decision. A newer
-main commit cannot silently deploy under an older controller authorization.
+commit, immutable GHCR digest, run/attempt and exact application source hashes.
+Set `previous_commit` only to the production revision confirmed by a separate
+read-only host audit; the checked-in policy is not proof of that revision.
+The candidate must be a forward descendant, and both hosted preflight and root
+helper must validate its publication identity and exact controller revision
+before any mutation. A same-commit replay, behind/diverged commit or mismatch
+must fail closed.
+
+As of this documentation update, the checked-in policy is still marked
+`approved` for commit `64276b40d2bfa42bc7ff349a4390dadd62638eb0`, not the current
+`main` commit. Do not edit or install either the repository policy or the
+root-installed policy as part of routine validation. Preparing a new candidate
+requires a successful publication, verified production baseline, exact source
+hashes for `app_enhanced.py`, `app_exports.py` and
+`transform_luxottica_masterdata.py`, a reviewed `controller_commit`, and
+explicit release authorization. The runner cannot change the root-installed
+policy. Install reviewed controller files only from a separately staged,
+reviewed source tree; do not install from the runner checkout, dispatch a
+deployment, or restart Cloud during installation. Retain rollback images until
+a separate authorized retention decision. A newer `main` commit cannot
+silently deploy under an older controller authorization.

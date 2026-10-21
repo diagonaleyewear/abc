@@ -1,10 +1,12 @@
 import ast
 from datetime import date, datetime, timezone
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+from app_exports import dataframe_to_excel_bytes
 from abcd_snapshots import (
     build_abcd_report_excel_df,
     build_abcd_report_export_df,
@@ -187,6 +189,97 @@ def test_repeated_same_week_snapshots_are_append_only_and_reproducible() -> None
     assert latest_legacy_api.loc[0, "Stock"] == 2
 
 
+def test_ui_and_scheduled_snapshot_exports_share_roundtrip_contract(monkeypatch) -> None:
+    import abcd_snapshots
+    import save_abcd_weekly_snapshot as cli
+
+    products = pd.DataFrame(
+        [
+            {
+                "Marca": "Synthetic Brand",
+                "Modelo": "007",
+                "Cód Barras": "000123",
+                "EAN": "000123",
+                "Stock": 4,
+                "Capital_Bloqueado (€)": 125.5,
+                "product_id": 23,
+                "Extra": "preserved",
+            }
+        ]
+    )
+    snapshot_day = date(2026, 10, 19)
+    run_at = datetime(2026, 10, 21, 9, 30, tzinfo=timezone.utc)
+    parameters = {"reference_date": "2026-10-21", "days_without_sales_for_d": 120}
+    ui_engine = FakeEngine()
+    scheduled_engine = FakeEngine()
+    real_timestamp = pd.Timestamp
+
+    class FixedClock:
+        @staticmethod
+        def today():
+            return real_timestamp("2026-10-21")
+
+    class FixedDateTime:
+        @staticmethod
+        def now():
+            return run_at
+
+    monkeypatch.setattr(cli, "pd", type("PandasClock", (), {"Timestamp": FixedClock}))
+    monkeypatch.setattr(cli, "datetime", FixedDateTime)
+    monkeypatch.setattr(cli, "get_db_engine", lambda: scheduled_engine)
+    monkeypatch.setattr(cli, "load_odoo_dataframe", lambda: products.copy())
+    monkeypatch.setattr(cli, "run_abcd_engine", lambda dataframe, reference_date: dataframe.copy())
+    monkeypatch.setattr(cli, "engine_source_version", lambda: "synthetic-engine")
+    monkeypatch.setattr(cli, "build_snapshot_parameters", lambda reference_date: parameters)
+    monkeypatch.setattr(abcd_snapshots, "current_week_start", lambda: snapshot_day)
+
+    ui_saved_day = save_abcd_weekly_snapshot(
+        ui_engine,
+        products,
+        snapshot_day,
+        run_at=run_at,
+        engine_version="synthetic-engine",
+        parameters=parameters,
+    )
+    receipt = {}
+    assert cli._run_snapshot(receipt) == 0
+    assert receipt == {"counts": {"Productos": len(products)}}
+
+    ui_reference = list_abcd_snapshot_refs(ui_engine)[0]
+    ui_snapshot, ui_metadata = load_abcd_snapshot_by_id(ui_engine, ui_reference.snapshot_id)
+    scheduled_reference = list_abcd_snapshot_refs(scheduled_engine)[0]
+    scheduled_snapshot, scheduled_metadata = load_abcd_snapshot_by_id(
+        scheduled_engine,
+        scheduled_reference.snapshot_id,
+    )
+    assert ui_saved_day == scheduled_reference.snapshot_date == snapshot_day
+    assert ui_reference == scheduled_reference
+    assert ui_metadata == scheduled_metadata == scheduled_reference
+    pd.testing.assert_frame_equal(ui_snapshot, scheduled_snapshot)
+    assert ui_reference.engine_version == "synthetic-engine"
+    assert ui_reference.parameters == parameters
+    assert ui_reference.data_sha256
+    assert ui_reference.product_count == len(products)
+
+    ui_csv = ui_snapshot.to_csv(index=False).encode("utf-8")
+    scheduled_csv = scheduled_snapshot.to_csv(index=False).encode("utf-8")
+    assert ui_csv == scheduled_csv
+    csv_roundtrip = pd.read_csv(
+        BytesIO(ui_csv),
+        dtype={"Modelo": str, "Cód Barras": str, "EAN": str},
+    )
+    pd.testing.assert_frame_equal(csv_roundtrip, ui_snapshot)
+
+    ui_excel = build_abcd_report_excel_df(ui_snapshot)
+    scheduled_excel = build_abcd_report_excel_df(scheduled_snapshot)
+    pd.testing.assert_frame_equal(ui_excel, scheduled_excel)
+    excel_roundtrip = pd.read_excel(
+        BytesIO(dataframe_to_excel_bytes(ui_excel)),
+        dtype={"NOMBRE": str, "SKU": str, "EAN": str},
+    )
+    pd.testing.assert_frame_equal(excel_roundtrip, ui_excel)
+
+
 def test_corrupted_snapshot_payload_fails_digest_verification() -> None:
     engine = FakeEngine()
     saved_day = date(2026, 10, 2)
@@ -241,3 +334,17 @@ def test_ui_and_cli_import_the_shared_snapshot_service() -> None:
     assert "save_abcd_weekly_snapshot" in app_snapshot_imports
     assert cli.build_abcd_report_export_df is abcd_snapshots.build_abcd_report_export_df
     assert cli.save_abcd_weekly_snapshot is abcd_snapshots.save_abcd_weekly_snapshot
+
+    app_calls = {
+        node.func.id
+        for node in ast.walk(app_tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    cli_tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    cli_calls = {
+        node.func.id
+        for node in ast.walk(cli_tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "save_abcd_weekly_snapshot" in app_calls
+    assert "save_abcd_snapshot" in cli_calls
