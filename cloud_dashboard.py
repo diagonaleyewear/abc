@@ -138,7 +138,7 @@ def read_alerts(now: float) -> ProcessStatus:
         status.state = status.result = "Sin ejecuciones"
     else:
         code = latest["last_check_result"]
-        status.result = "Error" if code.startswith("error") or code == "reintentos_agotados" else (
+        status.result = "Error" if code.startswith("error") or code in {"reintentos_agotados", "envio_ambiguo"} else (
             "Correcto" if code in RESULT_LABELS else "Sin información")
         status.state = status.result
         status.last_run = latest["last_check_at"]

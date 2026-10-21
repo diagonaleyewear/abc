@@ -178,8 +178,16 @@ def _render_order_check(watchlist: list[str]) -> None:
             alert_store,
             send_alert_email,
             recipients,
+            source=SOURCE_MANUAL,
         )
-    if dispatch.error:
+    if dispatch.ambiguous_batch:
+        alert_store.record_check(SOURCE_MANUAL, "envio_ambiguo", error=dispatch.error)
+        st.warning(
+            f"Resultado del envío desconocido ({dispatch.error}). No se reintentará solo: revisa Elementos "
+            "enviados y resuélvelo con "
+            "`python run_alerta_pedidos.py --resolve-ambiguous sent|retry --orders ... --actor ...`."
+        )
+    elif dispatch.error:
         alert_store.record_check(SOURCE_MANUAL, "error_envio", error=dispatch.error)
         st.error(f"No se pudo enviar el email de alerta: {dispatch.error}")
     elif dispatch.sent:
