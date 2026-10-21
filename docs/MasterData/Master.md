@@ -30,6 +30,15 @@ MASTERDATA_USERNAME=usuario_masterdata
 MASTERDATA_PASSWORD=********
 ```
 
+Las sesiones recordadas requieren además `AUTH_COOKIE_SECRET`, independiente
+de las contraseñas y con al menos 32 caracteres. Genera un valor aleatorio
+criptográficamente seguro (por ejemplo, 32 bytes aleatorios codificados como
+hexadecimal) y guárdalo únicamente en el gestor de secretos o `.env` protegido
+del host. Si falta o no alcanza la longitud mínima, el inicio de sesión normal
+sigue disponible, pero no se emiten cookies de sesión recordada; no se usa
+`APP_PASSWORD` como alternativa. La revocación y el límite de intentos se
+guardan en el SQLite persistente configurado por `AUTH_STATE_PATH`.
+
 El usuario limitado no verá en el menú Análisis ABC, Alertas ni Configuración.
 Si intenta acceder directamente a una página restringida, la aplicación lo
 bloquea igualmente.

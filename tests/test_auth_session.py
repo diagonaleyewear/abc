@@ -1,3 +1,9 @@
+import ast
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
 from auth_session import (
     AuthStateStore,
     create_auth_token,
@@ -5,7 +11,6 @@ from auth_session import (
     login_bucket_keys,
     verify_auth_token,
 )
-from concurrent.futures import ThreadPoolExecutor
 
 
 def test_signed_token_expires_and_rejects_tampering() -> None:
@@ -20,6 +25,66 @@ def test_signed_token_expires_and_rejects_tampering() -> None:
     assert verify_auth_token(token, "admin", signing_key, now=87401) is None
     changed_password_key = derive_session_signing_key("s" * 40, "admin", "new-password")
     assert verify_auth_token(token, "admin", changed_password_key, now=1001) is None
+
+
+def test_remembered_token_creation_requires_independent_secret() -> None:
+    source = Path(__file__).resolve().parents[1] / "app_enhanced.py"
+    module = ast.parse(source.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_make_auth_token"
+    )
+    namespace = {
+        "AUTH_COOKIE_SECRET_ENV": "AUTH_COOKIE_SECRET",
+        "AUTH_COOKIE_SECRET_MIN_LENGTH": 32,
+        "derive_session_signing_key": derive_session_signing_key,
+        "create_auth_token": create_auth_token,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+    with pytest.raises(ValueError, match="AUTH_COOKIE_SECRET"):
+        namespace["_make_auth_token"]("admin", "", "password", 30)
+    with pytest.raises(ValueError, match="AUTH_COOKIE_SECRET"):
+        namespace["_make_auth_token"]("admin", "short", "password", 30)
+
+    token = namespace["_make_auth_token"]("admin", "s" * 32, "password", 30)
+    assert verify_auth_token(
+        token,
+        "admin",
+        derive_session_signing_key("s" * 32, "admin", "password"),
+    ) is not None
+
+
+def test_masterdata_role_cannot_access_admin_guarded_routes() -> None:
+    source = Path(__file__).resolve().parents[1] / "app_enhanced.py"
+    module = ast.parse(source.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "require_admin_access"
+    )
+
+    class AccessDenied(Exception):
+        pass
+
+    class StreamlitStub:
+        session_state = {"auth_role": "masterdata"}
+        errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def stop(self) -> None:
+            raise AccessDenied
+
+    streamlit = StreamlitStub()
+    namespace = {"st": streamlit}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+
+    with pytest.raises(AccessDenied):
+        namespace["require_admin_access"]()
+    assert streamlit.errors == ["Este apartado requiere un usuario administrador."]
 
 
 def test_revocation_is_persistent_across_store_instances(tmp_path) -> None:
