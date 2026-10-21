@@ -17,8 +17,8 @@ La aplicación admite dos perfiles:
 - **Administrador**: credenciales `APP_USERNAME` y `APP_PASSWORD`; acceso a
   todas las áreas.
 - **Master Data**: credenciales `MASTERDATA_USERNAME` y
-  `MASTERDATA_PASSWORD`; acceso únicamente a Importador Masterdata,
-  Diccionario y Dry-run Odoo.
+  `MASTERDATA_PASSWORD`; acceso a Importador Masterdata, Diccionario y Dry-run
+  Odoo, además de la biblioteca Kering en modo de consulta y descarga local.
 
 En Docker, las cuatro variables deben estar definidas en el `.env` del host.
 No se guardan contraseñas en el repositorio:
@@ -42,9 +42,16 @@ esta política, las cookies antiguas firmadas con `APP_PASSWORD` o con un secret
 inferior a 32 caracteres dejan de ser válidas y el usuario debe iniciar sesión
 de nuevo; no se conserva una sesión recordada insegura.
 
-El usuario limitado no verá en el menú Análisis ABC, Alertas ni Configuración.
-Si intenta acceder directamente a una página restringida, la aplicación lo
-bloquea igualmente.
+En la biblioteca Kering, Master Data puede buscar fotografías y pedidos
+almacenados localmente por EAN, modelo o pedido y descargar las fotografías
+disponibles en ZIP. Esta vista no consulta Odoo ni Kering y no permite procesar
+pedidos ni administrar la configuración Kering; esas operaciones requieren el
+rol administrador.
+
+El usuario limitado no verá en el menú Análisis ABC, Alertas, Configuración ni
+las operaciones administrativas de los repositorios. Si intenta acceder
+directamente a una página u operación restringida, la aplicación la bloquea
+igualmente.
 
 ## Entradas
 - Archivo Excel de Luxottica.
