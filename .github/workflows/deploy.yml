@@ -27,7 +27,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      statuses: write
 
     steps:
       - name: Checkout code
@@ -176,17 +175,18 @@ jobs:
             echo 'Production was NOT changed. Use Deploy Cloud Production and approve production.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Record verified image identity for the production controller
+      - name: Publish image identity annotation
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
-          GH_TOKEN: ${{ github.token }}
           PUBLISHED_COMMIT: ${{ steps.provenance.outputs.commit }}
           PUBLISHED_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
-          gh api "repos/${GITHUB_REPOSITORY}/statuses/${PUBLISHED_COMMIT}" \
-            -f state=success -f context=cloud-production/published-image \
-            -f description="${REGISTRY}/${IMAGE_NAME}@${PUBLISHED_DIGEST} actions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+          case "$PUBLISHED_DIGEST" in sha256:[0-9a-f]*) ;; *) echo "Invalid digest" >&2; exit 1;; esac
+          echo "::notice title=cloud-image-identity::${REGISTRY}/${IMAGE_NAME}@${PUBLISHED_DIGEST} ${PUBLISHED_COMMIT} actions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      - name: TEMP annotation channel probe
+        if: github.event_name == 'pull_request'
+        run: echo "::notice title=cloud-image-identity-probe::probe ${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
   tests:
     runs-on: ubuntu-latest

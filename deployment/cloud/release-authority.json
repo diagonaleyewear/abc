@@ -3,7 +3,8 @@
   "repository": "sginfoocio/abc",
   "runner_name": "cloud-production-s2026",
   "image_repository": "ghcr.io/sginfoocio/abc",
-  "workflow_blob_sha": "45fd9a940eba2b9e98201c95cdd11ac781496bb9",
+  "workflow_blob_sha": "d91848bfbde7b1568441da4f579bcbda85b06794",
+  "require_prevent_self_review": false,
   "reviewers": [
     "sginfoocio"
   ],

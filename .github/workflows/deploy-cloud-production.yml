@@ -21,10 +21,13 @@ jobs:
     if: >-
       github.repository == 'sginfoocio/abc' && github.ref == 'refs/heads/main' && (
         github.event_name == 'workflow_dispatch' || (
-          vars.CLOUD_AUTO_DEPLOY == 'true'
+          github.event_name == 'workflow_run'
+          && vars.CLOUD_AUTO_DEPLOY == 'true'
           && github.event.workflow_run.conclusion == 'success'
           && github.event.workflow_run.event == 'push'
           && github.event.workflow_run.head_branch == 'main'
+          && github.event.workflow_run.head_repository.full_name == github.repository
+          && github.event.workflow_run.head_sha == github.sha
         )
       )
     runs-on: ubuntu-latest
@@ -36,30 +39,44 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess
+
+          def api(path):
+              return json.loads(subprocess.check_output(["gh", "api", f"repos/sginfoocio/abc/{path}"]))
+
+          # github.sha is the default-branch head for workflow_run events as well.
           commit = os.environ["GITHUB_SHA"]
-          statuses = json.loads(subprocess.check_output([
-              "gh", "api", f"repos/sginfoocio/abc/commits/{commit}/statuses?per_page=100"
-          ]))
-          statuses = [item for item in statuses if item.get("context") == "cloud-production/published-image"]
-          if not statuses:
-              raise SystemExit("This commit has no recorded image publication.")
-          latest = statuses[0]
-          match = re.fullmatch(
-              r"(ghcr[.]io/sginfoocio/abc@sha256:[0-9a-f]{64}) actions-([1-9][0-9]*)-([1-9][0-9]*)",
-              latest.get("description") or "",
+          if api("branches/main")["commit"]["sha"] != commit:
+              raise SystemExit("Only the current main head can be deployed.")
+          runs = api(
+              f"actions/workflows/deploy.yml/runs?head_sha={commit}&event=push&branch=main"
+              "&status=success&per_page=10"
           )
-          if latest.get("state") != "success" or match is None:
-              raise SystemExit("The recorded image publication is not valid.")
-          run = json.loads(subprocess.check_output([
-              "gh", "api", f"repos/sginfoocio/abc/actions/runs/{match[2]}/attempts/{match[3]}"
-          ]))
+          candidates = runs.get("workflow_runs", [])
+          if runs.get("total_count") != 1 or len(candidates) != 1:
+              raise SystemExit("Commit needs exactly one successful main publication.")
+          run = candidates[0]
           if not (
-              run.get("conclusion") == "success" and run.get("event") == "push"
+              run.get("path") == ".github/workflows/deploy.yml" and run.get("event") == "push"
               and run.get("head_branch") == "main" and run.get("head_sha") == commit
-              and run.get("path") == ".github/workflows/deploy.yml"
-              and run.get("run_attempt") == int(match[3])
+              and run.get("conclusion") == "success"
+              and (run.get("head_repository") or {}).get("full_name") == "sginfoocio/abc"
           ):
-              raise SystemExit("Recorded image has no matching successful main publication.")
+              raise SystemExit("Publication run is not the reviewed main workflow.")
+          jobs = api(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
+          publish = [job for job in jobs.get("jobs", []) if job.get("name") == "build-and-push"]
+          if jobs.get("total_count") != len(jobs.get("jobs", [])) or len(publish) != 1 \
+                  or publish[0].get("conclusion") != "success":
+              raise SystemExit("Publication job did not succeed.")
+          notes = [
+              item for item in api(f"check-runs/{publish[0]['id']}/annotations?per_page=100")
+              if item.get("title") == "cloud-image-identity"
+          ]
+          match = re.fullmatch(
+              r"(ghcr[.]io/sginfoocio/abc@sha256:[0-9a-f]{64}) ([0-9a-f]{40}) actions-([1-9][0-9]*)-([1-9][0-9]*)",
+              notes[0].get("message") or "",
+          ) if len(notes) == 1 else None
+          if match is None or match[2] != commit or (int(match[3]), int(match[4])) != (run["id"], run["run_attempt"]):
+              raise SystemExit("Image identity annotation is missing or inconsistent.")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write(f"## Cloud release candidate\nCommit: `{commit}`\n\n")
               summary.write(f"Image: `{match[1]}`\n\n")

@@ -8,12 +8,12 @@ Every release no longer needs a root edit on `s2026`. Responsibilities are split
 |---|---|---|
 | Application code | `main` (PR, branch protection, independent review) | Developers |
 | Authorization policy (static: repository, runner, reviewers, image repository, source file names, pinned deploy-workflow blob) | `/etc/cloud-production/release-authority.json`, template `release-authority.json` | Administrator, only when the policy itself changes |
-| Artifact identity (image digest + build run/attempt) | Commit status `cloud-production/published-image` written by `deploy.yml` after build, verification and push | GitHub Actions on `main` only |
+| Artifact identity (image digest + build run/attempt) | `cloud-image-identity` annotation emitted by the `build-and-push` job of `deploy.yml` after build, verification and push, bound to that job's check run | GitHub Actions `deploy.yml` on `main` only |
 | Privileged controller | `/usr/local/sbin/cloud-production-deploy` (root) | Administrator |
 | Production approval | GitHub environment `production` (required reviewers) | Authorized reviewers |
 
 Flow: merge to `main` -> `deploy.yml` (tests, build, push to GHCR, identity
-checks, status) -> `deploy-cloud-production.yml` (only when repository variable
+checks, annotation) -> `deploy-cloud-production.yml` (only when repository variable
 `CLOUD_AUTO_DEPLOY` is `true`; otherwise manual `workflow_dispatch`) -> hosted
 preflight -> `production` approval -> dedicated runner -> root controller.
 
@@ -26,11 +26,14 @@ verifies everything itself, using the public GitHub API over verified TLS:
    reviewer, and the environment still has required reviewers.
 2. Its commit is the *current head of `main`* and the workflow file at that
    commit has exactly the blob SHA pinned in the root authority.
-3. The commit has a successful `cloud-production/published-image` status created
-   by `github-actions[bot]`, whose description is exactly
-   `ghcr.io/sginfoocio/abc@sha256:<64 hex> actions-<run>-<attempt>` and whose URL
-   points at that run. The referenced run must be a successful `deploy.yml` push
-   run on `main` for the same commit.
+3. The commit has exactly one successful `deploy.yml` `push` run on `main`
+   (repository and head repository both `sginfoocio/abc`) whose `build-and-push`
+   job succeeded, including the artifact-verification and annotation steps, and
+   whose check run carries exactly one `cloud-image-identity` annotation of the form
+   `ghcr.io/sginfoocio/abc@sha256:<64 hex> <commit> actions-<run>-<attempt>`
+   matching that run, attempt and commit. Missing, duplicate, truncated
+   (>=100 annotations, mismatching `total_count`) or inconsistent evidence rejects
+   the release. A forged commit status is ignored: statuses are not used.
 4. `previous_commit` is read from the running `abcd-control` revision label and
    must be an ancestor of the commit (forward update only); same-commit replays
    are rejected.
@@ -49,42 +52,93 @@ unset it to stop automation immediately.
 ### One-time administrative installation (replaces the per-release step)
 
 From a root-only copy of a reviewed, merged `main` revision (never a
-runner-writable checkout), install the new controller, runner gate and static
-authority, then verify owner/mode. Do not restart services or the runner.
+runner-writable checkout) run the verified installer. It needs the three files
+(`cloud_production_deploy.py`, `runner_job_gate.py`, `release-authority.json`) in
+one directory and refuses to install unless: the commit is contained in `main`;
+each file's git blob SHA equals the one GitHub reports for that path at the
+commit; the authority passes the controller's own validation and pins the
+production workflow blob of that commit; both Python files compile. It backs up
+the current files with a SHA-256 manifest in
+`/etc/cloud-production/migration-backup-<UTC>/`, installs atomically
+(root:root, fixed modes), leaves `approved-release.json`, Compose, sudoers,
+secrets, Docker, the NAS and the runner untouched, and restarts nothing.
 
 ```sh
 SOURCE=/root/cloud-deploy-review/deployment/cloud
-install -o root -g root -m 0755 "$SOURCE/cloud_production_deploy.py" /usr/local/sbin/cloud-production-deploy
-install -o root -g root -m 0644 "$SOURCE/runner_job_gate.py" /usr/local/libexec/cloud-runner-job-gate.py
-install -o root -g root -m 0600 "$SOURCE/release-authority.json" /etc/cloud-production/release-authority.json
+python3 -I "$SOURCE/pipeline_install.py" install --commit <merged-main-sha> --source "$SOURCE"
 ```
 
-Then, as repository admin: confirm the `production` environment requires
-reviewers (enable "prevent self-review" if a second reviewer exists), confirm
-branch protection on `main`, and only when ready set `CLOUD_AUTO_DEPLOY=true`.
-The old `/etc/cloud-production/approved-release.json` is no longer read and may
-be archived. If `deploy-cloud-production.yml` is ever edited, its new blob SHA
+Migration order:
+
+1. Install as above (automation still off; `CLOUD_AUTO_DEPLOY` unset).
+2. Validate by hand: run `Deploy Cloud Production` via `workflow_dispatch` on a
+   current `main` head, approve it in `production`, check `deployed`/`healthy`.
+3. Only after a successful manual run, as repository admin, set
+   `CLOUD_AUTO_DEPLOY=true`.
+4. Archive `/etc/cloud-production/approved-release.json` (it is no longer read;
+   it is kept for recovery).
+
+Administrator checks (not verifiable without admin access, so **not** assumed):
+branch protection on `main` (required `tests`/`build-and-push`, independent
+review, no force pushes); `production` requires reviewers; enabling
+"prevent self-review" (needs a second reviewer, then set
+`require_prevent_self_review` to `true` in the authority and reinstall); Actions
+permissions of the repository; restricting who can write packages in GHCR.
+Verified publicly on 2026-10-22: `production` requires reviewer `sginfoocio`
+only (self-review currently allowed), admins cannot bypass, and deployments are
+limited to the `main` branch.
+
+If `deploy-cloud-production.yml` is ever edited, its new blob SHA
 (`git rev-parse HEAD:.github/workflows/deploy-cloud-production.yml`) must be
-re-installed in the authority; until then deployments fail closed.
+put in `release-authority.json` in the same reviewed PR and reinstalled; until
+then deployments fail closed. The controller makes about 20 unauthenticated GitHub
+API calls per resolution (done in `submit` and again in the worker, about 40 per
+release); the 60 requests/hour per-IP limit therefore allows at most one release
+per hour from `s2026`, and rate limiting fails closed (`rejected`, nothing mutated).
 
 ### Rollback
 
 Automatic: the controller restores the retained rollback image on any failure.
-Manual: stop automation (`CLOUD_AUTO_DEPLOY` unset), then an administrator
-re-tags/pins `cloud-production:rollback-<previous_commit>` in
+Manual app rollback: stop automation (unset `CLOUD_AUTO_DEPLOY`), then an
+administrator re-tags/pins `cloud-production:rollback-<previous_commit>` in
 `/etc/cloud-production/compose.private.json` and runs the documented app-only
-Compose command. Rolling back the *pipeline* itself: re-install the previous
-controller and authority files and leave automation disabled.
+Compose command.
+
+Pipeline rollback (back to the per-release mechanism): unset `CLOUD_AUTO_DEPLOY`,
+then as root
+
+```sh
+python3 -I "$SOURCE/pipeline_install.py" rollback --backup /etc/cloud-production/migration-backup-<UTC>
+```
+
+This verifies the backup checksums, confirms `approved-release.json` is
+unchanged, restores the previous controller and gate, and removes the new
+`release-authority.json`. Note the previous controller needs a matching
+per-release `approved-release.json`.
 
 ### Residual risks
 
-- A commit status can be written by any workflow with `statuses: write`; the
-  controller therefore treats it only as a hint and re-verifies run, labels,
-  build identity and source hashes. Keep `deploy.yml` changes under review.
+- Identity is read through the GitHub API (annotation of the genuine job's check
+  run plus run/job/step facts), not verified cryptographically. A workflow with
+  `checks: write` could in theory modify annotations on a check run it did not
+  create; this has not been tested and no workflow in the repository holds
+  `checks: write` (`deploy.yml` no longer holds `statuses: write` either). A
+  future hardening is build provenance attestations
+  (`actions/attest-build-provenance` + `gh attestation verify`), not implemented.
+- A repository writer could push a branch with a workflow that publishes an
+  arbitrary image to GHCR. It cannot produce the annotation on the genuine
+  `deploy.yml` job, and the controller re-checks the image's source hashes, labels
+  and a synthetic Luxottica regression, but a human must still approve in
+  `production`; restrict GHCR package write access.
 - Trust in `deploy.yml` (what gets built) rests on branch protection and review.
-- The GitHub API is queried unauthenticated; rate limiting fails closed.
+- The GitHub API is queried unauthenticated; rate limiting and incomplete
+  responses fail closed.
 - With a single reviewer, that person approves their own production deployments;
   add a second reviewer and enable prevent-self-review to get independent approval.
+- `workflow_run` executes the workflow of the default-branch head; the controller
+  and the workflow condition both require the triggering commit to equal that
+  head, so reruns of old workflows and the first of two consecutive merges are
+  rejected (the second merge's own run deploys).
 
 > The sections below are historical runbooks written for the earlier per-release
 > policy (`approved-release.json`). Where they conflict with this section, this
