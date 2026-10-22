@@ -102,6 +102,24 @@ reemplaza `abcd-app`; un fallo restaura `cloud-production:rollback-<previous>`. 
    sin resolver; el digest no coincide; SQLite < 3.31; espacio libre insuficiente; aparece un error en Kering o
    Luxottica; algún proceso intenta escribir o borrar originales; se detecta un secreto en logs.
 
+## 4b. Persistencia del almacén de solicitudes (`PROVIDER_DATA_ROOT`)
+
+El almacén es `<raíz>/provider_requests.sqlite` y su *staging* `<raíz>/provider_staging`. La raíz se resuelve así:
+`PROVIDER_DATA_ROOT` si existe; si no, el directorio hermano de `KERING_DATA_ROOT` (`/app/data/kering` →
+`/app/data/providers`, ambos en el volumen persistente); y solo sin ninguna variable, `masterdata_data/providers`
+junto al código (desarrollo local). En producción debe resultar `/app/data/providers`.
+
+- `docker-compose.yml` (plantilla del repositorio) fija `PROVIDER_DATA_ROOT: /app/data/providers`.
+- La configuración de producción es privada (`/etc/cloud-production/compose.private.json`, gestionada por el
+  controlador de despliegue). **No se edita a mano.** Con `KERING_DATA_ROOT=/app/data/kering` ya presente en ella,
+  el valor por defecto cae en el volumen sin cambios. Si el administrador quiere fijarlo explícitamente, debe
+  hacerlo por el cauce autorizado de esa configuración, no desde este repositorio.
+- Comprobación de solo lectura antes de usar la pantalla: variables del contenedor (solo nombres y estas dos
+  rutas), `ls -ld /app/data /app/data/providers` y `stat` del dueño. El contenedor debe poder crear
+  `/app/data/providers` con su usuario efectivo; si corre como `1037:100` y `/app/data` es de root, hay que crear el
+  directorio de antemano (`install -d -o 1037 -g 100 -m 0700`) como acción administrativa autorizada.
+- La aplicación no migra ni crea solicitudes por sí sola: con un almacén antiguo lanza `StoreMigrationRequired`.
+
 ## 5. Inventario de bloqueos
 
 | Bloqueo | Tipo | Siguiente paso |

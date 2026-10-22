@@ -38,7 +38,15 @@ STATE_LABELS = {
 
 
 def data_root() -> Path:
-    return Path(os.getenv("PROVIDER_DATA_ROOT", str(Path(__file__).parent / "masterdata_data" / "providers")))
+    """Persistent request store. Explicit PROVIDER_DATA_ROOT wins; otherwise it sits next to the Kering state
+    (KERING_DATA_ROOT, on the persistent volume in every environment), never inside the image filesystem."""
+    explicit = os.getenv("PROVIDER_DATA_ROOT")
+    if explicit:
+        return Path(explicit)
+    kering = os.getenv("KERING_DATA_ROOT")
+    if kering:
+        return Path(kering).parent / "providers"
+    return Path(__file__).parent / "masterdata_data" / "providers"
 
 
 class LazyRepository:
