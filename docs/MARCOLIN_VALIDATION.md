@@ -105,14 +105,17 @@ Solo existe el contrato (`MarcolinDriver`) y el adaptador `MarcolinPortal`; **no
 4. Importar el ZIP en Cloud: lo ambiguo va a revisión; verificar originales, SHA-256, miniaturas y biblioteca.
 5. `MARCOLIN_AUTOMATION_ENABLED` sigue en `false` hasta decidir, con esos datos, si procede un driver real.
 
-## 7. Ajustes detectados en otras PR (fuera del alcance de #76)
+## 7. Ajustes en otras PR (resueltos en sus ramas, pendientes de revisión/CI)
 
-- **#70/#71 — duplicado de solicitudes:** planificar el UPC-12 y su EAN-13 con cero inicial crea **dos** solicitudes
-  vivas (el índice único usa el EAN literal y la coincidencia usa la clave de 14 dígitos). El portal agrupa por UPC, así
-  que hay riesgo de duplicar. Unificar el índice por clave.
-- **#71/#74 — separador:** `export_ean_list` usa comas por defecto y la UI dice «separada por comas»; Marcolin necesita
-  saltos de línea (`export_ean_list(id, "\n")` ya funciona): default propio para Marcolin y texto de UI.
-- **#75 — no es estrictamente solo lectura:** `build_preview`/`pick_pilot` usan `ImageRepository.pending_views`, cuyo
-  constructor crea directorios y DDL. Hace falta un lector de catálogo de solo lectura (como el de este script) y que
-  «Imágenes: Ausentes» se rotule «sin registros en el catálogo».
+- **#70/#71 — identidad UPC-12 ↔ EAN-13:** la clave de 14 dígitos (`ean_key`) es ahora la identidad de la solicitud en
+  curso (columna generada + índice único parcial). El código original se conserva para mostrar y exportar. Las bases
+  existentes **no se migran solas**: `python scripts/provider_requests_migrate.py --root <dir>` informa (dry-run) y
+  `--apply` migra con copia previa; se niega si hay conflictos y no borra historial.
+- **#71/#74 — separador:** Marcolin exporta un código por línea (`list_separator`); los demás proveedores siguen con comas.
+  La relación UPC ↔ referencia modelo/color del portal se guarda con `MarcolinConnector.record_portal_groups`
+  (estado del portal literal, sin descartar inactivas, sin tocar el estado de la solicitud).
+- **#75 — catálogo solo lectura:** la vista previa usa `repository_catalog_readonly` (el mismo criterio que este script,
+  verificado por `tests/test_catalog_reader_parity.py`) y no construye `ImageRepository`.
+- Este script sigue siendo autónomo porque producción solo tiene `sqlalchemy`, `kering_jobs` e `image_repository`. Su
+  versión nueva **no se ha ejecutado en producción**.
 - La cobertura de este script solo es comparable con la del repositorio si se usa `--verify-files`.
