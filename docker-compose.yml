@@ -54,6 +54,7 @@ services:
       AUTH_COOKIE_SECRET: ${AUTH_COOKIE_SECRET}
       AUTH_STATE_PATH: ${AUTH_STATE_PATH:-/app/data/auth_state.sqlite3}
       KERING_DATA_ROOT: /app/data/kering
+      PROVIDER_DATA_ROOT: /app/data/providers
       KERING_ENCRYPTION_KEY: ${KERING_ENCRYPTION_KEY:-}
       KERING_ENCRYPTION_KEY_FILE: ${KERING_ENCRYPTION_KEY_FILE:-}
 
