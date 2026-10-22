@@ -1,7 +1,7 @@
 """Shared core for supplier image connectors (Marcolin, NuORDER, Sáfilo; issue #59).
 
 Portal-independent: durable request store with a transactional state machine, demand
-computed from Odoo purchase orders (read-only), file/EAN matching with explicit evidence,
+from explicit EAN lists (optionally from Odoo purchase orders), file/EAN matching with explicit evidence,
 and import into the common ImageRepository. Portals plug in through ``ProviderPortal``;
 nothing here touches the network and no credentials are handled.
 """
@@ -676,6 +676,17 @@ class ProviderConnector:
 
     def __init__(self, service: ProviderService, engine=None):
         self.service, self.engine = service, engine
+
+    def plan_eans(self, eans, *, mode: str | None = None, limit: int | None = None) -> dict:
+        """Plan supplied EANs without consulting Odoo; imported images still need evidence."""
+        if isinstance(eans, str):
+            eans = re.split(r"[,;\\s]+", eans.strip())
+        valid, invalid = normalize_eans(eans)
+        selected = valid[:limit] if limit is not None else valid
+        result = self.service.store.plan(self.service.settings, selected,
+                                         mode=mode or self.default_mode)
+        return {**result, "invalid": invalid, "source": "manual_eans",
+                "selected": len(selected)}
 
     def detect(self, start: date, end: date, *, mode: str | None = None, limit: int | None = None) -> dict:
         demand = provider_demand(self.engine, self.service.repository, self.service.settings, start, end)
