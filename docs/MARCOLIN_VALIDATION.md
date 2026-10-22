@@ -1,54 +1,118 @@
 # Marcolin: validación real (#59) — estado y procedimiento
 
-Estado a 2026-10-22. **Nada de lo que sigue se ha validado contra Odoo ni contra el portal reales**: el entorno de
-desarrollo no tiene la conexión de Cloud a Odoo (`DB_*` sin definir) ni acceso autorizado al portal Marcolin.
+Estado a 2026-10-22. Este documento separa **lo observado**, **lo comunicado por el usuario** y **lo pendiente**. No se
+publican códigos comerciales, identificadores de pedido o de solicitud, capturas ni credenciales. El proceso completo
+(Odoo → portal → ZIP → biblioteca) **no está validado**.
 
-## 1. Auditoría de Odoo (solo lectura)
+## 1. Observado en el piloto real (22/10/2026)
 
-Ejecutar donde Cloud ya conecta a Odoo (usa `kering_jobs.db_engine`; no imprime ni guarda credenciales):
+Las dos auditorías autónomas **no las hizo `scripts/marcolin_odoo_pilot.py` en su versión original**: se ejecutaron
+en el host de producción con código ad hoc. Este PR incorpora una versión autónoma del script (§4) que reproduce esas
+comprobaciones, pero esa versión **todavía no se ha ejecutado contra producción**.
 
-```
-python scripts/marcolin_odoo_pilot.py --partner 573 --days 365 --size 8
-```
-
-Comprueba: que el partner 573 se llama MARCOLIN (el nombre solo se informa, **no guarda ninguna asociación**), su
-familia de contactos comerciales, pedidos por estado, líneas de pedidos `purchase`/`done` (excluye cancelados y
-borradores), referencias y EAN, sin EAN, EAN inválidos, duplicados y cobertura en la biblioteca (completas / parciales /
-ausentes). Escribe `proposals/marcolin_pilot_<fecha>.json` y `.csv` en `PROVIDER_DATA_ROOT` con la tabla del lote
-(EAN, referencia, pedido, fecha, estado de imágenes, proveedor, motivo) y estado `propuesta_pendiente_de_aprobacion`.
-No crea solicitudes. Códigos de salida: 0 informe, 2 Odoo no disponible (bloqueo registrado), 3 el partner no es Marcolin.
-
-Resultado de la ejecución en el equipo de desarrollo: **bloqueo `odoo_no_disponible`** (exit 2). Pendiente de ejecutar en
-el host de Cloud y adjuntar el JSON (sin datos sensibles) en #59.
-
-Después: revisar la propuesta, confirmar a mano la asociación en Cloud (Proveedores de imágenes → Marcolin → Odoo →
-«Asociación…») y solo entonces aprobar el lote y crear solicitudes. Nada se envía al portal.
-
-## 2. Qué le falta al driver de Marcolin
-
-Existe solo el contrato (`MarcolinDriver`: `submit`, `status_text`, `download`, `requests`) y el adaptador
-`MarcolinPortal`. No hay driver real. Para tenerlo hay que confirmar, con acceso autorizado y por escrito:
-
-| Punto | Qué se necesita saber | Cómo afecta |
+| Qué | Resultado | Alcance |
 |---|---|---|
-| Autenticación | usuario/contraseña, SSO, API o sólo web | decide HTTP frente a navegador |
-| MFA / CAPTCHA | existencia y frecuencia | si los hay, sesión asistida por una persona (`InterventionRequired`), no automatizable |
-| Condiciones de uso | si permiten automatizar | sin permiso, sólo modo manual |
-| Introducción de EAN | pegado, CSV o selección; separador | `export_ean_list` ya emite lista separada por comas |
-| Límite por solicitud | máximo real de EAN | hoy 50 provisional (`batch_size_verified=false`) |
-| Envío e id de solicitud | dónde se muestra el id | se registra como `remote_id`; si no hay id, la reconciliación es manual |
-| Estados del portal | vocabulario exacto | `map_portal_status`; los desconocidos van a revisión |
-| Descarga | enlace, caducidad, cuándo disponible | `download()` y backoff de sondeo |
-| ZIP | estructura, nombres, vistas | determina el emparejamiento con evidencia |
-| Manifiesto | si existe y su formato | sin él, solo EAN completo en el nombre o revisión |
+| Auditoría autónoma de Odoo | Seis UPC de un pedido de compra confirmado de Marcolin confirmados con PostgreSQL en modo `READ ONLY` y rollback | Solo ese pedido; no es una auditoría anual ni valida todos los contactos comerciales |
+| Auditoría autónoma del catálogo | Catálogo SQLite abierto en solo lectura (`mode=ro`, `query_only`) sin instanciar `ImageRepository`: **sin registros** para los seis UPC ni para sus equivalentes con cero inicial | Prueba la ausencia **en el catálogo**, no la de archivos sin catalogar |
+| Portal, selección | Asset requests → Products images → Purpose *Web site* → Use *Product catalogue* → marca → Apply filters → `Select by list` → seis UPC de 12 dígitos pegados separados por saltos de línea | Observado en una sesión iniciada por el usuario |
+| Portal, agrupación | El portal agrupó los seis UPC en **cuatro referencias de modelo/color**: 0 activas, 4 inactivas en la colección, 0 incorrectas | Una sola prueba, seis códigos |
+| Portal, envío | Con autorización del usuario se envió la solicitud y se vio **una** solicitud en `My pending requests` | La descarga sigue pendiente |
 
-## 3. Procedimiento manual autorizado para el piloto (sin automatización)
+## 2. Comunicado por el usuario (no verificado por nosotros)
 
-1. Aprobar el lote en Cloud y crear solicitudes (estado `ready`; no se contacta con el portal).
-2. Una persona con credenciales entra al portal Marcolin (Multimedia → solicitudes de activos), pega la lista de EAN
-   exportada y envía la solicitud. **Anotar**: método de login, si hubo MFA/CAPTCHA, límite de EAN aceptado, id de
-   solicitud, textos de estado, cuánto tarda y cómo se descarga.
-3. Reconciliar el id en Cloud si se desea seguimiento; descargar el ZIP cuando esté disponible.
-4. Guardar la estructura del ZIP (listado de nombres, manifiesto si lo hay) en #59 antes de importar.
-5. Importar el ZIP en Cloud; lo ambiguo queda en revisión. Verificar originales, SHA-256, miniaturas y biblioteca.
-6. Con esos datos se decide si procede un driver real; hasta entonces `MARCOLIN_AUTOMATION_ENABLED` sigue en `false`.
+- Preparación: rara vez menos de 24 h y puede tardar varios días.
+- La interfaz indica un máximo de 300 códigos; **solo se han probado seis**. El límite real no está verificado.
+- El login/MFA se conoce solo como una sesión iniciada por el usuario: frecuencia de MFA/CAPTCHA y permiso para
+  automatizar no están verificados.
+
+## 3. Pendiente (no afirmar hasta observarlo)
+
+Descarga del ZIP, estructura de nombres, manifiesto, vistas disponibles, caducidad del enlace, correspondencia
+imagen↔UPC e importación. Las cuatro vistas de la biblioteca (frontal, lateral, perspectiva, detalle) son la taxonomía
+del repositorio, **no una política confirmada de Marcolin**. Una referencia «inactiva» o una solicitud pendiente durante
+días **no se descarta ni se repite**: el estado del portal se registra tal cual y nunca filtra códigos.
+
+## 4. Ejecución autónoma de la auditoría (solo lectura)
+
+`scripts/marcolin_odoo_pilot.py` solo importa `sqlalchemy`, `kering_jobs` e `image_repository`, los módulos presentes en
+producción (`provider_images`, `provider_odoo_orders` y `marcolin_images` **no** están allí). Si falta alguno, termina con
+el bloqueo `dependencia_ausente` (exit 5), con solo los nombres de módulo.
+
+El sistema de archivos del contenedor es de solo lectura, así que el script se pasa por **entrada estándar** (no hay
+que copiarlo ni instalarlo) y los informes se dirigen a un volumen con escritura (`/app/data` o `/app/image-state`):
+
+```
+docker exec -i -w /app <contenedor> python - --partner 573 --days 365 --size 8 \
+    --upc-file /app/data/in/upcs.txt --out /app/data/audits < scripts/marcolin_odoo_pilot.py
+```
+
+(En PowerShell: `Get-Content -Raw -Encoding utf8 scripts\marcolin_odoo_pilot.py | docker exec -i ... python - ...`.)
+Las credenciales `DB_*` ya están en el entorno del contenedor y nunca se imprimen; los errores solo muestran la clase.
+
+| Parámetro | Uso |
+|---|---|
+| `--partner`, `--expect-name` | partner de Odoo y fragmento de nombre que debe contener (por defecto `marcolin`); solo informa, **no guarda asociaciones** |
+| `--days`, `--max-lines`, `--timeout-ms` | intervalo y límites de volumen/tiempo de la lectura |
+| `--upc`, `--upc-file`, `--order-name` | códigos a confirmar y/o pedidos concretos; sin ellos descubre desde los pedidos `purchase`/`done` |
+| `--portal-groups FILE` | JSON `{"groups":[{"portal_ref","status","upcs":[...]}]}` con las referencias modelo/color que devolvió el portal; se mantiene fuera de GitHub |
+| `--catalog`, `--image-root` | catálogo (por defecto `IMAGE_REPOSITORY_STATE_ROOT`/`IMAGE_REPOSITORY_ROOT` + `/.catalog.sqlite3`) y raíz de imágenes |
+| `--verify-files` | además de metadatos, comprueba ruta, tamaño, SHA-256 y huella de cada archivo |
+| `--required-view` | vistas que cuentan como completas (por defecto frontal, lateral, perspectiva; **no es política de Marcolin**) |
+| `--max-codes` | tope de entrada (300, el valor que indica la interfaz; sin verificar) |
+| `--out` | directorio de informes (obligatorio para guardar; ficheros exclusivos 0600, nunca sobrescribe) |
+
+**Entrada de códigos.** Un UPC por línea (el portal avisa de no usar comas ni espacios). Los códigos se tratan como
+texto y se conservan literalmente (un UPC de 12 dígitos con cero inicial no se convierte a número). Las formas
+equivalentes (UPC-12 / EAN-13 con cero) solo se usan para buscar y para avisar de duplicados equivalentes. Con
+`--portal-groups` el informe mantiene la relación UPC → referencia modelo/color del portal, y lista los UPC sin grupo,
+los repetidos en varios grupos y los grupos vacíos.
+
+**Solo lectura.** Odoo: `SET TRANSACTION READ ONLY` + `statement_timeout` + rollback; solo pedidos `purchase`/`done`.
+Catálogo: `file:…?mode=ro` + `PRAGMA query_only`; no se usa `ImageRepository` (su constructor crea directorios y ejecuta
+DDL), no se crea ni modifica nada y no se usa `immutable=1`, de modo que se leen también las filas que solo están en un
+WAL activo (se informa del modo de journal y de la presencia de `-wal`).
+
+**Cobertura.** `completas`, `parciales`, `sin_registros`, `sin_vistas_validas` o `desconocida`. Un catálogo inexistente,
+ilegible o con esquema distinto da `desconocida` (exit 6, informe parcial), **nunca** «sin imágenes». Sin
+`--verify-files` el informe declara `solo_metadatos_del_catalogo`; `sin_registros` no prueba que no haya archivos sin
+catalogar. La propuesta (máx. 10) queda en `propuesta_pendiente_de_aprobacion`; `requests_created` es 0 y
+`portal_contacted` es `false`.
+
+Códigos de salida: 0 completo · 2 Odoo no disponible o entrada inválida · 3 el partner no coincide · 4 informe no
+escrito · 5 dependencia ausente · 6 parcial (catálogo no consultable).
+
+## 5. Qué falta al driver de Marcolin
+
+Solo existe el contrato (`MarcolinDriver`) y el adaptador `MarcolinPortal`; **no hay driver real**.
+
+| Punto | Estado |
+|---|---|
+| Autenticación, MFA/CAPTCHA, permiso para automatizar | Sin verificar (solo se sabe de una sesión iniciada por el usuario) |
+| Introducción | Observado: `Select by list`, un UPC-12 por línea |
+| Límite por solicitud | UI indica 300; probados 6; el conector sigue en 50 provisional (`batch_size_verified=false`) |
+| Envío e id | Se vio una solicitud en `My pending requests`; el id no se publica |
+| Estados | Solo «pending» observado; el resto del vocabulario está sin verificar |
+| Tiempos | Según el usuario, de 24 h a varios días; el sondeo no debe reenviar |
+| Descarga, ZIP, nombres, manifiesto, vistas, caducidad | Pendiente |
+
+## 6. Procedimiento manual autorizado (sin automatización)
+
+1. Ejecutar la auditoría (§4) y revisar la propuesta; aprobarla a mano.
+2. Una persona con credenciales pega los UPC (uno por línea) en `Select by list`, anota el resultado del portal (grupos
+   modelo/color y su estado) y lo guarda como `--portal-groups`. No se repite una solicitud ya pendiente.
+3. Cuando el portal la prepare, descargar el ZIP y guardar la lista de nombres y el manifiesto (si existe) en #59, sin
+   códigos reales.
+4. Importar el ZIP en Cloud: lo ambiguo va a revisión; verificar originales, SHA-256, miniaturas y biblioteca.
+5. `MARCOLIN_AUTOMATION_ENABLED` sigue en `false` hasta decidir, con esos datos, si procede un driver real.
+
+## 7. Ajustes detectados en otras PR (fuera del alcance de #76)
+
+- **#70/#71 — duplicado de solicitudes:** planificar el UPC-12 y su EAN-13 con cero inicial crea **dos** solicitudes
+  vivas (el índice único usa el EAN literal y la coincidencia usa la clave de 14 dígitos). El portal agrupa por UPC, así
+  que hay riesgo de duplicar. Unificar el índice por clave.
+- **#71/#74 — separador:** `export_ean_list` usa comas por defecto y la UI dice «separada por comas»; Marcolin necesita
+  saltos de línea (`export_ean_list(id, "\n")` ya funciona): default propio para Marcolin y texto de UI.
+- **#75 — no es estrictamente solo lectura:** `build_preview`/`pick_pilot` usan `ImageRepository.pending_views`, cuyo
+  constructor crea directorios y DDL. Hace falta un lector de catálogo de solo lectura (como el de este script) y que
+  «Imágenes: Ausentes» se rotule «sin registros en el catálogo».
+- La cobertura de este script solo es comparable con la del repositorio si se usa `--verify-files`.
