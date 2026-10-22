@@ -99,12 +99,18 @@ def render_provider_page(engine_factory) -> None:
         _review(connector)
 
 
+def export_caption(connector) -> str:
+    if connector.list_separator == "\n":
+        return "Lista para pegar en el portal: un código por línea, sin comas ni espacios."
+    return "Lista de EAN para pegar en el portal (separada por comas)."
+
+
 def _request_actions(connector, rows) -> None:
     store, service = connector.service.store, connector.service
     selected = st.selectbox("Solicitud", [r["Solicitud"] for r in rows], key="prov_request")
     request = store.get(selected)
     st.code(connector.export_ean_list(selected), language="text")
-    st.caption("Lista de EAN para pegar en el portal (separada por comas).")
+    st.caption(export_caption(connector))
     for event in store.events(selected):
         st.text(f"{event['from_state'] or '-'} → {event['to_state']}  {event['detail'] or ''}")
     upload = st.file_uploader("ZIP descargado del portal", type=["zip"], key=f"prov_zip_{selected}")

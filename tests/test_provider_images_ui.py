@@ -146,3 +146,10 @@ def test_odoo_down_shows_error_and_manual_planning_still_works(monkeypatch, tmp_
     app.text_area(key="prov_manual_eans").set_value(EANS[0]).run()
     app.button(key="prov_manual_plan").click().run()
     assert len(ui.ProviderStore(tmp_path).list_requests("marcolin")) == 1
+
+
+def test_export_caption_follows_connector_separator():
+    from marcolin_images import MarcolinConnector
+    from provider_images import ProviderConnector
+    assert "un código por línea" in ui.export_caption(MarcolinConnector.__new__(MarcolinConnector))
+    assert "separada por comas" in ui.export_caption(ProviderConnector.__new__(ProviderConnector))

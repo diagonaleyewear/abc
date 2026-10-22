@@ -83,3 +83,47 @@ def test_manual_assisted_path_without_portal(setup):
                          f"filename,ean,view\na.png,{EANS[0]},perspectiva\n".encode()})
     assert connector.import_zip(rid, archive)["imported"] == 1
     assert repo.records(EANS[0])[0].view == "perspectiva"
+
+
+def test_marcolin_exports_one_code_per_line_and_others_keep_commas(setup):
+    connector, store, repo, clock = setup
+    upcs = [e[1:] for e in EANS if e.startswith("0")] or [EANS[0]]
+    result = connector.plan_eans(upcs[:2] if len(upcs) > 1 else [EANS[0], EANS[1]])
+    request_id = result["created"][0]
+    exported = connector.export_ean_list(request_id)
+    assert "," not in exported and " " not in exported
+    assert exported.split("\n") == [e["ean"] for e in store.get(request_id)["eans"]]
+    assert connector.export_ean_list(request_id, ",").count(",") == exported.count("\n")
+    from provider_images import ProviderConnector
+    assert ProviderConnector.list_separator == ","
+
+
+def test_portal_groups_keep_every_upc_and_inactive_references(setup):
+    connector, store, repo, clock = setup
+    result = connector.plan_eans([EANS[0], EANS[1]])
+    request_id = result["created"][0]
+    before = store.get(request_id)["state"]
+    report = connector.record_portal_groups(request_id, [
+        {"portal_ref": "REF-A", "status": "inactive", "upcs": [EANS[0]]},
+        {"portal_ref": "REF-B", "status": "inactive", "upcs": [EANS[1], EANS[2]]},
+    ])
+    assert report["stored"] == 2 and report["not_in_request"] == [EANS[2]] and report["unassigned"] == []
+    groups = connector.portal_groups(request_id)
+    assert {g["portal_ref"]: g["upcs"] for g in groups} == {"REF-A": [EANS[0]], "REF-B": [EANS[1]]}
+    assert all(g["status"] == "inactive" for g in groups)
+    assert store.get(request_id)["state"] == before
+    again = connector.record_portal_groups(request_id, [{"portal_ref": "REF-A", "status": "inactive", "upcs": [EANS[0]]}])
+    assert again["stored"] == 0
+    with pytest.raises(ValueError):
+        connector.record_portal_groups(request_id, [{"portal_ref": " ", "upcs": [EANS[0]]}])
+
+
+def test_portal_groups_match_upc12_to_ean13_and_keep_original(setup):
+    connector, store, repo, clock = setup
+    from provider_support import make_ean
+    ean13 = make_ean("003600029145")
+    upc = ean13[1:]
+    request_id = connector.plan_eans([upc])["created"][0]
+    report = connector.record_portal_groups(request_id, [{"portal_ref": "REF-X", "status": "", "upcs": [ean13]}])
+    assert report["stored"] == 1 and report["not_in_request"] == []
+    assert connector.portal_groups(request_id)[0]["upcs"] == [upc]
