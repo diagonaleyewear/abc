@@ -31,7 +31,7 @@ Interruptores: `MARCOLIN_/NUORDER_/SAFILO_AUTOMATION_ENABLED` (por defecto `fals
 | Solicitud diferida + estados + sin duplicados | ✅ | n/a (manual) | ✅ síncrono |
 | Interrupción/respuesta ambigua → `needs_review`, nunca reenvío | ✅ | n/a | ✅ |
 | Reintentos seguros | ✅ | ✅ | ✅ |
-| Exportar lista de EAN para el portal | ✅ | ✅ | ✅ (separada por comas) |
+| Exportar lista de EAN para el portal | ✅ (un código por línea) | ✅ (comas) | ✅ (separada por comas) |
 | Subir ZIP (con o sin manifiesto) | ✅ | ✅ | ✅ |
 | ZIP sin manifiesto | EAN completo en nombre, si no → revisión | idem | **siempre revisión** |
 | Vistas V1/V2/V3/detalle, `unknown` → revisión | ✅ | ✅ | ✅ |
@@ -69,6 +69,38 @@ Interruptores: `MARCOLIN_/NUORDER_/SAFILO_AUTOMATION_ENABLED` (por defecto `fals
    que los casos dudosos fueron a revisión.
 4. Solo con resultados correctos, valorar un driver real tras el contrato correspondiente y activar un proveedor con
    `pilot_cap` pequeño. Nada de esto se ha hecho.
+
+## Odoo opcional: EAN desde pedidos de compra (`provider_odoo_orders.py`)
+
+Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia, límite de líneas 2000 por defecto y
+10 000 máximo). Cloud funciona igual sin él; un fallo de Odoo solo muestra un error en ese apartado.
+
+1. **Asociación explícita proveedor Odoo ↔ portal** (`provider_odoo_links.json` en `PROVIDER_DATA_ROOT`, sin secretos).
+   Sin asociación confirmada la consulta se rechaza (`asociacion_proveedor_portal_no_configurada`). «Buscar candidatos»
+   por nombre solo propone; hay que confirmar los ids y queda registrado el revisor y la fecha. Las marcas son
+   informativas: el filtrado por marca requiere conocer el campo real de marca en Odoo y no se ha implementado.
+2. **Consulta**: pedidos en estado `purchase` o `done` (se excluyen `draft`, `sent` y `cancel`), contactos comerciales del
+   partner agrupados, líneas con producto, `default_code`, `barcode`, proveedor, pedido y fecha, más recientes primero.
+3. **Vista previa**: EAN, Referencia, Producto, Proveedor, Pedido, Fecha, Imágenes, Base y Estado (Elegible, Duplicado,
+   Requiere revisión por falta de EAN o EAN inválido, Ya completa). La cobertura se lee del catálogo existente con
+   `repository_catalog_readonly` (solo lectura, WAL-aware, sin construir `ImageRepository` ni crear directorios o tablas) y
+   distingue: *Completas*, *Parciales*, *Sin registros en el catálogo*, *Sin vistas válidas* y *Cobertura desconocida*
+   (catálogo inaccesible: nunca se interpreta como imágenes ausentes ni se propone en el lote piloto). «Base» declara si
+   procede de metadatos del catálogo (por defecto, archivos no verificados) o de archivos verificados. Un UPC-12 y su
+   EAN-13 con cero inicial cuentan como el mismo producto (se conserva el código original). Duplicado = repetido o con
+   solicitud en curso.
+4. **Lote piloto**: «Proponer lote piloto» preselecciona 5–10 EAN elegibles (primero sin imágenes, luego parciales, pedidos
+   recientes); el usuario ajusta la tabla, marca «Apruebo la selección definitiva» y pulsa «Crear solicitudes…».
+   Solo se planifican EAN *Elegibles* de la vista previa (da igual lo marcado), mediante `plan_eans` del núcleo; no se
+   contacta con ningún portal. Cada selección se anota en `provider_odoo_selections.jsonl` (aprobador, pedido, referencia).
+5. Odoo solo prueba el origen del EAN: la imagen descargada sigue necesitando manifiesto, metadatos o revisión.
+
+### Estado de la auditoría real (pendiente)
+
+No se ha podido consultar el Odoo real desde el entorno de desarrollo (sin credenciales). Quedan por ejecutar con una
+cuenta de solo lectura, y registrar en #59: `python scripts/audit_provider_odoo.py --partner marcolin=573` (contactos,
+pedidos y EAN de MARCOLIN IBERICA), búsqueda de candidatos de Sáfilo y de las marcas NuORDER (Dita, Cutler, Akoni, Linda
+Farrow). Hasta validarlo, ninguna asociación está guardada.
 
 ## Originales
 
