@@ -101,6 +101,7 @@ jobs:
           docker run --rm --network none -e EXPECTED_COMMIT -e EXPECTED_BUILD -e EXPECTED_PUBLISHED -e EXPECTED_VERSION "$IMAGE" python -c "
           import os
           import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
+          import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
           from build_info import load_build_info
           info = load_build_info()
