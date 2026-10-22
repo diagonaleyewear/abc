@@ -127,3 +127,21 @@ def test_portal_groups_match_upc12_to_ean13_and_keep_original(setup):
     report = connector.record_portal_groups(request_id, [{"portal_ref": "REF-X", "status": "", "upcs": [ean13]}])
     assert report["stored"] == 1 and report["not_in_request"] == []
     assert connector.portal_groups(request_id)[0]["upcs"] == [upc]
+
+
+def test_portal_status_change_is_kept_as_history_and_current_view_follows_it(setup):
+    connector, store, repo, clock = setup
+    request_id = connector.plan_eans([EANS[0]])["created"][0]
+    first = [{"portal_ref": "REF-A", "status": "inactive", "upcs": [EANS[0]]}]
+    assert connector.record_portal_groups(request_id, first)["stored"] == 1
+    assert connector.record_portal_groups(request_id, first)["stored"] == 0
+    clock[0] += 3600
+    later = [{"portal_ref": "REF-A", "status": "active", "upcs": [EANS[0]]}]
+    assert connector.record_portal_groups(request_id, later)["stored"] == 1
+    assert [(g["status"], g["upcs"]) for g in connector.portal_groups(request_id)] == [("active", [EANS[0]])]
+    clock[0] += 3600
+    assert connector.record_portal_groups(request_id, first)["stored"] == 1  # back to inactive is a new observation
+    assert connector.portal_groups(request_id)[0]["status"] == "inactive"
+    with connector.service.store.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM marcolin_portal_groups").fetchone()[0] == 3
+    assert store.get(request_id)["state"] == "ready"
