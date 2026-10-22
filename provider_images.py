@@ -786,6 +786,7 @@ class ProviderConnector:
     """Common connector surface used by the UI and CLI; portal specifics live in subclasses."""
     provider = ""
     default_mode = "portal"
+    list_separator = ","
     defaults: ProviderSettings
 
     def __init__(self, service: ProviderService, engine=None):
@@ -824,7 +825,8 @@ class ProviderConnector:
         eans = demand["eans"][:limit] if limit else demand["eans"]
         return {**demand, **self.service.store.plan(self.service.settings, eans, mode=mode or self.default_mode)}
 
-    def export_ean_list(self, request_id: int, separator: str = ",") -> str:
+    def export_ean_list(self, request_id: int, separator: str | None = None) -> str:
+        separator = self.list_separator if separator is None else separator
         return separator.join(e["ean"] for e in self.service.store.get(request_id)["eans"])
 
     def import_zip(self, request_id: int, content: bytes) -> dict:
