@@ -56,4 +56,43 @@ def test_page_renders_for_admin_without_contacting_portals(monkeypatch, tmp_path
     app.run()
     assert not app.exception and app.title[0].value == ui.TITLE
     assert any("desactivada" in c.value for c in app.caption)
-    assert [t.label for t in app.tabs] == ["Solicitudes", "Detectar demanda", "Revisión"]
+    assert [t.label for t in app.tabs] == ["Solicitudes", "Planificar por EAN", "Revisión", "Biblioteca"]
+
+
+def test_library_records_show_provider_images_with_thumbnail_and_untouched_original(tmp_path, monkeypatch):
+    import image_thumbnails as thumbnails
+    from image_thumbnails import ThumbnailCache, validate_visible
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    for key in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(key, str(temporary))
+    monkeypatch.setattr(thumbnails.tempfile, "gettempdir", lambda: str(temporary))
+    monkeypatch.setenv("IMAGE_THUMBNAIL_CACHE_ROOT", str(tmp_path / "thumbnails"))
+    monkeypatch.setenv("IMAGE_THUMBNAIL_CACHE_RESERVE_BYTES", "1")
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "images"))
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("KERING_DATA_ROOT", str(tmp_path / "kering"))
+    monkeypatch.setenv("PROCESS_ACTIVITY_PATH", str(tmp_path / "receipts" / "activity.sqlite3"))
+    repo = ImageRepository()
+    content = photo()
+    record, _ = repo.save(EANS[0], "a.jpg", content, provider="marcolin", origin="marcolin:1", view="V1")
+    repo.save(EANS[1], "b.jpg", photo(), provider="kering", origin="kering:x", view="V1")
+    mine = ui.library_records(repo, "marcolin")
+    assert [r.ean for r in mine] == [EANS[0]]
+    assert ui.library_records(repo, "marcolin", EANS[1]) == []
+    access = validate_visible(repo, mine)
+    assert isinstance(ThumbnailCache(repo).get(mine[0], access[mine[0].id]), bytes)
+    assert record.path.read_bytes() == content
+
+
+def test_page_plans_eans_without_odoo_or_portal(monkeypatch, tmp_path):
+    monkeypatch.setenv("PROVIDER_DATA_ROOT", str(tmp_path))
+    app = AppTest.from_function(_page)
+    app.session_state["auth_role"] = "admin"
+    app.run()
+    assert not app.exception
+    app.text_area(key="prov_manual_eans").set_value(f"{EANS[0]}, {EANS[1]} {EANS[1]} 123").run()
+    app.button(key="prov_manual_plan").click().run()
+    assert not app.exception
+    (request,) = ui.ProviderStore(tmp_path).list_requests("marcolin")
+    assert request["ean_count"] == 2

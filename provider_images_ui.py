@@ -18,6 +18,7 @@ import safilo_images
 from image_repository import ImageRepository
 from provider_images import (
     FAILED, NEEDS_REVIEW, PARTIAL, PROVIDERS, ProviderService, ProviderStore, load_settings,
+    parse_ean_file, parse_ean_text,
 )
 
 TITLE = "Proveedores de imágenes"
@@ -78,7 +79,10 @@ def render_provider_page(engine_factory) -> None:
     flag = "activa" if service.settings.automation_enabled else "desactivada"
     st.caption(f"Automatización {flag}. Sin piloto autorizado, el estado debe ser «desactivada». "
                "La introducción directa de EAN no requiere Odoo.")
-    requests_tab, detect_tab, review_tab = st.tabs(["Solicitudes", "Planificar por EAN", "Revisión"])
+    requests_tab, detect_tab, review_tab, library_tab = st.tabs(
+        ["Solicitudes", "Planificar por EAN", "Revisión", "Biblioteca"])
+    with library_tab:
+        _library(connector, provider)
     with requests_tab:
         rows = request_rows(store, provider)
         st.dataframe(rows, use_container_width=True, hide_index=True) if rows else st.info("Sin solicitudes.")
@@ -121,30 +125,72 @@ def _request_actions(connector, rows) -> None:
         st.rerun()
 
 
+def library_records(repository, provider: str, ean: str | None = None) -> list:
+    return [r for r in repository.catalog_records(ean or None) if r.provider == provider]
+
+
+def _library(connector, provider: str) -> None:
+    repository = connector.service.repository
+    ean = st.text_input("Filtrar por EAN (opcional)", key="prov_lib_ean").strip()
+    if not st.button("Mostrar imágenes", key="prov_lib_show"):
+        st.caption("Pulsa para cargar las miniaturas; no se consulta nada al renderizar.")
+        return
+    from app_pages.image_library_page import _visible_previews
+    from image_thumbnails import validate_visible
+    records = library_records(repository, provider, ean)[:60]
+    if not records:
+        st.info("Sin imágenes de este proveedor en la biblioteca común.")
+        return
+    try:
+        previews = _visible_previews(repository, records, validate_visible(repository, records))
+    except (OSError, ValueError, RuntimeError) as error:
+        st.error(f"Biblioteca no accesible: {error}")
+        return
+    columns = st.columns(4)
+    for index, record in enumerate(records):
+        with columns[index % 4]:
+            preview = previews.get(record.id)
+            st.image(preview) if isinstance(preview, bytes) else st.warning(str(preview))
+            st.caption(f"{record.ean} · {record.view} · {record.origin}")
+
+
 def _detect(connector, engine_factory) -> None:
     st.subheader("Introducir EAN directamente")
-    st.caption("Selecciona arriba el proveedor correspondiente. Esta acción solo planifica: "
-               "no consulta Odoo ni accede al portal.")
+    st.caption("Esta acción solo planifica: no consulta Odoo ni accede al portal.")
+    if not connector.service.settings.batch_size_verified:
+        st.warning(f"Tamaño máximo de lote ({connector.service.settings.max_eans_per_request}) "
+                   "provisional: no verificado en el portal real.")
+    upload = st.file_uploader("Importar lista (CSV/TXT)", type=["csv", "txt"], key="prov_ean_file")
     ean_text = st.text_area(
         "EAN (separados por comas, espacios o líneas)",
         key="prov_manual_eans",
         placeholder="Pega una lista de EAN...",
     )
+    tokens = parse_ean_text(ean_text)
+    if upload is not None:
+        tokens += parse_ean_file(upload.getvalue())
+    if tokens:
+        preview = connector.preview_eans(tokens)
+        st.info(f"{preview['total']} introducidos · {len(preview['valid'])} válidos · "
+                f"{preview['duplicates']} duplicados · {len(preview['invalid'])} inválidos · "
+                f"{len(preview['already_live'])} ya en curso · {len(preview['new'])} nuevos")
+        if preview["invalid"]:
+            st.warning("EAN inválidos: " + ", ".join(preview["invalid"][:25]))
     limit_manual = st.number_input("Máximo de EAN por planificación", 1, 5000, 50,
                                    key="prov_manual_limit")
     if st.button("Validar y crear solicitudes", key="prov_manual_plan"):
-        if not ean_text.strip():
+        if not tokens:
             st.warning("Introduce al menos un EAN.")
         else:
-            result = connector.plan_eans(ean_text, limit=int(limit_manual))
+            result = connector.plan_eans(tokens, limit=int(limit_manual))
             st.success(
                 f"Solicitudes creadas: {len(result['created'])}; "
                 f"EAN ya en curso: {len(result['already_live'])}; "
                 f"EAN inválidos: {len(result['invalid'])}."
             )
-            if result["invalid"]:
-                st.warning("EAN rechazados: " + ", ".join(result["invalid"][:25]))
-    with st.expander("Opcional: detectar EAN desde Odoo"):
+    st.divider()
+    with st.expander("Secundario: consultar EAN desde Odoo (opcional)"):
+        st.caption("Solo se ejecuta al pulsar el botón. Cloud funciona sin Odoo.")
         _detect_from_odoo(connector, engine_factory)
 
 
