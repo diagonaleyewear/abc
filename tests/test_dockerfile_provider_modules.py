@@ -29,6 +29,40 @@ def test_dockerfile_copies_local_dependencies_of_provider_modules():
                 assert f"{dep}.py" in copied, f"{module} imports {dep}, which the image lacks"
 
 
+def test_provider_page_imports_with_only_the_files_the_image_copies(tmp_path):
+    """Simulate the image: only Dockerfile COPY sources are available, then import the page."""
+    import shutil
+    import subprocess
+    import sys
+
+    image = tmp_path / "app"
+    image.mkdir()
+    for line in (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines():
+        if not line.startswith("COPY ") or "--from" in line:
+            continue
+        *sources, destination = line.split()[1:]
+        for source in sources:
+            origin = ROOT / source
+            target = image / destination.removeprefix("./")
+            if destination == ".":
+                target = image / origin.name
+            if origin.is_dir():
+                shutil.copytree(origin, target, dirs_exist_ok=True)
+            elif origin.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(origin, target if not str(destination).endswith("/") else target / origin.name)
+    code = (
+        "import provider_images_ui, provider_odoo_orders, repository_catalog_readonly, "
+        "marcolin_images, safilo_images, nuorder_images\n"
+        "from app_pages.image_library_page import _visible_previews\n"
+        "from image_thumbnails import validate_visible\n"
+    )
+    run = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True,
+                         env={**__import__("os").environ, "PYTHONPATH": str(image),
+                              "PYTHONDONTWRITEBYTECODE": "1"})
+    assert run.returncode == 0, run.stderr[-800:]
+
+
 def test_runtime_import_smoke_covers_provider_modules():
     workflow = (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
     assert all(m in workflow for m in MODULES)
