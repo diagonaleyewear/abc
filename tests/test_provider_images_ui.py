@@ -123,6 +123,9 @@ def test_odoo_section_is_secondary_and_never_queries_on_render(monkeypatch, tmp_
 
 
 def test_odoo_query_shows_preview_without_creating_requests(monkeypatch, tmp_path):
+    ImageRepository(tmp_path / "i", state=tmp_path / "r", backups=tmp_path / "b")
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "r"))
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "i"))
     app = _run_odoo_page(monkeypatch, tmp_path)
     app.button(key="prov_odoo_query_marcolin").click().run()
     assert not app.exception
@@ -131,6 +134,16 @@ def test_odoo_query_shows_preview_without_creating_requests(monkeypatch, tmp_pat
     app.button(key="prov_odoo_pilot_marcolin").click().run()
     assert set(app.session_state["prov_odoo_picks_marcolin"]) == {r["EAN"] for r in preview["rows"] if r["Estado"] == "Elegible"}
     assert ui.ProviderStore(tmp_path).list_requests("marcolin") == []
+
+
+def test_odoo_without_catalog_shows_unknown_coverage_and_proposes_nothing(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "no-state"))
+    app = _run_odoo_page(monkeypatch, tmp_path)
+    app.button(key="prov_odoo_query_marcolin").click().run()
+    assert not app.exception and any("desconocida" in w.value for w in app.warning)
+    app.button(key="prov_odoo_pilot_marcolin").click().run()
+    assert app.session_state["prov_odoo_picks_marcolin"] == []
+    assert not (tmp_path / "no-state").exists()
 
 
 def test_odoo_without_confirmed_association_warns(monkeypatch, tmp_path):
