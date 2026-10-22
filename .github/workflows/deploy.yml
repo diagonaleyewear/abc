@@ -6,11 +6,10 @@ on:
       - main
       - master
   pull_request:
+    # Any base branch, so stacked PRs (a PR whose base is another feature branch) run the same checks.
+    # `push` stays limited to main/master and image publication/deploy only happen on push to main.
     branches:
-      - main
-      - master
-      - 'copilot/**'
-      - 'prep/synology-nfs-images'
+      - '**'
 
 concurrency:
   group: abcd-control-deploy-${{ github.ref }}
