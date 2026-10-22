@@ -1,36 +1,45 @@
 # Marcolin: validación real (#59) — estado y procedimiento
 
-Estado a 2026-10-22. Este documento separa **lo observado**, **lo comunicado por el usuario** y **lo pendiente**. No se
-publican códigos comerciales, identificadores de pedido o de solicitud, capturas ni credenciales. El proceso completo
-(Odoo → portal → ZIP → biblioteca) **no está validado**.
+Estado a 2026-10-22. Este documento separa **lo observado en navegador**, **lo comunicado por el operador** y **lo
+pendiente**. No se publican códigos comerciales, identificadores de pedido o de solicitud, capturas ni credenciales. El
+proceso completo (Odoo → portal → ZIP → biblioteca) **no está validado**.
 
-## 1. Observado en el piloto real (22/10/2026)
+## 1. Observado en navegador (22/10/2026)
 
-Las dos auditorías autónomas **no las hizo `scripts/marcolin_odoo_pilot.py` en su versión original**: se ejecutaron
-en el host de producción con código ad hoc. Este PR incorpora una versión autónoma del script (§4) que reproduce esas
-comprobaciones, pero esa versión **todavía no se ha ejecutado contra producción**.
+- El operador inició sesión en MyMarcolin. Se observó la navegación **Multimedia → Asset requests → Products images →
+  Purpose *Web site* → Use *Product catalogue* → Apply filters → `Select by list`**. Se omite del repositorio la marca
+  seleccionada.
+- La interfaz indica UPC de 12 dígitos y un máximo de 300 códigos. Se probaron seis códigos, no un lote de 300. Para el
+  pegado se usaron saltos de línea; la UI advierte que no se introduzcan comas ni espacios.
+- El portal agrupó los seis UPC en **cuatro referencias de modelo/color**: 0 activas, 4 inactivas en la colección y
+  0 incorrectas. «Inactiva» no demuestra ausencia de imágenes ni justifica descartar el código.
+- Con autorización expresa del usuario se completaron las confirmaciones; se verificó **una** solicitud en
+  `My pending requests`. Sigue pendiente de descarga.
 
-| Qué | Resultado | Alcance |
-|---|---|---|
-| Auditoría autónoma de Odoo | Seis UPC de un pedido de compra confirmado de Marcolin confirmados con PostgreSQL en modo `READ ONLY` y rollback | Solo ese pedido; no es una auditoría anual ni valida todos los contactos comerciales |
-| Auditoría autónoma del catálogo | Catálogo SQLite abierto en solo lectura (`mode=ro`, `query_only`) sin instanciar `ImageRepository`: **sin registros** para los seis UPC ni para sus equivalentes con cero inicial | Prueba la ausencia **en el catálogo**, no la de archivos sin catalogar |
-| Portal, selección | Asset requests → Products images → Purpose *Web site* → Use *Product catalogue* → marca → Apply filters → `Select by list` → seis UPC de 12 dígitos pegados separados por saltos de línea | Observado en una sesión iniciada por el usuario |
-| Portal, agrupación | El portal agrupó los seis UPC en **cuatro referencias de modelo/color**: 0 activas, 4 inactivas en la colección, 0 incorrectas | Una sola prueba, seis códigos |
-| Portal, envío | Con autorización del usuario se envió la solicitud y se vio **una** solicitud en `My pending requests` | La descarga sigue pendiente |
+## 2. Evidencia comunicada por el operador
 
-## 2. Comunicado por el usuario (no verificado por nosotros)
+- Una comprobación autónoma distinta del script original consultó seis UPC de un pedido confirmado mediante PostgreSQL
+  `READ ONLY` y rollback. No fue una auditoría anual ni una revisión de todos los contactos comerciales.
+- Otra comprobación autónoma abrió el catálogo SQLite con `mode=ro` y `query_only`, sin instanciar `ImageRepository`.
+  Ninguno de los seis UPC ni sus equivalentes con cero inicial tenía registros en ese catálogo. Esto acredita ausencia
+  en el catálogo consultado, no ausencia de archivos sin catalogar.
+- La preparación rara vez tarda menos de 24 horas y puede tardar varios días; no se debe reenviar por el mero transcurso
+  del tiempo.
 
-- Preparación: rara vez menos de 24 h y puede tardar varios días.
-- La interfaz indica un máximo de 300 códigos; **solo se han probado seis**. El límite real no está verificado.
-- El login/MFA se conoce solo como una sesión iniciada por el usuario: frecuencia de MFA/CAPTCHA y permiso para
-  automatizar no están verificados.
+Las comprobaciones autónomas anteriores no las ejecutó `scripts/marcolin_odoo_pilot.py`. El script de esta PR reproduce
+la auditoría acotada, pero **todavía no se ha ejecutado contra producción**.
 
 ## 3. Pendiente (no afirmar hasta observarlo)
 
-Descarga del ZIP, estructura de nombres, manifiesto, vistas disponibles, caducidad del enlace, correspondencia
-imagen↔UPC e importación. Las cuatro vistas de la biblioteca (frontal, lateral, perspectiva, detalle) son la taxonomía
-del repositorio, **no una política confirmada de Marcolin**. Una referencia «inactiva» o una solicitud pendiente durante
-días **no se descarta ni se repite**: el estado del portal se registra tal cual y nunca filtra códigos.
+- Frecuencia de MFA/CAPTCHA y permiso de automatización: sin verificar; solo consta una sesión iniciada por el operador.
+- Descarga del ZIP, estructura de nombres, manifiesto, vistas disponibles, caducidad del enlace, correspondencia
+  imagen↔UPC e importación.
+- Relación verificable de todos los UPC con las cuatro referencias modelo/color tras recibir los activos.
+- Las cuatro vistas de la biblioteca (frontal, lateral, perspectiva, detalle) son la taxonomía del repositorio, **no una
+  política confirmada de Marcolin**.
+
+Una referencia «inactiva» o una solicitud pendiente durante días **no se descarta ni se repite**. La descarga e
+importación siguen pendientes; no se ha completado el piloto end-to-end.
 
 ## 4. Ejecución autónoma de la auditoría (solo lectura)
 
@@ -42,16 +51,18 @@ El sistema de archivos del contenedor es de solo lectura, así que el script se 
 que copiarlo ni instalarlo) y los informes se dirigen a un volumen con escritura (`/app/data` o `/app/image-state`):
 
 ```
-docker exec -i -w /app <contenedor> python - --partner 573 --days 365 --size 8 \
+docker exec -i -w /app "$CONTAINER" python - --partner "$PARTNER_ID" --days 365 --size 8 \
+    --expect-name "$PARTNER_NAME" \
     --upc-file /app/data/in/upcs.txt --out /app/data/audits < scripts/marcolin_odoo_pilot.py
 ```
 
 (En PowerShell: `Get-Content -Raw -Encoding utf8 scripts\marcolin_odoo_pilot.py | docker exec -i ... python - ...`.)
-Las credenciales `DB_*` ya están en el entorno del contenedor y nunca se imprimen; los errores solo muestran la clase.
+Las credenciales `DB_*` ya están en el entorno del contenedor y nunca se imprimen; los errores solo muestran clases de
+error o nombres de dependencias.
 
 | Parámetro | Uso |
 |---|---|
-| `--partner`, `--expect-name` | partner de Odoo y fragmento de nombre que debe contener (por defecto `marcolin`); solo informa, **no guarda asociaciones** |
+| `--partner`, `--expect-name` | ID obligatorio; filtro de nombre opcional y parametrizado; no se presupone ni guarda una asociación |
 | `--days`, `--max-lines`, `--timeout-ms` | intervalo y límites de volumen/tiempo de la lectura |
 | `--upc`, `--upc-file`, `--order-name` | códigos a confirmar y/o pedidos concretos; sin ellos descubre desde los pedidos `purchase`/`done` |
 | `--portal-groups FILE` | JSON `{"groups":[{"portal_ref","status","upcs":[...]}]}` con las referencias modelo/color que devolvió el portal; se mantiene fuera de GitHub |
@@ -75,7 +86,7 @@ WAL activo (se informa del modo de journal y de la presencia de `-wal`).
 **Cobertura.** `completas`, `parciales`, `sin_registros`, `sin_vistas_validas` o `desconocida`. Un catálogo inexistente,
 ilegible o con esquema distinto da `desconocida` (exit 6, informe parcial), **nunca** «sin imágenes». Sin
 `--verify-files` el informe declara `solo_metadatos_del_catalogo`; `sin_registros` no prueba que no haya archivos sin
-catalogar. La propuesta (máx. 10) queda en `propuesta_pendiente_de_aprobacion`; `requests_created` es 0 y
+catalogar. La propuesta (máx. 8) queda en `propuesta_pendiente_de_aprobacion`; `requests_created` es 0 y
 `portal_contacted` es `false`.
 
 Códigos de salida: 0 completo · 2 Odoo no disponible o entrada inválida · 3 el partner no coincide · 4 informe no

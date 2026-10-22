@@ -3,7 +3,7 @@
 Standalone on purpose: it only needs ``sqlalchemy``, ``kering_jobs`` and ``image_repository`` (the modules
 present in production) and can run from stdin, e.g.
 
-  docker exec -i -w /app <container> python - --partner 573 --upc-file /app/data/in/upcs.txt \
+  docker exec -i -w /app <container> python - --partner <id> --upc-file /app/data/in/upcs.txt \
       --out /app/data/audits < scripts/marcolin_odoo_pilot.py
 
 It does NOT: write to Odoo, instantiate ImageRepository (its constructor creates directories and runs DDL),
@@ -265,6 +265,7 @@ def odoo_read(engine, partner_id: int, start: date, end: date, *, codes=None, or
     from sqlalchemy import bindparam, text  # noqa: PLC0415
     lower, upper = interval(start, end)
     max_lines = max(1, min(int(max_lines), HARD_MAX_LINES))
+    timeout_ms = max(1, min(int(timeout_ms), 60_000))
     parameters = {"partner": int(partner_id), "states": list(CONFIRMED_STATES), "lower": lower, "upper": upper,
                   "limit": max_lines + 1}
     extra, expanding = "", ["states"]
@@ -329,7 +330,7 @@ def date_digits(value: str) -> int:
 
 def build_report(args, *, engine=None, helpers=None, today: date | None = None) -> tuple[dict, int]:
     end = today or date.today()
-    start = end - timedelta(days=args.days)
+    start = end - timedelta(days=args.days - 1)
     report = {"schema": SCHEMA, "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "scope": {"odoo": "read_only_rollback", "catalog": "mode=ro_query_only", "portal_contacted": False,
                         "requests_created": 0, "association_saved": False,
@@ -349,12 +350,12 @@ def build_report(args, *, engine=None, helpers=None, today: date | None = None) 
     odoo = odoo_read(engine if engine is not None else default_engine(), args.partner, start, end,
                      codes=requested["valid"] or None, order_names=args.order_name,
                      max_lines=args.max_lines, timeout_ms=args.timeout_ms)
-    expected = (args.expect_name or "marcolin").lower()
-    by_name = bool(odoo["partner_name"] and expected in odoo["partner_name"].lower())
+    expected = (args.expect_name or "").strip().lower()
+    by_name = bool(odoo["partner_name"] and expected in odoo["partner_name"].lower()) if expected else None
     report["identity"] = {"found": odoo["partner_name"] is not None, "name_matches_expected": by_name,
                           "family_size": len(odoo["family"]), "family": odoo["family"],
                           "orders_by_state": odoo["orders_by_state"]}
-    if not by_name:
+    if not report["identity"]["found"] or (expected and not by_name):
         report["blocker"] = {"code": "partner_no_coincide"}
         return report, 3
     candidates = {}
@@ -419,7 +420,7 @@ def finish_with_catalog(report, args, codes, candidates, helpers):
         "Pedido": ", ".join(dict.fromkeys(candidates[code_key(c)]["orders"])), "Fecha": candidates[code_key(c)]["date"],
         "Producto": candidates[code_key(c)]["product"], "Proveedor": candidates[code_key(c)]["supplier"],
         "Referencia_portal": refs.get(c, ""), "Cobertura": labels[c]["label"], "Base_cobertura": labels[c]["basis"],
-        "Motivo": REASONS[labels[c]["label"]]} for c in ranked[:max(1, min(int(args.size), 10))]]
+        "Motivo": REASONS[labels[c]["label"]]} for c in ranked[:max(1, min(int(args.size), 8))]]
     report["status"] = "propuesta_pendiente_de_aprobacion"
     if partial:
         report["blocker"] = {"code": report["catalog"]["blocker"], "note": "informe parcial"}
@@ -445,8 +446,8 @@ def write_report(report: dict, out_dir: Path) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--partner", type=int, default=573)
-    parser.add_argument("--expect-name", default="marcolin", help="fragment the Odoo partner name must contain")
+    parser.add_argument("--partner", type=int, required=True)
+    parser.add_argument("--expect-name", help="optional fragment the Odoo partner name must contain")
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--upc", action="append", help="code to confirm (literal); repeatable")
     parser.add_argument("--upc-file", action="append", help="file with codes separated by newlines/commas")
@@ -474,9 +475,17 @@ def summary(report: dict) -> dict:
 
 
 def main(argv=None, *, engine=None, helpers=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.partner <= 0 or min(args.days, args.size, args.max_codes, args.max_lines, args.timeout_ms) <= 0:
+        parser.error("partner, days, size, limits and timeout must be positive")
     try:
-        require_modules()
+        required = ["sqlalchemy"]
+        if engine is None:
+            required.append("kering_jobs")
+        if helpers is None:
+            required.append("image_repository")
+        require_modules(tuple(required))
         report, code = build_report(args, engine=engine, helpers=helpers)
     except Blocker as blocker:
         report = {"schema": SCHEMA, "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
