@@ -97,6 +97,70 @@ def test_page_plans_eans_without_odoo_or_portal(monkeypatch, tmp_path):
     (request,) = ui.ProviderStore(tmp_path).list_requests("marcolin")
     assert request["ean_count"] == 2
 
+def _odoo_page():
+    import provider_images_ui as page
+    from test_provider_odoo_orders import DownEngine, odoo_fixture
+    import streamlit as st
+    page.render_provider_page(DownEngine if st.session_state.get("down") else odoo_fixture)
+
+
+def _run_odoo_page(monkeypatch, tmp_path, down=False, link=True):
+    import provider_odoo_orders as po
+    monkeypatch.setenv("PROVIDER_DATA_ROOT", str(tmp_path))
+    if link:
+        po.save_link(tmp_path, "marcolin", [573], reviewer="ana")
+    app = AppTest.from_function(_odoo_page)
+    app.session_state["auth_role"] = "admin"
+    app.session_state["down"] = down
+    app.run()
+    return app
+
+
+def test_odoo_section_is_secondary_and_never_queries_on_render(monkeypatch, tmp_path):
+    app = _run_odoo_page(monkeypatch, tmp_path)
+    assert not app.exception and "prov_odoo_rows_marcolin" not in app.session_state
+    assert any("Obtener EAN desde pedidos de compra de Odoo" in m.value for m in app.markdown)
+
+
+def test_odoo_query_shows_preview_without_creating_requests(monkeypatch, tmp_path):
+    ImageRepository(tmp_path / "i", state=tmp_path / "r", backups=tmp_path / "b")
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "r"))
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "i"))
+    app = _run_odoo_page(monkeypatch, tmp_path)
+    app.button(key="prov_odoo_query_marcolin").click().run()
+    assert not app.exception
+    preview = app.session_state["prov_odoo_rows_marcolin"]
+    assert preview["eligible"] == 3 and preview["lines_read"] == 6
+    app.button(key="prov_odoo_pilot_marcolin").click().run()
+    assert set(app.session_state["prov_odoo_picks_marcolin"]) == {r["EAN"] for r in preview["rows"] if r["Estado"] == "Elegible"}
+    assert ui.ProviderStore(tmp_path).list_requests("marcolin") == []
+
+
+def test_odoo_without_catalog_shows_unknown_coverage_and_proposes_nothing(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "no-state"))
+    app = _run_odoo_page(monkeypatch, tmp_path)
+    app.button(key="prov_odoo_query_marcolin").click().run()
+    assert not app.exception and any("desconocida" in w.value for w in app.warning)
+    app.button(key="prov_odoo_pilot_marcolin").click().run()
+    assert app.session_state["prov_odoo_picks_marcolin"] == []
+    assert not (tmp_path / "no-state").exists()
+
+
+def test_odoo_without_confirmed_association_warns(monkeypatch, tmp_path):
+    app = _run_odoo_page(monkeypatch, tmp_path, link=False)
+    app.button(key="prov_odoo_query_marcolin").click().run()
+    assert not app.exception and any("sin confirmar" in w.value for w in app.warning)
+
+
+def test_odoo_down_shows_error_and_manual_planning_still_works(monkeypatch, tmp_path):
+    app = _run_odoo_page(monkeypatch, tmp_path, down=True)
+    app.button(key="prov_odoo_query_marcolin").click().run()
+    assert not app.exception and any("Odoo no disponible" in e.value for e in app.error)
+    app.text_area(key="prov_manual_eans").set_value(EANS[0]).run()
+    app.button(key="prov_manual_plan").click().run()
+    assert len(ui.ProviderStore(tmp_path).list_requests("marcolin")) == 1
+
+
 def test_export_caption_follows_connector_separator():
     from marcolin_images import MarcolinConnector
     from provider_images import ProviderConnector
