@@ -233,6 +233,18 @@ def test_demand_uses_supplier_family_not_brand_and_skips_covered(env):
         provider_demand(odoo, repo, ProviderSettings("safilo"), date(2026, 9, 1), date(2026, 9, 30))
 
 
+def test_direct_ean_plan_does_not_require_odoo(env):
+    from provider_images import ProviderConnector
+    store, repo, _, _, _ = env
+    settings = ProviderSettings("safilo", max_eans_per_request=2)
+    connector = ProviderConnector(ProviderService(store, repo, settings), engine=None)
+    result = connector.plan_eans(f"{EANS[0]};{EANS[1]}\\n{EANS[0]} bad", mode="manual")
+    assert len(result["created"]) == 1
+    assert result["invalid"] == ["bad"]
+    assert connector.export_ean_list(result["created"][0]) == f"{EANS[0]},{EANS[1]}"
+    assert connector.plan_eans([EANS[0]], mode="manual")["created"] == []
+
+
 def test_load_settings_and_connector_manual_flow(env, tmp_path):
     from provider_images import ProviderConnector, load_settings
     import json
