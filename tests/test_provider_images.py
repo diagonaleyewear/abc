@@ -233,6 +233,33 @@ def test_demand_uses_supplier_family_not_brand_and_skips_covered(env):
         provider_demand(odoo, repo, ProviderSettings("safilo"), date(2026, 9, 1), date(2026, 9, 30))
 
 
+def test_direct_ean_planning_works_without_odoo_or_supplier_mapping(env):
+    from provider_images import ProviderConnector
+    store, repo, _, _, _ = env
+    settings = ProviderSettings("safilo", max_eans_per_request=2)
+    connector = ProviderConnector(ProviderService(store, repo, settings), engine=None)
+    result = connector.plan_eans(
+        f"{EANS[0]}, {EANS[1]};{EANS[0]}\\nnot-an-ean", mode="manual"
+    )
+    assert len(result["created"]) == 1
+    assert result["invalid"] == ["not-an-ean"]
+    assert result["source"] == "manual_eans"
+    assert connector.export_ean_list(result["created"][0]) == f"{EANS[0]},{EANS[1]}"
+    again = connector.plan_eans([EANS[0], EANS[1]], mode="manual")
+    assert again["created"] == [] and set(again["already_live"]) == {EANS[0], EANS[1]}
+
+
+def test_direct_ean_planning_does_not_infer_image_mapping(env):
+    from provider_images import ProviderConnector
+    store, repo, _, _, _ = env
+    settings = ProviderSettings("nuorder")
+    connector = ProviderConnector(ProviderService(store, repo, settings))
+    rid = connector.plan_eans([EANS[0]], mode="manual")["created"][0]
+    result = connector.import_zip(rid, zip_bytes({"unknown.png": photo()}))
+    assert result["imported"] == 0
+    assert repo.records() == []
+
+
 def test_load_settings_and_connector_manual_flow(env, tmp_path):
     from provider_images import ProviderConnector, load_settings
     import json
