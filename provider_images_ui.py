@@ -21,6 +21,11 @@ from provider_images import (
     parse_ean_file, parse_ean_text,
 )
 
+from kering_images import AccessNotConfirmed
+from provider_odoo_orders import (
+    ELIGIBLE, OdooUnavailable, create_requests, demand_preview, load_links, pick_pilot, propose_partners, save_link,
+)
+
 TITLE = "Proveedores de imágenes"
 MODULES = {"marcolin": marcolin_images, "nuorder": nuorder_images, "safilo": safilo_images}
 CONNECTORS = {"marcolin": marcolin_images.MarcolinConnector, "nuorder": nuorder_images.NuorderConnector,
@@ -194,20 +199,97 @@ def _detect(connector, engine_factory) -> None:
         _detect_from_odoo(connector, engine_factory)
 
 
+def _odoo_engine(engine_factory):
+    return engine_factory() if callable(engine_factory) else engine_factory
+
+
 def _detect_from_odoo(connector, engine_factory) -> None:
-    end = date.today()
-    start = st.date_input("Desde", end - timedelta(days=90), key="prov_from")
-    finish = st.date_input("Hasta", end, key="prov_to")
-    limit = st.number_input("Máximo de EAN (piloto)", 1, 5000, 50, key="prov_limit")
-    if st.button("Detectar y planificar", key="prov_detect"):
+    """Optional, read-only. Odoo only supplies EAN candidates; it proves nothing about downloaded images."""
+    provider = connector.service.settings.provider
+    root = data_root()
+    st.markdown("**Obtener EAN desde pedidos de compra de Odoo**")
+    st.caption("Solo lectura. No envía nada a ningún portal; las solicitudes se crean con el planificador común.")
+    _odoo_association(provider, root, engine_factory)
+    today = date.today()
+    start = st.date_input("Desde", today - timedelta(days=90), key=f"prov_from_{provider}")
+    finish = st.date_input("Hasta", today, key=f"prov_to_{provider}")
+    max_refs = st.number_input("Máximo de referencias a mostrar", 1, 500, 50, key=f"prov_limit_{provider}")
+    rows_key = f"prov_odoo_rows_{provider}"
+    if st.button("Consultar pedidos de compra", key=f"prov_odoo_query_{provider}"):
         try:
-            connector.engine = engine_factory() if callable(engine_factory) else engine_factory
-            result = connector.detect(start, finish, limit=int(limit))
-        except Exception as error:  # access/config problems are shown, not raised into the page
-            st.error(f"No se pudo detectar la demanda: {getattr(error, 'code', error)}")
+            preview = demand_preview(_odoo_engine(engine_factory), connector, root, start, finish,
+                                     max_refs=int(max_refs))
+        except AccessNotConfirmed as error:
+            st.warning("Asociación proveedor Odoo ↔ portal sin confirmar: defínela y guárdala arriba "
+                       f"({getattr(error, 'code', error)}).")
             return
-        st.success(f"Solicitudes creadas: {len(result['created'])}; EAN ya en curso: {len(result['already_live'])}; "
-                   f"EAN inválidos: {len(result['invalid'])}; con vistas completas: {result['covered']}.")
+        except (OdooUnavailable, ValueError) as error:
+            st.error(f"Odoo no disponible o consulta rechazada: {getattr(error, 'code', error)}. "
+                     "El resto de Cloud no se ve afectado.")
+            return
+        except Exception as error:  # configuration problems must not break the page
+            st.error(f"No se pudo consultar Odoo: {error.__class__.__name__}")
+            return
+        st.session_state[rows_key] = preview
+        st.session_state.pop(f"prov_odoo_picks_{provider}", None)
+    preview = st.session_state.get(rows_key)
+    if not preview:
+        return
+    note = f"{preview['lines_read']} líneas leídas · {preview['eligible']} elegibles · {preview['summary']}"
+    if preview["truncated"] or preview["shown_truncated"]:
+        note += " · resultado limitado: acota el período o sube el máximo"
+    st.caption(note)
+    rows = preview["rows"]
+    picks_key = f"prov_odoo_picks_{provider}"
+    if st.button("Proponer lote piloto (5–10 EAN)", key=f"prov_odoo_pilot_{provider}"):
+        st.session_state[picks_key] = pick_pilot(rows, 8)
+    proposal = set(st.session_state.get(picks_key, ()))
+    table = [{"Seleccionar": r["EAN"] in proposal and r["Estado"] == ELIGIBLE, **r} for r in rows]
+    edited = st.data_editor(
+        table, key=f"prov_odoo_editor_{provider}_{len(proposal)}", hide_index=True, use_container_width=True,
+        disabled=[k for k in (table[0] if table else {}) if k != "Seleccionar"])
+    chosen = [r["EAN"] for r in edited if r["Seleccionar"] and r["Estado"] == ELIGIBLE]
+    st.write(f"Seleccionados: {len(chosen)}")
+    approved = st.checkbox("Apruebo la selección definitiva", key=f"prov_odoo_ok_{provider}")
+    if st.button("Crear solicitudes de imágenes para los EAN seleccionados", key=f"prov_odoo_create_{provider}",
+                 disabled=not (chosen and approved)):
+        who = st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin"
+        result = create_requests(connector, root, rows, chosen, approved_by=str(who))
+        st.success(f"Solicitudes creadas: {len(result['created'])}; EAN ya en curso: {len(result['already_live'])}. "
+                   "No se ha contactado con ningún portal.")
+
+
+def _odoo_association(provider: str, root: Path, engine_factory) -> None:
+    links = load_links(root).get(provider) or {}
+    if links.get("confirmed"):
+        st.success(f"Asociación confirmada por {links.get('reviewer')}: proveedores Odoo {links['partner_ids']} → {provider}.")
+    else:
+        st.warning("Sin asociación confirmada entre proveedores de Odoo y este portal.")
+    with st.expander("Asociación proveedor Odoo ↔ portal (revisar antes de guardar)"):
+        fragment = st.text_input("Buscar proveedor en Odoo (nombre)", key=f"prov_assoc_q_{provider}")
+        if st.button("Buscar candidatos", key=f"prov_assoc_find_{provider}"):
+            try:
+                st.session_state[f"prov_assoc_c_{provider}"] = propose_partners(_odoo_engine(engine_factory), fragment)
+            except (OdooUnavailable, ValueError) as error:
+                st.error(f"No se pudo buscar: {getattr(error, 'code', error)}")
+            except Exception as error:
+                st.error(f"No se pudo consultar Odoo: {error.__class__.__name__}")
+        candidates = st.session_state.get(f"prov_assoc_c_{provider}", [])
+        if candidates:
+            st.caption("Candidatos por nombre: son solo propuestas, no se asocian solos.")
+            st.dataframe(candidates, hide_index=True, use_container_width=True)
+        ids_text = st.text_input("Ids de proveedor Odoo a asociar (separados por comas)",
+                                 ", ".join(map(str, links.get("partner_ids", []))), key=f"prov_assoc_ids_{provider}")
+        brands = st.text_input("Marcas/catálogos incluidos (informativo)", ", ".join(links.get("brands", [])),
+                               key=f"prov_assoc_brands_{provider}")
+        if st.button("Confirmar y guardar asociación", key=f"prov_assoc_save_{provider}"):
+            who = st.session_state.get("auth_user") or st.session_state.get("auth_role") or "admin"
+            try:
+                save_link(root, provider, [int(p) for p in ids_text.replace(";", ",").split(",") if p.strip()],
+                          reviewer=str(who), brands=brands.split(","))
+                st.rerun()
+            except ValueError as error:
+                st.error(f"No se guardó: {error}")
 
 
 def _review(connector) -> None:
