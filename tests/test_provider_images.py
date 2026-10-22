@@ -334,3 +334,12 @@ def test_provider_images_coexist_with_other_providers_in_common_repository(env):
     assert set(repo.valid_views(EANS[0])) == {"frontal", "perspectiva", "lateral"}
     assert repo.pending_views(EANS[0], settings.required_views) == ()
     assert [r.provider for r in repo.catalog_records(EANS[0]) if r.provider == "marcolin"] == ["marcolin"]
+
+def test_preview_eans_counts_without_writing(env):
+    store, repo, settings, _, _ = env
+    connector = ProviderConnector(ProviderService(store, repo, settings))
+    connector.plan_eans([EANS[0]], mode="manual")
+    preview = connector.preview_eans(f"{EANS[0]} {EANS[1]} {EANS[1]} 999")
+    assert preview["total"] == 4 and preview["duplicates"] == 1 and preview["invalid"] == ["999"]
+    assert preview["already_live"] == [EANS[0]] and preview["new"] == [EANS[1]]
+    assert len(store.list_requests("marcolin")) == 1
