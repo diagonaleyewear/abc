@@ -88,11 +88,34 @@ def ean_key(ean: str) -> str:
     return ean.zfill(14)
 
 
+def parse_ean_text(text: str) -> list[str]:
+    """Tokens from pasted text or an uploaded CSV/TXT: commas, semicolons, tabs, spaces and newlines."""
+    return [t for t in re.split(r"[,;\s]+", text.strip().lstrip("\ufeff")) if t]
+
+
+def parse_ean_file(content: bytes) -> list[str]:
+    """EANs from a CSV/TXT upload: first column named ean/barcode/gtin if a header exists, else every token."""
+    text = content.decode("utf-8-sig", errors="replace")
+    lines = [line for line in text.splitlines() if line.strip()]
+    if lines:
+        header = [h.strip().lower() for h in re.split(r"[,;\t]", lines[0])]
+        column = next((i for i, h in enumerate(header) if h in {"ean", "barcode", "gtin", "codigo de barras"}), None)
+        if column is not None:
+            out = []
+            for line in lines[1:]:
+                cells = re.split(r"[,;\t]", line)
+                if column < len(cells) and cells[column].strip():
+                    out.append(cells[column].strip().strip('"'))
+            return out
+    return parse_ean_text(text)
+
+
 @dataclass(frozen=True)
 class ProviderSettings:
     provider: str
     supplier_ids: tuple[int, ...] = ()
     max_eans_per_request: int = 50
+    batch_size_verified: bool = False
     max_requests_per_day: int = 5
     pilot_cap: int = 0
     required_views: tuple[str, ...] = ("frontal", "lateral", "perspectiva")
@@ -678,13 +701,18 @@ class ProviderConnector:
         self.service, self.engine = service, engine
 
     def plan_eans(self, eans, *, mode: str | None = None, limit: int | None = None) -> dict:
-        """Plan supplied EANs without consulting Odoo; imported images still need evidence."""
+        """Plan user-supplied EANs without Odoo, keeping existing duplicate and safety checks.
+
+        EANs must be independently sourced and assigned to the explicitly chosen
+        provider; file-to-EAN matching still needs evidence during import.
+        """
         if isinstance(eans, str):
-            eans = re.split(r"[,;\\s]+", eans.strip())
+            eans = parse_ean_text(eans)
         valid, invalid = normalize_eans(eans)
         selected = valid[:limit] if limit is not None else valid
-        result = self.service.store.plan(self.service.settings, selected,
-                                         mode=mode or self.default_mode)
+        result = self.service.store.plan(
+            self.service.settings, selected, mode=mode or self.default_mode
+        )
         return {**result, "invalid": invalid, "source": "manual_eans",
                 "selected": len(selected)}
 
