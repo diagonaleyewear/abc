@@ -31,7 +31,7 @@ Interruptores: `MARCOLIN_/NUORDER_/SAFILO_AUTOMATION_ENABLED` (por defecto `fals
 | Solicitud diferida + estados + sin duplicados | ✅ | n/a (manual) | ✅ síncrono |
 | Interrupción/respuesta ambigua → `needs_review`, nunca reenvío | ✅ | n/a | ✅ |
 | Reintentos seguros | ✅ | ✅ | ✅ |
-| Exportar lista de EAN para el portal | ✅ | ✅ | ✅ (separada por comas) |
+| Exportar lista de EAN para el portal | ✅ (un código por línea) | ✅ (comas) | ✅ (separada por comas) |
 | Subir ZIP (con o sin manifiesto) | ✅ | ✅ | ✅ |
 | ZIP sin manifiesto | EAN completo en nombre, si no → revisión | idem | **siempre revisión** |
 | Vistas V1/V2/V3/detalle, `unknown` → revisión | ✅ | ✅ | ✅ |
@@ -81,9 +81,14 @@ Secundario y de solo lectura (`SET TRANSACTION READ ONLY`, timeout de sentencia,
    informativas: el filtrado por marca requiere conocer el campo real de marca en Odoo y no se ha implementado.
 2. **Consulta**: pedidos en estado `purchase` o `done` (se excluyen `draft`, `sent` y `cancel`), contactos comerciales del
    partner agrupados, líneas con producto, `default_code`, `barcode`, proveedor, pedido y fecha, más recientes primero.
-3. **Vista previa**: EAN, Referencia, Producto, Proveedor, Pedido, Fecha, Imágenes (Completas/Parciales/Ausentes frente a
-   `required_views` en la biblioteca común) y Estado (Elegible, Duplicado, Requiere revisión por falta de EAN o EAN inválido,
-   Ya completa). Duplicado = EAN repetido o con solicitud en curso.
+3. **Vista previa**: EAN, Referencia, Producto, Proveedor, Pedido, Fecha, Imágenes, Base y Estado (Elegible, Duplicado,
+   Requiere revisión por falta de EAN o EAN inválido, Ya completa). La cobertura se lee del catálogo existente con
+   `repository_catalog_readonly` (solo lectura, WAL-aware, sin construir `ImageRepository` ni crear directorios o tablas) y
+   distingue: *Completas*, *Parciales*, *Sin registros en el catálogo*, *Sin vistas válidas* y *Cobertura desconocida*
+   (catálogo inaccesible: nunca se interpreta como imágenes ausentes ni se propone en el lote piloto). «Base» declara si
+   procede de metadatos del catálogo (por defecto, archivos no verificados) o de archivos verificados. Un UPC-12 y su
+   EAN-13 con cero inicial cuentan como el mismo producto (se conserva el código original). Duplicado = repetido o con
+   solicitud en curso.
 4. **Lote piloto**: «Proponer lote piloto» preselecciona 5–10 EAN elegibles (primero sin imágenes, luego parciales, pedidos
    recientes); el usuario ajusta la tabla, marca «Apruebo la selección definitiva» y pulsa «Crear solicitudes…».
    Solo se planifican EAN *Elegibles* de la vista previa (da igual lo marcado), mediante `plan_eans` del núcleo; no se

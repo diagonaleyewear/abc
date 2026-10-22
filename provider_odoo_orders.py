@@ -7,6 +7,7 @@ Nothing here writes to Odoo or contacts a portal.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -15,7 +16,8 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from kering_images import AccessNotConfirmed, utc_interval
-from provider_images import PROVIDERS, ean_valid
+from provider_images import PROVIDERS, ean_key, ean_valid
+from repository_catalog_readonly import catalog_coverage, unknown_coverage
 
 LINKS_FILE = "provider_odoo_links.json"
 SELECTION_LOG = "provider_odoo_selections.jsonl"
@@ -25,7 +27,14 @@ HARD_MAX_LINES = 10000
 STATEMENT_TIMEOUT_MS = 20000
 
 ELIGIBLE, DUPLICATE, REVIEW, COMPLETE = "Elegible", "Duplicado", "Requiere revisión", "Ya completa"
-IMAGES_COMPLETE, IMAGES_PARTIAL, IMAGES_NONE = "Completas", "Parciales", "Ausentes"
+IMAGES_COMPLETE, IMAGES_PARTIAL = "Completas", "Parciales"
+IMAGES_NONE = "Sin registros en el catálogo"
+IMAGES_NO_VIEWS = "Sin vistas válidas"
+IMAGES_UNKNOWN = "Cobertura desconocida"
+IMAGE_LABELS = {"completas": IMAGES_COMPLETE, "parciales": IMAGES_PARTIAL, "sin_registros": IMAGES_NONE,
+                "sin_vistas_validas": IMAGES_NO_VIEWS, "desconocida": IMAGES_UNKNOWN}
+BASIS_TEXT = {"solo_metadatos_del_catalogo": "metadatos del catálogo (archivos no verificados)",
+              "archivos_verificados": "archivos verificados", "catalogo_no_consultado": "catálogo no consultado"}
 
 
 class OdooUnavailable(Exception):
@@ -151,63 +160,78 @@ def read_order_lines(engine, partner_ids, start: date, end: date, *, max_lines: 
     return lines, truncated
 
 
-def _images_state(repository, ean: str, required) -> str:
-    pending = repository.pending_views(ean, tuple(required))
-    if not pending:
-        return IMAGES_COMPLETE
-    return IMAGES_NONE if len(pending) == len(tuple(required)) else IMAGES_PARTIAL
+def _images_state(cov: dict) -> str:
+    return IMAGE_LABELS.get(cov["label"], IMAGES_UNKNOWN)
 
 
-def build_preview(lines, repository, settings, live_eans=frozenset(), *, max_refs: int = 200) -> dict:
-    """One row per distinct EAN (most recent order first) plus review rows for lines without a usable EAN."""
+def build_preview(lines, coverage, live_keys=frozenset(), *, max_refs: int = 200) -> dict:
+    """One row per distinct code (most recent order first) plus review rows for lines without a usable EAN.
+
+    ``coverage`` maps each code to a read-only catalog verdict (``repository_catalog_readonly``); an
+    unknown verdict is shown as such and is never treated as missing images. A UPC-12 and its EAN-13
+    form with a leading zero are the same product here.
+    """
     rows, seen, summary = [], set(), {"sin_ean": 0, "ean_invalido": 0, "duplicados": 0}
     for line in lines:
         base = {"EAN": line.ean, "Referencia": line.reference, "Producto": line.product,
                 "Proveedor": line.supplier, "Pedido": line.order, "Fecha": line.date}
+        key = ean_key(line.ean) if line.ean.isdigit() else line.ean
         if not line.ean:
             summary["sin_ean"] += 1
-            rows.append({**base, "Imágenes": "", "Estado": REVIEW, "Motivo": "sin EAN en Odoo"})
+            rows.append({**base, "Imágenes": "", "Base": "", "Estado": REVIEW, "Motivo": "sin EAN en Odoo"})
         elif not ean_valid(line.ean):
             summary["ean_invalido"] += 1
-            rows.append({**base, "Imágenes": "", "Estado": REVIEW, "Motivo": "EAN inválido"})
-        elif line.ean in seen:
+            rows.append({**base, "Imágenes": "", "Base": "", "Estado": REVIEW, "Motivo": "EAN inválido"})
+        elif key in seen:
             summary["duplicados"] += 1
-            rows.append({**base, "Imágenes": "", "Estado": DUPLICATE, "Motivo": "EAN repetido en otra línea"})
-        elif line.ean in live_eans:
-            seen.add(line.ean)
-            rows.append({**base, "Imágenes": _images_state(repository, line.ean, settings.required_views),
-                         "Estado": DUPLICATE, "Motivo": "solicitud en curso"})
+            rows.append({**base, "Imágenes": "", "Base": "", "Estado": DUPLICATE,
+                         "Motivo": "EAN repetido en otra línea (o su forma UPC/EAN-13)"})
         else:
-            seen.add(line.ean)
-            images = _images_state(repository, line.ean, settings.required_views)
-            rows.append({**base, "Imágenes": images,
-                         "Estado": COMPLETE if images == IMAGES_COMPLETE else ELIGIBLE, "Motivo": ""})
+            seen.add(key)
+            cov = coverage.get(line.ean) or unknown_coverage()
+            images = _images_state(cov)
+            base = {**base, "Imágenes": images, "Base": BASIS_TEXT.get(cov["basis"], "")}
+            if key in live_keys:
+                rows.append({**base, "Estado": DUPLICATE, "Motivo": "solicitud en curso"})
+            else:
+                rows.append({**base, "Estado": COMPLETE if cov["label"] == "completas" else ELIGIBLE, "Motivo": ""})
     eligible = [r for r in rows if r["Estado"] == ELIGIBLE]
     return {"rows": rows[:max_refs] if max_refs else rows, "summary": summary, "eligible": len(eligible),
             "shown_truncated": len(rows) > max_refs}
 
 
 def pick_pilot(rows, size: int = 8) -> list[str]:
-    """Proposal for a small real batch: eligible, no images first, then partial, most recent orders first.
+    """Proposal for a small real batch: eligible, no valid images first, then partial, recent orders first.
 
-    Partner membership is already guaranteed by the confirmed association used to read the orders.
+    Rows whose coverage is unknown are never proposed as 'without images'. Partner membership is
+    already guaranteed by the confirmed association used to read the orders.
     """
     size = max(1, min(int(size), 10))
-    rank = {IMAGES_NONE: 0, IMAGES_PARTIAL: 1}
+    rank = {IMAGES_NONE: 0, IMAGES_NO_VIEWS: 0, IMAGES_PARTIAL: 1}
     eligible = [r for r in rows if r["Estado"] == ELIGIBLE and r["Imágenes"] in rank]
     eligible.sort(key=lambda r: (rank[r["Imágenes"]], -int(r["Fecha"].replace("-", "") or 0)))
     return [r["EAN"] for r in eligible[:size]]
 
 
 def demand_preview(engine, connector, root: Path, start: date, end: date, *, max_lines=DEFAULT_MAX_LINES,
-                   max_refs: int = 200) -> dict:
-    """Odoo -> preview rows for the chosen portal. Raises AssociationNotConfigured / OdooUnavailable."""
+                   max_refs: int = 200, catalog=None, image_root=None, verify_files: bool = False, env=None) -> dict:
+    """Odoo -> preview rows for the chosen portal. Raises AssociationNotConfigured / OdooUnavailable.
+
+    Image coverage comes from the existing catalog opened read-only; the repository is never built.
+    """
     service = connector.service
     partners = confirmed_partner_ids(root, service.settings.provider)
     lines, truncated = read_order_lines(engine, partners, start, end, max_lines=max_lines)
-    live = service.store.live_eans(service.settings.provider)
-    preview = build_preview(lines, service.repository, service.settings, live, max_refs=max_refs)
-    return {**preview, "lines_read": len(lines), "truncated": truncated, "partners": list(partners)}
+    live = service.store.live_keys(service.settings.provider)
+    codes = [line.ean for line in lines if line.ean and ean_valid(line.ean)]
+    environment = os.environ if env is None else env
+    report = catalog_coverage(
+        codes, catalog=catalog, required_views=service.settings.required_views,
+        image_root=image_root or (environment.get("IMAGE_REPOSITORY_ROOT") or None) if verify_files else None,
+        verify_files=verify_files, env=environment)
+    preview = build_preview(lines, report["coverage"], live, max_refs=max_refs)
+    return {**preview, "lines_read": len(lines), "truncated": truncated, "partners": list(partners),
+            "catalog": report["catalog"]}
 
 
 def create_requests(connector, root: Path, rows, selected_eans, *, approved_by: str) -> dict:

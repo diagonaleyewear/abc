@@ -41,13 +41,30 @@ def data_root() -> Path:
     return Path(os.getenv("PROVIDER_DATA_ROOT", str(Path(__file__).parent / "masterdata_data" / "providers")))
 
 
+class LazyRepository:
+    """Builds the real ImageRepository (which creates directories and tables) only when something needs it.
+
+    Rendering the page, planning EANs and the Odoo preview never touch it.
+    """
+
+    def __init__(self, factory=ImageRepository):
+        self._factory, self._repository = factory, None
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        if self._repository is None:
+            self._repository = self._factory()
+        return getattr(self._repository, name)
+
+
 def build_connector(provider: str, engine=None, *, root: Path | None = None, repository=None):
     root = root or data_root()
     module = MODULES[provider]
     settings = load_settings(provider, root, module.DEFAULTS)
     if provider == "safilo":
         settings = safilo_images.strict_settings(settings)
-    service = ProviderService(ProviderStore(root), repository or ImageRepository(), settings)
+    service = ProviderService(ProviderStore(root), repository or LazyRepository(), settings)
     return CONNECTORS[provider](service, engine)
 
 
@@ -99,12 +116,18 @@ def render_provider_page(engine_factory) -> None:
         _review(connector)
 
 
+def export_caption(connector) -> str:
+    if connector.list_separator == "\n":
+        return "Lista para pegar en el portal: un código por línea, sin comas ni espacios."
+    return "Lista de EAN para pegar en el portal (separada por comas)."
+
+
 def _request_actions(connector, rows) -> None:
     store, service = connector.service.store, connector.service
     selected = st.selectbox("Solicitud", [r["Solicitud"] for r in rows], key="prov_request")
     request = store.get(selected)
     st.code(connector.export_ean_list(selected), language="text")
-    st.caption("Lista de EAN para pegar en el portal (separada por comas).")
+    st.caption(export_caption(connector))
     for event in store.events(selected):
         st.text(f"{event['from_state'] or '-'} → {event['to_state']}  {event['detail'] or ''}")
     upload = st.file_uploader("ZIP descargado del portal", type=["zip"], key=f"prov_zip_{selected}")
@@ -239,6 +262,13 @@ def _detect_from_odoo(connector, engine_factory) -> None:
     if preview["truncated"] or preview["shown_truncated"]:
         note += " · resultado limitado: acota el período o sube el máximo"
     st.caption(note)
+    catalog = preview.get("catalog") or {}
+    if catalog.get("status") == "inaccesible":
+        st.warning("Catálogo de imágenes inaccesible (" + str(catalog.get("blocker")) + "): la cobertura es "
+                   "desconocida, no equivale a imágenes ausentes.")
+    else:
+        st.caption("Cobertura según metadatos del catálogo existente, abierto en solo lectura; "
+                   "los archivos no se han verificado.")
     rows = preview["rows"]
     picks_key = f"prov_odoo_picks_{provider}"
     if st.button("Proponer lote piloto (5–10 EAN)", key=f"prov_odoo_pilot_{provider}"):

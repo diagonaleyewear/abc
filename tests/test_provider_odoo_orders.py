@@ -50,8 +50,10 @@ def odoo_fixture():
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
     repo = ImageRepository(tmp_path / "i", state=tmp_path / "r", backups=tmp_path / "b")
+    monkeypatch.setenv("IMAGE_REPOSITORY_STATE_ROOT", str(tmp_path / "r"))
+    monkeypatch.setenv("IMAGE_REPOSITORY_ROOT", str(tmp_path / "i"))
     root = tmp_path / "s"
     service = ProviderService(ProviderStore(root), repo, DEFAULTS)
     return MarcolinConnector(service), repo, root
