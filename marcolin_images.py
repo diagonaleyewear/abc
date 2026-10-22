@@ -74,8 +74,7 @@ class MarcolinConnector(ProviderConnector):
     GROUPS_SCHEMA = """
     CREATE TABLE IF NOT EXISTS marcolin_portal_groups(
       request_id INTEGER NOT NULL REFERENCES requests(id), ean TEXT NOT NULL, reported TEXT NOT NULL,
-      portal_ref TEXT NOT NULL, portal_status TEXT NOT NULL DEFAULT '', recorded_at REAL NOT NULL,
-      PRIMARY KEY(request_id, ean, portal_ref));
+      portal_ref TEXT NOT NULL, portal_status TEXT NOT NULL DEFAULT '', recorded_at REAL NOT NULL);
     """
 
     def record_portal_groups(self, request_id: int, groups) -> dict:
@@ -102,10 +101,14 @@ class MarcolinConnector(ProviderConnector):
                     if original is None:
                         outside.append(reported)
                         continue
-                    stored += connection.execute(
-                        "INSERT OR IGNORE INTO marcolin_portal_groups(request_id,ean,reported,portal_ref,"
-                        "portal_status,recorded_at) VALUES(?,?,?,?,?,?)",
-                        (request_id, original, reported, ref, status, store.clock())).rowcount
+                    latest = connection.execute(
+                        "SELECT portal_status FROM marcolin_portal_groups WHERE request_id=? AND ean=? AND portal_ref=? "
+                        "ORDER BY recorded_at DESC, rowid DESC LIMIT 1", (request_id, original, ref)).fetchone()
+                    if latest is None or latest[0] != status:  # a changed portal status is new history, not an overwrite
+                        connection.execute(
+                            "INSERT INTO marcolin_portal_groups(request_id,ean,reported,portal_ref,portal_status,"
+                            "recorded_at) VALUES(?,?,?,?,?,?)", (request_id, original, reported, ref, status, store.clock()))
+                        stored += 1
                     assigned.setdefault(original, set()).add(ref)
             connection.execute("COMMIT")
         return {"stored": stored, "not_in_request": outside,
@@ -113,15 +116,16 @@ class MarcolinConnector(ProviderConnector):
                 "multi_assigned": {e: sorted(r) for e, r in assigned.items() if len(r) > 1}}
 
     def portal_groups(self, request_id: int) -> list[dict]:
-        """Recorded groups for a request, each with every UPC (original literal) and the verbatim status."""
+        """Current groups for a request: every UPC (original literal) under the latest verbatim portal status.
+
+        Earlier statuses stay in the table as history."""
         with closing(self.service.store.connect()) as connection:
             connection.executescript(self.GROUPS_SCHEMA)
             rows = connection.execute(
-                "SELECT portal_ref, portal_status, ean, reported FROM marcolin_portal_groups WHERE request_id=? "
-                "ORDER BY portal_ref, ean", (request_id,)).fetchall()
+                "SELECT portal_ref, portal_status, ean FROM marcolin_portal_groups WHERE request_id=? "
+                "ORDER BY recorded_at, rowid", (request_id,)).fetchall()
+        current = {(row["ean"], row["portal_ref"]): row["portal_status"] for row in rows}
         groups: dict[tuple, dict] = {}
-        for row in rows:
-            group = groups.setdefault((row["portal_ref"], row["portal_status"]),
-                                      {"portal_ref": row["portal_ref"], "status": row["portal_status"], "upcs": []})
-            group["upcs"].append(row["ean"])
+        for (ean, ref), status in sorted(current.items(), key=lambda item: (item[0][1], item[0][0])):
+            groups.setdefault((ref, status), {"portal_ref": ref, "status": status, "upcs": []})["upcs"].append(ean)
         return list(groups.values())
