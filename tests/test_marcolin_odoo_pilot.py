@@ -21,6 +21,7 @@ from image_repository import ImageRepository  # noqa: E402
 from provider_support import photo  # noqa: E402
 
 TODAY = date(2026, 9, 30)
+SYNTHETIC_PARTNER, SYNTHETIC_CONTACT, SYNTHETIC_OTHER = 1001, 1002, 1900
 
 
 def upc12(body11: str) -> str:
@@ -32,7 +33,7 @@ U = [upc12("0123456789" + "0"), upc12("07700000001"), upc12("07700000002"), upc1
      upc12("07700000004"), upc12("07700000005")]
 
 
-def odoo(lines, *, partner_name="Marcolin Test", states=None):
+def odoo(lines, *, partner_name="Supplier Test"):
     """lines: (order_id, order_name, partner_id, state, barcode, ref)."""
     engine = create_engine("sqlite://")
     with engine.begin() as c:
@@ -45,8 +46,13 @@ def odoo(lines, *, partner_name="Marcolin Test", states=None):
             "CREATE TABLE product_product(id INTEGER PRIMARY KEY, barcode TEXT, default_code TEXT)",
         ):
             c.execute(text(ddl))
-        c.execute(text("INSERT INTO res_partner VALUES (573,:n,1,1,573),(574,'Contacto',1,0,573),(900,'Otro',1,1,900)"),
-                  {"n": partner_name})
+        c.execute(text("""
+            INSERT INTO res_partner VALUES
+                (:partner, :name, 1, 1, :partner),
+                (:contact, 'Synthetic contact', 1, 0, :partner),
+                (:other, 'Other supplier', 1, 1, :other)
+        """), {"partner": SYNTHETIC_PARTNER, "contact": SYNTHETIC_CONTACT, "other": SYNTHETIC_OTHER,
+               "name": partner_name})
         seen = set()
         for n, (order_id, name, partner, state, barcode, ref) in enumerate(lines, 1):
             if order_id not in seen:
@@ -59,7 +65,10 @@ def odoo(lines, *, partner_name="Marcolin Test", states=None):
 
 
 def args(tmp_path, *extra):
-    return pilot.build_parser().parse_args(["--out", str(tmp_path / "out"), "--days", "60", *extra])
+    return pilot.build_parser().parse_args([
+        "--partner", str(SYNTHETIC_PARTNER), "--expect-name", "Supplier Test",
+        "--out", str(tmp_path / "out"), "--days", "60", *extra,
+    ])
 
 
 def make_catalog(path: Path, rows=(), wal=False):
@@ -88,10 +97,16 @@ def snapshot(folder: Path):
             if p.is_file() else None for p in sorted(folder.rglob("*"))}
 
 
-LINES = [(1, "PO-1", 573, "purchase", U[0], "REF-A"), (1, "PO-1", 573, "purchase", U[1], "REF-B"),
-         (2, "PO-2", 574, "done", U[2], "REF-C"), (3, "PO-3", 573, "cancel", U[3], "REF-D"),
-         (4, "PO-4", 573, "draft", U[4], "REF-E"), (5, "PO-5", 900, "purchase", U[5], "REF-F"),
-         (6, "PO-6", 573, "purchase", None, "REF-G"), (6, "PO-6", 573, "purchase", "12345", "REF-H")]
+LINES = [
+    (1, "PO-SYN-1", SYNTHETIC_PARTNER, "purchase", U[0], "REF-A"),
+    (1, "PO-SYN-1", SYNTHETIC_PARTNER, "purchase", U[1], "REF-B"),
+    (2, "PO-SYN-2", SYNTHETIC_CONTACT, "done", U[2], "REF-C"),
+    (3, "PO-SYN-3", SYNTHETIC_PARTNER, "cancel", U[3], "REF-D"),
+    (4, "PO-SYN-4", SYNTHETIC_PARTNER, "draft", U[4], "REF-E"),
+    (5, "PO-SYN-5", SYNTHETIC_OTHER, "purchase", U[5], "REF-F"),
+    (6, "PO-SYN-6", SYNTHETIC_PARTNER, "purchase", None, "REF-G"),
+    (6, "PO-SYN-6", SYNTHETIC_PARTNER, "purchase", "12345", "REF-H"),
+]
 
 
 # --- codes ----------------------------------------------------------------------------------
@@ -106,16 +121,30 @@ def test_upc12_kept_literally_and_equivalents_deduplicated():
 
 
 def test_portal_groups_keep_every_upc_and_never_filter_by_status():
-    payload = {"groups": [{"portal_ref": "G1", "status": "inactive_in_collection", "upcs": [U[0], U[1]]},
-                          {"portal_ref": "G2", "status": "inactive_in_collection", "upcs": [U[2]]},
-                          {"portal_ref": "G3", "status": "active", "upcs": [U[3]]},
-                          {"portal_ref": "G4", "status": "inactive_in_collection", "upcs": [U[4], "0" + U[4]]},
-                          {"portal_ref": "G5", "status": "inactive_in_collection", "upcs": []}]}
-    out = pilot.group_by_portal_ref(U[:5] + [U[5]], payload)
-    assert len(out["groups"]) == 5 and out["ref_by_upc"][U[0]] == "G1" == out["ref_by_upc"][U[1]]
-    assert out["unassigned_upcs"] == [U[5]] and out["empty_groups"] == ["G5"]
-    assert out["statuses"] == {"active": 1, "inactive_in_collection": 4}
-    assert out["multi_assigned"] and all(g["upcs"] is not None for g in out["groups"])
+    payload = {"groups": [
+        {"portal_ref": "G1", "status": "inactive_in_collection", "upcs": [U[0], U[1]]},
+        {"portal_ref": "G2", "status": "inactive_in_collection", "upcs": [U[2]]},
+        {"portal_ref": "G3", "status": "inactive_in_collection", "upcs": [U[3], U[4]]},
+        {"portal_ref": "G4", "status": "inactive_in_collection", "upcs": [U[5]]},
+    ]}
+    out = pilot.group_by_portal_ref(U, payload)
+    assert len(out["groups"]) == 4
+    assert out["statuses"] == {"inactive_in_collection": 4}
+    assert out["ref_by_upc"][U[0]] == "G1" == out["ref_by_upc"][U[1]]
+    assert {code for group in out["groups"] for code in group["upcs"]} == set(U)
+    assert not out["unassigned_upcs"] and not out["multi_assigned"] and not out["empty_groups"]
+
+
+def test_portal_groups_report_unassigned_empty_and_multi_assigned_codes():
+    payload = {"groups": [
+        {"portal_ref": "G1", "status": "inactive", "upcs": [U[0], U[1]]},
+        {"portal_ref": "G2", "status": "active", "upcs": [U[0]]},
+        {"portal_ref": "G3", "status": "inactive", "upcs": []},
+    ]}
+    out = pilot.group_by_portal_ref(U[:3], payload)
+    assert out["unassigned_upcs"] == [U[2]]
+    assert out["multi_assigned"] == {pilot.code_key(U[0]): ["G1", "G2"]}
+    assert out["empty_groups"] == ["G3"]
 
 
 # --- catalog read-only ----------------------------------------------------------------------
@@ -246,6 +275,21 @@ def test_lines_are_bounded(tmp_path):
     assert report["odoo"]["lines_read"] == 1 and report["odoo"]["truncated"] is True
 
 
+def test_proposal_remains_capped_at_eight(tmp_path):
+    codes = [upc12(f"{7_000_000_000 + index:011}") for index in range(10)]
+    lines = [
+        (index + 1, f"PO-SYN-{index}", SYNTHETIC_PARTNER, "purchase", code, f"REF-{index}")
+        for index, code in enumerate(codes)
+    ]
+    catalog = tmp_path / "empty.sqlite3"
+    make_catalog(catalog).close()
+    report, code = pilot.build_report(
+        args(tmp_path, "--catalog", str(catalog), "--size", "99"),
+        engine=odoo(lines), helpers=helpers(), today=TODAY,
+    )
+    assert code == 0 and len(report["proposal"]) == 8
+
+
 class DownEngine:
     dialect = type("D", (), {"name": "postgresql"})()
 
@@ -254,7 +298,8 @@ class DownEngine:
 
 
 def test_odoo_down_reports_class_only_without_secrets(tmp_path, capsys):
-    code = pilot.main(["--out", str(tmp_path / "o")], engine=DownEngine(), helpers=helpers())
+    code = pilot.main(["--partner", str(SYNTHETIC_PARTNER), "--expect-name", "Supplier Test",
+                       "--out", str(tmp_path / "o")], engine=DownEngine(), helpers=helpers())
     shown = capsys.readouterr().out + "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "o").glob("*.json"))
     assert code == 2 and "odoo_no_disponible" in shown and "SECRET" not in shown and "10.0.0.1" not in shown
 
@@ -264,7 +309,8 @@ def test_report_lists_proposal_and_keeps_literal_upc_in_csv(tmp_path, capsys):
     make_catalog(catalog).close()
     groups = tmp_path / "g.json"
     groups.write_text(json.dumps({"groups": [{"portal_ref": "G1", "status": "inactive", "upcs": [U[0], U[1]]}]}))
-    code = pilot.main(["--out", str(tmp_path / "o"), "--catalog", str(catalog), "--days", "60",
+    code = pilot.main(["--partner", str(SYNTHETIC_PARTNER), "--expect-name", "Supplier Test",
+                       "--out", str(tmp_path / "o"), "--catalog", str(catalog), "--days", "60",
                        "--upc", U[0], "--upc", U[1], "--portal-groups", str(groups)], engine=odoo(LINES),
                       helpers=helpers())
     assert code == 0
@@ -288,7 +334,8 @@ def test_unwritable_output_gives_exit_4(tmp_path, capsys):
     blocked.write_text("x")
     catalog = tmp_path / "c.sqlite3"
     make_catalog(catalog).close()
-    code = pilot.main(["--out", str(blocked / "sub"), "--catalog", str(catalog), "--days", "60", "--upc", U[1]],
+    code = pilot.main(["--partner", str(SYNTHETIC_PARTNER), "--expect-name", "Supplier Test",
+                       "--out", str(blocked / "sub"), "--catalog", str(catalog), "--days", "60", "--upc", U[1]],
                       engine=odoo(LINES), helpers=helpers())
     assert code == 4 and "salida_no_escribible" in capsys.readouterr().out
 
@@ -300,13 +347,13 @@ def test_missing_dependency_blocker_names_modules_only(monkeypatch, tmp_path, ca
 
     def fake(name, *a):
         if name == "kering_jobs":
-            raise ImportError("secret path /x/y", name="kering_jobs")
+            raise ImportError("synthetic path /x/y", name="kering_jobs")
         return real(name, *a)
 
     monkeypatch.setattr(pilot.importlib, "import_module", fake)
-    code = pilot.main(["--out", str(tmp_path / "o")])
+    code = pilot.main(["--partner", str(SYNTHETIC_PARTNER), "--out", str(tmp_path / "o")])
     out = capsys.readouterr().out + "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "o").glob("*.json"))
-    assert code == 5 and "dependencia_ausente" in out and "kering_jobs" in out and "secret path" not in out
+    assert code == 5 and "dependencia_ausente" in out and "kering_jobs" in out and "synthetic path" not in out
 
 
 def test_script_only_imports_production_modules():
@@ -322,12 +369,13 @@ def test_script_only_imports_production_modules():
 def test_runs_from_stdin_and_reports_blocker_without_traceback(tmp_path):
     env = {k: v for k, v in os.environ.items() if not k.startswith("DB_")}
     env.update({"PYTHONPATH": str(ROOT), "DB_HOST": "127.0.0.1", "DB_PORT": "1", "DB_NAME": "x", "DB_USER": "u",
-                "DB_PASSWORD": "TOPSECRET"})
-    done = subprocess.run([sys.executable, "-", "--out", str(tmp_path / "o"), "--timeout-ms", "500"],
+                "DB_PASSWORD": "SYNTHETIC_TEST_DB_PASSWORD"})
+    done = subprocess.run([sys.executable, "-", "--partner", str(SYNTHETIC_PARTNER),
+                           "--expect-name", "Supplier Test", "--out", str(tmp_path / "o"), "--timeout-ms", "500"],
                           input=SCRIPT.read_bytes(), capture_output=True, cwd=ROOT, env=env, timeout=120)
     shown = (done.stdout + done.stderr).decode("utf-8", "replace")
     assert done.returncode in (2, 5), shown
-    assert "Traceback" not in shown and "TOPSECRET" not in shown
+    assert "Traceback" not in shown and "SYNTHETIC_TEST_DB_PASSWORD" not in shown
 
 
 # --- pending requests for days (core connector) -------------------------------------------------
@@ -335,16 +383,20 @@ def test_runs_from_stdin_and_reports_blocker_without_traceback(tmp_path):
 def test_request_pending_for_days_is_not_failed_nor_resubmitted(tmp_path, monkeypatch):
     from marcolin_images import DEFAULTS, MarcolinConnector, MarcolinPortal
     from provider_images import PENDING, PortalPackage, ProviderService, ProviderStore
-    from provider_support import EANS, fake_odoo
+    from provider_support import EANS
     from test_marcolin_images import Driver
 
     monkeypatch.setenv("MARCOLIN_AUTOMATION_ENABLED", "true")
     clock = [1_800_000_000.0]
     store = ProviderStore(tmp_path / "s", clock=lambda: clock[0])
     repo = ImageRepository(tmp_path / "i", state=tmp_path / "r", backups=tmp_path / "b")
-    settings = replace(DEFAULTS, supplier_ids=(573,), max_eans_per_request=50, poll_base_seconds=60)
+    settings = replace(DEFAULTS, supplier_ids=(SYNTHETIC_PARTNER,), max_eans_per_request=50, poll_base_seconds=60)
     service = ProviderService(store, repo, settings, rng=random.Random(0))
-    connector = MarcolinConnector(service, fake_odoo({573: [(1, "P1", EANS[0]), (2, "P2", EANS[1])]}))
+    engine = odoo([
+        (1, "PO-SYN-A", SYNTHETIC_PARTNER, "purchase", EANS[0], "REF-A"),
+        (2, "PO-SYN-B", SYNTHETIC_PARTNER, "purchase", EANS[1], "REF-B"),
+    ])
+    connector = MarcolinConnector(service, engine)
     driver = Driver(["Pendiente"], PortalPackage())
     portal = MarcolinPortal(driver)
     assert len(connector.detect(date(2026, 9, 1), date(2026, 9, 30))["created"]) == 1
