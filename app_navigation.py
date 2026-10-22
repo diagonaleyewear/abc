@@ -26,6 +26,7 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
                 pages["luxoptica_images"],
                 pages["luxoptica_pending"],
                 pages["kering_images"],
+                *([pages["provider_images"]] if "provider_images" in pages else []),
             ],
             "Alertas": [pages["alerts"]],
         }

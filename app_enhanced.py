@@ -1997,6 +1997,17 @@ def render_kering_images_page() -> None:
 
 
 KERING_IMAGES_PAGE = st.Page(render_kering_images_page, title="Imágenes Kering", url_path="imagenes-kering")
+
+
+def render_provider_images_page() -> None:
+    render_sidebar_shell("Proveedores de imágenes")
+    from provider_images_ui import render_provider_page
+    render_provider_page(get_db_engine)
+    render_footer()
+
+
+PROVIDER_IMAGES_PAGE = st.Page(render_provider_images_page, title="Proveedores de imágenes",
+                               url_path="proveedores-imagenes")
 HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
 ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
 ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
@@ -2059,6 +2070,7 @@ navigation = build_navigation(
         "luxoptica_images": LUXOPTICA_IMAGES_PAGE,
         "luxoptica_pending": LUXOPTICA_PENDING_PAGE,
         "kering_images": KERING_IMAGES_PAGE,
+        "provider_images": PROVIDER_IMAGES_PAGE,
         "alerts": ALERTA_PEDIDOS_PAGE,
         "reconciliation": ODOO_RECONCILIATION_PAGE,
         "settings": SETTINGS_PAGE,
