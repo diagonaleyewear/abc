@@ -8,7 +8,7 @@ import pytest
 
 from image_repository import ImageRepository
 from provider_images import (
-    FAILED, IMPORTED, NEEDS_REVIEW, PARTIAL, PENDING, READY, ProviderService, ProviderSettings, ProviderStore,
+    FAILED, IMPORTED, NEEDS_REVIEW, PARTIAL, PENDING, READY, ProviderConnector, ProviderService, ProviderSettings, ProviderStore,
     RequestStateError, UnverifiedProviderPortal, ean_valid, match_file, normalize_eans, parse_manifest,
     provider_demand, read_zip_package, PortalPackage,
 )
@@ -239,7 +239,7 @@ def test_direct_ean_planning_works_without_odoo_or_supplier_mapping(env):
     settings = ProviderSettings("safilo", max_eans_per_request=2)
     connector = ProviderConnector(ProviderService(store, repo, settings), engine=None)
     result = connector.plan_eans(
-        f"{EANS[0]}, {EANS[1]};{EANS[0]}\\nnot-an-ean", mode="manual"
+        f"{EANS[0]}, {EANS[1]};{EANS[0]}\nnot-an-ean", mode="manual"
     )
     assert len(result["created"]) == 1
     assert result["invalid"] == ["not-an-ean"]
@@ -278,3 +278,59 @@ def test_load_settings_and_connector_manual_flow(env, tmp_path):
     assert again["created"] == [] and len(again["already_live"]) == 3
     archive = zip_bytes({"manifest.csv": f"filename,ean,view\na.png,{EANS[0]},frontal\n".encode(), "a.png": photo()})
     assert connector.import_zip(result["created"][0], archive)["imported"] == 1
+
+def test_ean_text_and_file_parsing_handles_whitespace_headers_and_dupes():
+    from provider_images import parse_ean_file, parse_ean_text
+    assert parse_ean_text(f" {EANS[0]},{EANS[1]};\n{EANS[2]}\t{EANS[0]} ") == [EANS[0], EANS[1], EANS[2], EANS[0]]
+    assert parse_ean_file(f"sku,EAN\nA,{EANS[0]}\nB,\nC,\"{EANS[1]}\"\n".encode()) == [EANS[0], EANS[1]]
+    assert parse_ean_file(f"{EANS[0]}\n{EANS[1]}\n".encode()) == [EANS[0], EANS[1]]
+
+
+def test_text_planning_splits_on_spaces_and_reports_invalid_and_duplicates(env):
+    store, repo, settings, _, _ = env
+    connector = ProviderConnector(ProviderService(store, repo, settings))
+    result = connector.plan_eans(f"{EANS[0]} {EANS[1]}\n{EANS[0]}, 123, xx", mode="manual")
+    assert sum(len(store.get(r)["eans"]) for r in result["created"]) == 2
+    assert result["invalid"] == ["123", "xx"]
+
+
+def test_queue_survives_restart_and_zip_without_manifest_goes_to_review(tmp_path):
+    settings = ProviderSettings("nuorder", allow_filename_ean=False)
+    root, images = tmp_path / "state", tmp_path / "images"
+    repo = lambda: ImageRepository(images, state=tmp_path / "rs", backups=tmp_path / "bk")
+    store = ProviderStore(root)
+    rid = store.plan(settings, EANS[:2], mode="manual")["created"][0]
+    del store
+    service = ProviderService(ProviderStore(root), repo(), settings)  # "restart"
+    assert service.store.get(rid)["state"] == READY
+    result = ProviderConnector(service).import_zip(rid, zip_bytes({f"{EANS[0]}.png": photo(), "x.png": photo()}))
+    assert result["imported"] == 0 and result["review"] == 2 and repo().records() == []
+    assert service.store.get(rid)["state"] == NEEDS_REVIEW
+    assert len(ProviderStore(root).review_items("nuorder")) == 2
+    again = ProviderConnector(service).import_zip(rid, zip_bytes({f"{EANS[0]}.png": photo(), "x.png": photo()}))
+    assert again["review"] == 2 and len(service.store.review_items("nuorder")) == 4  # distinct content, no crash
+
+
+def test_duplicate_content_and_corrupt_files_are_handled(env):
+    store, repo, settings, _, service = env
+    rid = store.plan(settings, EANS[:1], mode="manual")["created"][0]
+    data = photo()
+    package = PortalPackage(files=[pfile("a.png", data, ean=EANS[0], view="frontal"),
+                                   pfile("a_copy.png", data, ean=EANS[0], view="frontal"),
+                                   pfile("broken.png", b"not an image", ean=EANS[0], view="lateral")],)
+    result = service.import_package(rid, package)
+    assert result["imported"] == 1 and result["reused"] == 1 and len(result["errors"]) == 1
+    assert len(repo.records(EANS[0])) == 2  # same asset, two representations; corrupt one rejected
+    assert any(i["reason"].startswith("imagen_rechazada") for i in store.review_items())
+
+
+def test_provider_images_coexist_with_other_providers_in_common_repository(env):
+    store, repo, settings, _, service = env
+    repo.save(EANS[0], "kering_front.png", photo(), provider="kering", origin="PO1", view="frontal")
+    repo.save(EANS[0], "lux.png", photo(), provider="luxottica", origin="mail", view="perspectiva")
+    rid = store.plan(settings, EANS[:1], mode="manual")["created"][0]
+    service.import_package(rid, PortalPackage(files=[pfile("m.png", ean=EANS[0], view="lateral")]))
+    assert {r.provider for r in repo.records(EANS[0])} == {"kering", "luxottica", "marcolin"}
+    assert set(repo.valid_views(EANS[0])) == {"frontal", "perspectiva", "lateral"}
+    assert repo.pending_views(EANS[0], settings.required_views) == ()
+    assert [r.provider for r in repo.catalog_records(EANS[0]) if r.provider == "marcolin"] == ["marcolin"]
