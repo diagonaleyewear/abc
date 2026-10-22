@@ -96,3 +96,9 @@ def test_page_plans_eans_without_odoo_or_portal(monkeypatch, tmp_path):
     assert not app.exception
     (request,) = ui.ProviderStore(tmp_path).list_requests("marcolin")
     assert request["ean_count"] == 2
+
+def test_export_caption_follows_connector_separator():
+    from marcolin_images import MarcolinConnector
+    from provider_images import ProviderConnector
+    assert "un código por línea" in ui.export_caption(MarcolinConnector.__new__(MarcolinConnector))
+    assert "separada por comas" in ui.export_caption(ProviderConnector.__new__(ProviderConnector))
