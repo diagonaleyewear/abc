@@ -76,9 +76,9 @@ def render_provider_page(engine_factory) -> None:
         return
     service, store = connector.service, connector.service.store
     flag = "activa" if service.settings.automation_enabled else "desactivada"
-    st.caption(f"Automatización {flag}. Sin piloto autorizado, el estado debe ser «desactivada»."
-               f" Proveedores Odoo configurados: {list(service.settings.supplier_ids) or 'ninguno'}.")
-    requests_tab, detect_tab, review_tab = st.tabs(["Solicitudes", "Detectar demanda", "Revisión"])
+    st.caption(f"Automatización {flag}. Sin piloto autorizado, el estado debe ser «desactivada». "
+               "La introducción directa de EAN no requiere Odoo.")
+    requests_tab, detect_tab, review_tab = st.tabs(["Solicitudes", "Planificar por EAN", "Revisión"])
     with requests_tab:
         rows = request_rows(store, provider)
         st.dataframe(rows, use_container_width=True, hide_index=True) if rows else st.info("Sin solicitudes.")
@@ -122,6 +122,33 @@ def _request_actions(connector, rows) -> None:
 
 
 def _detect(connector, engine_factory) -> None:
+    st.subheader("Introducir EAN directamente")
+    st.caption("Selecciona arriba el proveedor correspondiente. Esta acción solo planifica: "
+               "no consulta Odoo ni accede al portal.")
+    ean_text = st.text_area(
+        "EAN (separados por comas, espacios o líneas)",
+        key="prov_manual_eans",
+        placeholder="Pega una lista de EAN...",
+    )
+    limit_manual = st.number_input("Máximo de EAN por planificación", 1, 5000, 50,
+                                   key="prov_manual_limit")
+    if st.button("Validar y crear solicitudes", key="prov_manual_plan"):
+        if not ean_text.strip():
+            st.warning("Introduce al menos un EAN.")
+        else:
+            result = connector.plan_eans(ean_text, limit=int(limit_manual))
+            st.success(
+                f"Solicitudes creadas: {len(result['created'])}; "
+                f"EAN ya en curso: {len(result['already_live'])}; "
+                f"EAN inválidos: {len(result['invalid'])}."
+            )
+            if result["invalid"]:
+                st.warning("EAN rechazados: " + ", ".join(result["invalid"][:25]))
+    with st.expander("Opcional: detectar EAN desde Odoo"):
+        _detect_from_odoo(connector, engine_factory)
+
+
+def _detect_from_odoo(connector, engine_factory) -> None:
     end = date.today()
     start = st.date_input("Desde", end - timedelta(days=90), key="prov_from")
     finish = st.date_input("Hasta", end, key="prov_to")
