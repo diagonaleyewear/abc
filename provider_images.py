@@ -329,6 +329,11 @@ class ProviderStore:
             connection.execute("COMMIT")
         return {"created": created, "already_live": skipped, "invalid": invalid}
 
+    def live_eans(self, provider: str) -> set[str]:
+        with closing(self.connect()) as connection:
+            return {r[0] for r in connection.execute(
+                "SELECT ean FROM request_eans WHERE provider=? AND live=1", (provider,))}
+
     def get(self, request_id: int) -> dict:
         with closing(self.connect()) as connection:
             row = connection.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
@@ -699,6 +704,16 @@ class ProviderConnector:
 
     def __init__(self, service: ProviderService, engine=None):
         self.service, self.engine = service, engine
+
+    def preview_eans(self, eans) -> dict:
+        """Validation summary for a pasted/uploaded list; writes nothing."""
+        if isinstance(eans, str):
+            eans = parse_ean_text(eans)
+        eans = [str(e).strip() for e in eans if str(e).strip()]
+        valid, invalid = normalize_eans(eans)
+        live = self.service.store.live_eans(self.service.settings.provider)
+        return {"total": len(eans), "valid": valid, "invalid": invalid, "duplicates": len(eans) - len(set(eans)),
+                "already_live": [e for e in valid if e in live], "new": [e for e in valid if e not in live]}
 
     def plan_eans(self, eans, *, mode: str | None = None, limit: int | None = None) -> dict:
         """Plan user-supplied EANs without Odoo, keeping existing duplicate and safety checks.
