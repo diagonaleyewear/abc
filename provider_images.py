@@ -1,7 +1,7 @@
 """Shared core for supplier image connectors (Marcolin, NuORDER, Sáfilo; issue #59).
 
 Portal-independent: durable request store with a transactional state machine, demand
-computed from Odoo purchase orders (read-only), file/EAN matching with explicit evidence,
+from explicit EAN lists (optionally from Odoo purchase orders), file/EAN matching with explicit evidence,
 and import into the common ImageRepository. Portals plug in through ``ProviderPortal``;
 nothing here touches the network and no credentials are handled.
 """
@@ -88,11 +88,34 @@ def ean_key(ean: str) -> str:
     return ean.zfill(14)
 
 
+def parse_ean_text(text: str) -> list[str]:
+    """Tokens from pasted text or an uploaded CSV/TXT: commas, semicolons, tabs, spaces and newlines."""
+    return [t for t in re.split(r"[,;\s]+", text.strip().lstrip("\ufeff")) if t]
+
+
+def parse_ean_file(content: bytes) -> list[str]:
+    """EANs from a CSV/TXT upload: first column named ean/barcode/gtin if a header exists, else every token."""
+    text = content.decode("utf-8-sig", errors="replace")
+    lines = [line for line in text.splitlines() if line.strip()]
+    if lines:
+        header = [h.strip().lower() for h in re.split(r"[,;\t]", lines[0])]
+        column = next((i for i, h in enumerate(header) if h in {"ean", "barcode", "gtin", "codigo de barras"}), None)
+        if column is not None:
+            out = []
+            for line in lines[1:]:
+                cells = re.split(r"[,;\t]", line)
+                if column < len(cells) and cells[column].strip():
+                    out.append(cells[column].strip().strip('"'))
+            return out
+    return parse_ean_text(text)
+
+
 @dataclass(frozen=True)
 class ProviderSettings:
     provider: str
     supplier_ids: tuple[int, ...] = ()
     max_eans_per_request: int = 50
+    batch_size_verified: bool = False
     max_requests_per_day: int = 5
     pilot_cap: int = 0
     required_views: tuple[str, ...] = ("frontal", "lateral", "perspectiva")
@@ -676,6 +699,22 @@ class ProviderConnector:
 
     def __init__(self, service: ProviderService, engine=None):
         self.service, self.engine = service, engine
+
+    def plan_eans(self, eans, *, mode: str | None = None, limit: int | None = None) -> dict:
+        """Plan user-supplied EANs without Odoo, keeping existing duplicate and safety checks.
+
+        EANs must be independently sourced and assigned to the explicitly chosen
+        provider; file-to-EAN matching still needs evidence during import.
+        """
+        if isinstance(eans, str):
+            eans = parse_ean_text(eans)
+        valid, invalid = normalize_eans(eans)
+        selected = valid[:limit] if limit is not None else valid
+        result = self.service.store.plan(
+            self.service.settings, selected, mode=mode or self.default_mode
+        )
+        return {**result, "invalid": invalid, "source": "manual_eans",
+                "selected": len(selected)}
 
     def detect(self, start: date, end: date, *, mode: str | None = None, limit: int | None = None) -> dict:
         demand = provider_demand(self.engine, self.service.repository, self.service.settings, start, end)
