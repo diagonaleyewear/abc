@@ -72,20 +72,40 @@ def ean_valid(ean: str) -> bool:
     return (10 - total % 10) % 10 == digits[0]
 
 
+def ean_key(ean: str) -> str:
+    """Identity shared by a UPC-12 and its EAN-13/GTIN-14 form with leading zeros; never used for display."""
+    return ean.zfill(14)
+
+
 def normalize_eans(values) -> tuple[list[str], list[str]]:
-    """Unique valid EANs in input order and the rejected raw values (bad length/checksum)."""
+    """Unique valid EANs in input order and the rejected raw values (bad length/checksum).
+
+    Uniqueness is by identity (`ean_key`): the first literal code is kept and is the one shown and exported.
+    """
     valid, invalid, seen = [], [], set()
     for raw in values:
         ean = str(raw or "").strip()
-        if not ean or ean in seen:
+        if not ean:
             continue
-        seen.add(ean)
+        key = ean_key(ean) if ean_valid(ean) else ean
+        if key in seen:
+            continue
+        seen.add(key)
         (valid if ean_valid(ean) else invalid).append(ean)
     return valid, invalid
 
 
-def ean_key(ean: str) -> str:
-    return ean.zfill(14)
+def equivalent_forms(values) -> list[dict]:
+    """Valid codes dropped because an equivalent form (same `ean_key`, different literal) came first."""
+    kept, result = {}, []
+    for raw in values:
+        ean = str(raw or "").strip()
+        if not ean_valid(ean):
+            continue
+        first = kept.setdefault(ean_key(ean), ean)
+        if first != ean:
+            result.append({"kept": first, "equivalent": ean})
+    return result
 
 
 def parse_ean_text(text: str) -> list[str]:
@@ -267,8 +287,9 @@ CREATE TABLE IF NOT EXISTS requests(
   last_error TEXT, retry_of INTEGER, created_at REAL NOT NULL, updated_at REAL NOT NULL, next_poll_at REAL);
 CREATE TABLE IF NOT EXISTS request_eans(
   request_id INTEGER NOT NULL REFERENCES requests(id), provider TEXT NOT NULL, ean TEXT NOT NULL,
-  result TEXT NOT NULL DEFAULT '', live INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(request_id, ean));
-CREATE UNIQUE INDEX IF NOT EXISTS one_live_request_per_ean ON request_eans(provider, ean) WHERE live = 1;
+  result TEXT NOT NULL DEFAULT '', live INTEGER NOT NULL DEFAULT 1,
+  ean_key TEXT GENERATED ALWAYS AS (substr('00000000000000' || ean, -14)) VIRTUAL, PRIMARY KEY(request_id, ean));
+CREATE UNIQUE INDEX IF NOT EXISTS one_live_request_per_ean_key ON request_eans(provider, ean_key) WHERE live = 1;
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, request_id INTEGER, at REAL NOT NULL, from_state TEXT, to_state TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS review_items(
@@ -283,6 +304,62 @@ CREATE TRIGGER IF NOT EXISTS events_append_only_delete BEFORE DELETE ON events
 """
 
 
+class StoreMigrationRequired(RuntimeError):
+    """The request store predates the shared UPC/EAN identity; migrate it explicitly (never automatic)."""
+
+
+def _legacy_store(path: Path) -> bool:
+    if not Path(path).is_file():
+        return False
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=30)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_xinfo(request_eans)")}
+    return bool(columns) and "ean_key" not in columns
+
+
+def migration_report(root: Path) -> dict:
+    """Read-only dry run: schema state and live requests that would collide on the shared identity."""
+    path = Path(root) / "provider_requests.sqlite"
+    if not path.is_file():
+        return {"state": "absent", "conflicts": []}
+    if not _legacy_store(path):
+        return {"state": "current", "conflicts": []}
+    uri = path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=30)) as connection:
+        rows = connection.execute(
+            "SELECT provider, substr('00000000000000' || ean, -14) AS k, group_concat(request_id || ':' || ean) "
+            "FROM request_eans WHERE live=1 GROUP BY provider, k HAVING COUNT(*) > 1").fetchall()
+    return {"state": "legacy", "conflicts": [{"provider": p, "key": k, "live_rows": members.split(",")}
+                                             for p, k, members in rows]}
+
+
+def migrate_request_store(root: Path, *, apply: bool = False) -> dict:
+    """Explicit migration to the shared identity. Dry run by default; refuses to apply with conflicts.
+
+    Adds a virtual `ean_key` column and a unique live index. Nothing is deleted or rewritten: the literal
+    codes and the full history stay as they are, and a consistent backup is written first. Conflicting live
+    requests must be resolved by cancelling one of them through the normal state machine, then re-running.
+    """
+    report = migration_report(root)
+    if report["state"] != "legacy" or report["conflicts"] or not apply:
+        return {**report, "applied": False}
+    path = Path(root) / "provider_requests.sqlite"
+    backup = path.with_name(f"{path.name}.pre-ean-key-{int(time.time())}")
+    if backup.exists():
+        raise FileExistsError("backup_existente")
+    with closing(sqlite3.connect(path, timeout=30, isolation_level=None)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)) as reader, \
+                closing(sqlite3.connect(backup)) as target:
+            reader.backup(target)
+        connection.execute("ALTER TABLE request_eans ADD COLUMN ean_key TEXT "
+                           "GENERATED ALWAYS AS (substr('00000000000000' || ean, -14)) VIRTUAL")
+        connection.execute("CREATE UNIQUE INDEX one_live_request_per_ean_key "
+                           "ON request_eans(provider, ean_key) WHERE live = 1")
+        connection.execute("COMMIT")
+    return {**report, "applied": True, "backup": backup.name}
+
+
 class ProviderStore:
     def __init__(self, root: Path, clock: Callable[[], float] = time.time):
         self.root = Path(root)
@@ -290,6 +367,9 @@ class ProviderStore:
         self.path = self.root / "provider_requests.sqlite"
         self.staging = self.root / "provider_staging"
         self.clock = clock
+        if _legacy_store(self.path):
+            raise StoreMigrationRequired("provider_requests.sqlite necesita la migración explícita "
+                                         "scripts/provider_requests_migrate.py (sin ejecución automática)")
         with closing(self.connect()) as connection:
             connection.executescript(SCHEMA)
 
@@ -310,9 +390,9 @@ class ProviderStore:
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             live = {r[0] for r in connection.execute(
-                "SELECT ean FROM request_eans WHERE provider=? AND live=1", (settings.provider,))}
-            fresh = [e for e in valid if e not in live]
-            skipped = [e for e in valid if e in live]
+                "SELECT ean_key FROM request_eans WHERE provider=? AND live=1", (settings.provider,))}
+            fresh = [e for e in valid if ean_key(e) not in live]
+            skipped = [e for e in valid if ean_key(e) in live]
             size = max(1, settings.max_eans_per_request)
             now = self.clock()
             for start in range(0, len(fresh), size):
@@ -333,6 +413,12 @@ class ProviderStore:
         with closing(self.connect()) as connection:
             return {r[0] for r in connection.execute(
                 "SELECT ean FROM request_eans WHERE provider=? AND live=1", (provider,))}
+
+    def live_keys(self, provider: str) -> set[str]:
+        """Identities (`ean_key`) with a request in progress, so UPC-12 and EAN-13 forms match."""
+        with closing(self.connect()) as connection:
+            return {r[0] for r in connection.execute(
+                "SELECT ean_key FROM request_eans WHERE provider=? AND live=1", (provider,))}
 
     def get(self, request_id: int) -> dict:
         with closing(self.connect()) as connection:
@@ -410,8 +496,8 @@ class ProviderStore:
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             live = {r[0] for r in connection.execute(
-                "SELECT ean FROM request_eans WHERE provider=? AND live=1", (request["provider"],))}
-            pending = [e for e in pending if e not in live]
+                "SELECT ean_key FROM request_eans WHERE provider=? AND live=1", (request["provider"],))}
+            pending = [e for e in pending if ean_key(e) not in live]
             if not pending:
                 connection.execute("ROLLBACK")
                 return None
@@ -700,6 +786,7 @@ class ProviderConnector:
     """Common connector surface used by the UI and CLI; portal specifics live in subclasses."""
     provider = ""
     default_mode = "portal"
+    list_separator = ","
     defaults: ProviderSettings
 
     def __init__(self, service: ProviderService, engine=None):
@@ -711,9 +798,11 @@ class ProviderConnector:
             eans = parse_ean_text(eans)
         eans = [str(e).strip() for e in eans if str(e).strip()]
         valid, invalid = normalize_eans(eans)
-        live = self.service.store.live_eans(self.service.settings.provider)
+        live = self.service.store.live_keys(self.service.settings.provider)
         return {"total": len(eans), "valid": valid, "invalid": invalid, "duplicates": len(eans) - len(set(eans)),
-                "already_live": [e for e in valid if e in live], "new": [e for e in valid if e not in live]}
+                "equivalent_forms": equivalent_forms(eans),
+                "already_live": [e for e in valid if ean_key(e) in live],
+                "new": [e for e in valid if ean_key(e) not in live]}
 
     def plan_eans(self, eans, *, mode: str | None = None, limit: int | None = None) -> dict:
         """Plan user-supplied EANs without Odoo, keeping existing duplicate and safety checks.
@@ -736,7 +825,8 @@ class ProviderConnector:
         eans = demand["eans"][:limit] if limit else demand["eans"]
         return {**demand, **self.service.store.plan(self.service.settings, eans, mode=mode or self.default_mode)}
 
-    def export_ean_list(self, request_id: int, separator: str = ",") -> str:
+    def export_ean_list(self, request_id: int, separator: str | None = None) -> str:
+        separator = self.list_separator if separator is None else separator
         return separator.join(e["ean"] for e in self.service.store.get(request_id)["eans"])
 
     def import_zip(self, request_id: int, content: bytes) -> dict:
