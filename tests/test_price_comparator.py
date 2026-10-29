@@ -1,10 +1,22 @@
+from contextlib import closing
+import hashlib
 from io import BytesIO
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import threading
 
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from price_comparator import ImportReport, PriceComparatorStore, normalize_gtin
+import price_comparator
+from price_comparator import (
+    ImportReport, PriceComparatorStorageError, PriceComparatorStore, normalize_gtin,
+    resolve_database_path,
+)
 
 
 PRODUCTS = pd.DataFrame([
@@ -220,3 +232,145 @@ def test_comparator_import_report_survives_page_rerun(tmp_path, monkeypatch) -> 
     assert any("Productos: 100 importados, 2 actualizados, 1 rechazados." in message.value
                for message in app.success)
     assert any("Fila 7: error" in element.value for element in app.get("markdown"))
+
+
+def test_database_path_prefers_explicit_variable(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "configured.sqlite3"
+    monkeypatch.setattr(price_comparator, "CLOUD_DATA_DIR", tmp_path)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(target))
+
+    assert resolve_database_path() == target
+    assert PriceComparatorStore().database_path == target.resolve()
+
+
+def test_database_path_defaults_to_cloud_volume_without_variable(tmp_path, monkeypatch) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.delenv("PRICE_COMPARATOR_DB_PATH", raising=False)
+    monkeypatch.setattr(price_comparator, "CLOUD_DATA_DIR", data_dir)
+    monkeypatch.setattr(price_comparator, "CLOUD_DB_PATH", data_dir / "price_comparator.sqlite3")
+
+    store = PriceComparatorStore()
+
+    assert store.database_path == (data_dir / "price_comparator.sqlite3").resolve()
+    assert store.database_path.exists()
+    assert not (tmp_path / "masterdata_data").exists()
+
+
+def test_database_path_uses_local_default_outside_docker(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("PRICE_COMPARATOR_DB_PATH", raising=False)
+    monkeypatch.setattr(price_comparator, "CLOUD_DATA_DIR", tmp_path / "absent")
+
+    assert resolve_database_path() == price_comparator.DEFAULT_DB_PATH
+
+
+def test_cloud_default_does_not_create_directories_under_app_root(tmp_path, monkeypatch) -> None:
+    app_root = tmp_path / "app"
+    (app_root / "data").mkdir(parents=True)
+    monkeypatch.delenv("PRICE_COMPARATOR_DB_PATH", raising=False)
+    monkeypatch.setattr(price_comparator, "CLOUD_DATA_DIR", app_root / "data")
+    monkeypatch.setattr(price_comparator, "CLOUD_DB_PATH", app_root / "data" / "price_comparator.sqlite3")
+
+    PriceComparatorStore()
+
+    assert sorted(path.name for path in app_root.iterdir()) == ["data"]
+
+
+def test_unwritable_directory_raises_controlled_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(price_comparator.os, "access", lambda *_args: False)
+
+    with pytest.raises(PriceComparatorStorageError) as error:
+        PriceComparatorStore(tmp_path / "prices.sqlite3")
+
+    assert "PRICE_COMPARATOR_DB_PATH" in str(error.value)
+    assert not (tmp_path / "prices.sqlite3").exists()
+
+
+def test_unwritable_parent_path_raises_controlled_error(tmp_path) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file")
+
+    with pytest.raises(PriceComparatorStorageError):
+        PriceComparatorStore(blocker / "child" / "prices.sqlite3")
+
+
+def test_page_shows_controlled_error_when_database_is_unwritable(tmp_path, monkeypatch) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file")
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(blocker / "prices.sqlite3"))
+
+    app = AppTest.from_string(
+        "from app_pages.price_comparator import render_price_comparator_page\n"
+        "render_price_comparator_page()"
+    ).run()
+
+    assert not app.exception
+    assert any("No se puede abrir la base del comparador" in error.value for error in app.error)
+
+
+def test_existing_database_is_reused_and_repeated_initialization_keeps_data(tmp_path) -> None:
+    path = tmp_path / "prices.sqlite3"
+    first = PriceComparatorStore(path)
+    first.import_products(PRODUCTS)
+    before = path.stat().st_size
+
+    for _ in range(3):
+        again = PriceComparatorStore(path)
+
+    assert [row["ean"] for row in again.products().to_dict("records")] == ["0036000291452"]
+    assert path.stat().st_size >= before
+
+
+def test_wal_mode_and_concurrent_initialization_are_safe(tmp_path) -> None:
+    path = tmp_path / "prices.sqlite3"
+    stores = []
+
+    def create() -> None:
+        stores.append(PriceComparatorStore(path))
+
+    threads = [threading.Thread(target=create) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(stores) == 4
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_initialization_does_not_touch_other_sqlite_databases(tmp_path) -> None:
+    other = tmp_path / "auth_state.sqlite3"
+    with closing(sqlite3.connect(other)) as connection:
+        connection.execute("CREATE TABLE sessions(id TEXT)")
+        connection.execute("INSERT INTO sessions VALUES ('keep')")
+        connection.commit()
+    digest = hashlib.sha256(other.read_bytes()).hexdigest()
+    siblings = sorted(path.name for path in tmp_path.iterdir())
+
+    PriceComparatorStore(tmp_path / "price_comparator.sqlite3")
+
+    assert hashlib.sha256(other.read_bytes()).hexdigest() == digest
+    created = set(path.name for path in tmp_path.iterdir()) - set(siblings)
+    assert all(name.startswith("price_comparator.sqlite3") for name in created)
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0, reason="requires root to switch UID")
+def test_initialization_as_cloud_uid_and_gid_on_owned_volume(tmp_path) -> None:
+    volume = tmp_path / "data"
+    volume.mkdir()
+    os.chown(volume, 1037, 100)
+    script = (
+        "import os, sys\n"
+        "os.setgid(100); os.setuid(1037)\n"
+        "from price_comparator import PriceComparatorStore\n"
+        "print(PriceComparatorStore(sys.argv[1]).database_path)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(volume / "price_comparator.sqlite3")],
+        cwd=Path(price_comparator.__file__).parent, capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (volume / "price_comparator.sqlite3").stat().st_uid == 1037

@@ -14,13 +14,33 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 
 GTIN_ERROR = "EAN/UPC debe ser GTIN-12 o GTIN-13 válido"
 MATCH_STATES = {"exact_match", "probable_match", "manual_review", "not_found", "error"}
 AVAILABILITY_STATES = {"available", "unavailable", "unknown"}
 DEFAULT_DB_PATH = Path(__file__).parent / "masterdata_data" / "price_comparator.sqlite3"
+CLOUD_DATA_DIR = Path("/app/data")
+CLOUD_DB_PATH = CLOUD_DATA_DIR / "price_comparator.sqlite3"
+
+
+class PriceComparatorStorageError(RuntimeError):
+    """The comparator database location is unavailable or not writable."""
+
+
+def resolve_database_path() -> Path:
+    """Explicit variable first; then the Cloud persistent volume; then local development.
+
+    The production controller only swaps the image in a separately approved Compose
+    snapshot, so the repository Compose variable cannot be relied upon there.
+    """
+    configured = os.getenv("PRICE_COMPARATOR_DB_PATH")
+    if configured:
+        return Path(configured)
+    if CLOUD_DATA_DIR.is_dir():
+        return CLOUD_DB_PATH
+    return DEFAULT_DB_PATH
 
 
 def normalize_gtin(value: Any) -> str:
@@ -92,9 +112,20 @@ class PriceComparatorStore:
     """Persistent, isolated data store for manual price-comparison imports."""
 
     def __init__(self, database_path: str | Path | None = None) -> None:
-        configured = os.getenv("PRICE_COMPARATOR_DB_PATH")
-        self.database_path = Path(database_path or configured or DEFAULT_DB_PATH).resolve()
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.database_path = Path(database_path or resolve_database_path()).resolve()
+        try:
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
+            if not os.access(self.database_path.parent, os.W_OK | os.X_OK):
+                raise PermissionError(f"Sin permiso de escritura en {self.database_path.parent}")
+            self._initialize_schema()
+        except (OSError, sqlite3.Error, Timeout) as exc:
+            raise PriceComparatorStorageError(
+                f"No se puede abrir la base del comparador en {self.database_path}: "
+                f"{type(exc).__name__}. Verifique que PRICE_COMPARATOR_DB_PATH apunta a un "
+                "directorio persistente con escritura para el usuario de la aplicación."
+            ) from exc
+
+    def _initialize_schema(self) -> None:
         with FileLock(str(self.database_path) + ".schema.lock", timeout=10):
             with self._connect() as connection:
                 connection.execute("PRAGMA journal_mode=WAL")
