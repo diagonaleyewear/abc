@@ -11,6 +11,10 @@ MFA/CAPTCHA and the ZIP layout are unconfirmed. Everything else works today:
 from __future__ import annotations
 
 from contextlib import closing
+from io import BytesIO
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 
 from provider_images import (
     ProviderConnector, ProviderPortal, ProviderSettings, PortalPackage, PortalStatus, UnverifiedProviderPortal,
@@ -129,3 +133,53 @@ class MarcolinConnector(ProviderConnector):
         for (ean, ref), status in sorted(current.items(), key=lambda item: (item[0][1], item[0][0])):
             groups.setdefault((ref, status), {"portal_ref": ref, "status": status, "upcs": []})["upcs"].append(ean)
         return list(groups.values())
+
+    def export_request_xlsx(self, request_id: int, *, engine=None, odoo_root=None) -> bytes:
+        """Build the operator handoff workbook without changing request state.
+
+        Odoo is consulted only when explicitly requested by the caller and only when this
+        request has no persisted evidence yet. Missing or ambiguous matches remain visible.
+        """
+        request = self.service.store.get(request_id)
+        items = self.service.store.odoo_items(request_id)
+        if not items and engine is not None:
+            from provider_odoo_orders import confirmed_partner_ids, read_confirmed_skus
+            items = read_confirmed_skus(
+                engine, confirmed_partner_ids(odoo_root, self.provider),
+                [item["ean"] for item in request["eans"]])
+            self.service.store.save_odoo_items(request_id, items)
+        by_ean = {item["ean"]: item for item in items}
+        portal_refs = {}
+        for group in self.portal_groups(request_id):
+            if len(group["upcs"]) == 1:
+                portal_refs[group["upcs"][0]] = group["portal_ref"]
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Marcolin"
+        headers = ["UPC / EAN", "SKU completo", "Código real", "Referencia fabricante confirmada",
+                   "Producto Odoo", "Proveedor Odoo", "Pedido Odoo", "Fecha Odoo",
+                   "Referencia portal", "Estado", "Motivo"]
+        sheet.append(headers)
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+        for row in request["eans"]:
+            item = by_ean.get(row["ean"], {})
+            status = item.get("status", "pending")
+            sheet.append([
+                row["ean"], item.get("sku", "") if status == "confirmed" else "",
+                row["ean"], item.get("sku", "") if status == "confirmed" else "",
+                item.get("product", ""), item.get("supplier", ""), item.get("order_name", ""),
+                item.get("order_date", ""), portal_refs.get(row["ean"], ""),
+                status, item.get("reason", "sin correspondencia Odoo confirmada"),
+            ])
+        for cell in sheet["A"][1:]:
+            cell.number_format = "@"
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        widths = [16, 24, 16, 30, 34, 24, 18, 14, 24, 14, 38]
+        for index, width in enumerate(widths, start=1):
+            sheet.column_dimensions[chr(64 + index)].width = width
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()

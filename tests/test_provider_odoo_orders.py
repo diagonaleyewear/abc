@@ -84,6 +84,16 @@ def test_read_is_bounded():
     assert len(lines) == 2 and truncated
 
 
+def test_read_confirmed_skus_is_read_only_and_includes_supplier_contacts():
+    engine = odoo_fixture()
+    before = counts(engine)
+    result = po.read_confirmed_skus(engine, [573], [EANS[0], EANS[2], EANS[3]])
+    assert counts(engine) == before
+    assert result[0]["status"] == "confirmed" and result[0]["sku"] == "MCL-1"
+    assert result[1]["status"] == "confirmed" and result[1]["sku"] == "MCL-3"
+    assert result[2]["status"] == "pending"
+
+
 def test_association_must_be_configured_and_reviewed(env, tmp_path):
     connector, _, root = env
     with pytest.raises(po.AssociationNotConfigured):

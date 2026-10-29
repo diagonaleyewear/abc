@@ -1,7 +1,10 @@
 from datetime import date
 import random
 
+from io import BytesIO
+
 import pytest
+from openpyxl import load_workbook
 
 from marcolin_images import DEFAULTS, MarcolinConnector, MarcolinPortal, map_portal_status
 from provider_images import IMPORTED, NEEDS_REVIEW, PENDING, PortalPackage, ProviderService, ProviderStore
@@ -145,3 +148,66 @@ def test_portal_status_change_is_kept_as_history_and_current_view_follows_it(set
     with connector.service.store.connect() as db:
         assert db.execute("SELECT COUNT(*) FROM marcolin_portal_groups").fetchone()[0] == 3
     assert store.get(request_id)["state"] == "ready"
+
+
+def test_marcolin_excel_keeps_pilot_upcs_as_text_and_confirmed_skus(setup):
+    connector, store, _, _ = setup
+    upcs = ["664689520060", "664689520084", "664689764686", "664689628810",
+            "664689628827", "664689897605"]
+    request_ids = connector.plan_eans(upcs)["created"]
+    for request_id, request_upcs in zip(request_ids, (upcs[:2], upcs[2:4], upcs[4:])):
+        store.save_odoo_items(request_id, [
+            {"ean": ean, "sku": f"TF-{index:03d}", "product": "Tom Ford",
+             "status": "confirmed"} for index, ean in enumerate(request_upcs, upcs.index(request_upcs[0]) + 1)
+        ])
+    before = [store.get(request_id) for request_id in request_ids]
+    rows = []
+    for request_id in request_ids:
+        sheet = load_workbook(BytesIO(connector.export_request_xlsx(request_id))).active
+        rows.extend(list(sheet.iter_rows(min_row=2)))
+        assert sheet["A2"].number_format == "@"
+    assert {row[0].value for row in rows} == set(upcs)
+    assert {row[1].value for row in rows} == {f"TF-{i:03d}" for i in range(1, 7)}
+    assert [store.get(request_id) for request_id in request_ids] == before
+
+
+def test_marcolin_excel_marks_missing_and_ambiguous_references_for_review(setup):
+    connector, store, _, _ = setup
+    upcs = [EANS[0], EANS[1], EANS[2]]
+    request_ids = connector.plan_eans(upcs)["created"]
+    store.save_odoo_items(request_ids[0], [
+        {"ean": upcs[0], "status": "pending", "reason": "sin correspondencia confirmada en Odoo"},
+        {"ean": upcs[1], "status": "requires_review", "reason": "referencias Odoo ambiguas"},
+    ])
+    rows = {}
+    for request_id in request_ids:
+        sheet = load_workbook(BytesIO(connector.export_request_xlsx(request_id))).active
+        rows.update({row[0].value: row for row in sheet.iter_rows(min_row=2)})
+    assert rows[upcs[0]][1].value is None and rows[upcs[0]][9].value == "pending"
+    assert rows[upcs[1]][1].value is None and rows[upcs[1]][9].value == "requires_review"
+    assert rows[upcs[2]][10].value == "sin correspondencia Odoo confirmada"
+
+
+def test_marcolin_excel_generation_is_repeatable_without_mutating_request(setup):
+    connector, store, _, _ = setup
+    request_id = connector.plan_eans([EANS[0]])["created"][0]
+    store.save_odoo_items(request_id, [{"ean": EANS[0], "sku": "SKU-1", "status": "confirmed"}])
+    before = store.get(request_id)
+    first = connector.export_request_xlsx(request_id)
+    second = connector.export_request_xlsx(request_id)
+    assert first == second
+    assert store.get(request_id) == before
+
+
+def test_odoo_evidence_table_is_added_without_losing_existing_requests(setup):
+    connector, store, _, _ = setup
+    request_id = connector.plan_eans([EANS[0]])["created"][0]
+    original = store.get(request_id)
+    with store.connect() as connection:
+        connection.execute("DROP TABLE request_odoo_items")
+    reopened = type(store)(store.root, clock=store.clock)
+    assert reopened.get(request_id) == original
+    with reopened.connect() as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='request_odoo_items'"
+        ).fetchone() is not None
