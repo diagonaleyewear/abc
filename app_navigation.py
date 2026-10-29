@@ -9,9 +9,14 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
         groups = {
             "Inicio": [pages["home"]],
             "Master Data": [pages["master_import"], pages["master_dictionary"], pages["master_dryrun"]],
-            "Repositorio de imagenes": [pages["kering_images"]],
+            "Repositorio de imagenes": [
+                pages.get("masterdata_kering_images", pages["kering_images"])
+            ],
         }
     else:
+        provider_pages = (
+            [pages["provider_images"]] if "provider_images" in pages else []
+        )
         groups = {
             "Inicio": [pages["home"]],
             "Análisis ABCD": [
@@ -24,9 +29,9 @@ def build_navigation(st_module: Any, auth_role: str | None, pages: dict[str, Any
             "Master Data": [pages["master_import"], pages["master_dictionary"], pages["master_dryrun"]],
             "Repositorio de imágenes": [
                 pages["luxoptica_images"],
+                *provider_pages,
                 pages["luxoptica_pending"],
                 pages["kering_images"],
-                *([pages["provider_images"]] if "provider_images" in pages else []),
             ],
             "Alertas": [pages["alerts"]],
         }

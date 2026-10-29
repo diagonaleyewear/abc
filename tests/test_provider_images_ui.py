@@ -32,7 +32,7 @@ def test_request_rows_show_state_progress_and_errors(tmp_path):
                                    repository=ImageRepository(tmp_path / "i", state=tmp_path / "r", backups=tmp_path / "b"))
     store.plan(connector.service.settings, EANS[:2])
     (row,) = ui.request_rows(store, "marcolin")
-    assert row["Estado"] == "Lista" and row["EAN"] == 2 and row["Con imagen"] == 0
+    assert row["Estado"] == "Preparada (no enviada)" and row["EAN"] == 2 and row["Con imagen"] == 0
 
 
 def _page():
