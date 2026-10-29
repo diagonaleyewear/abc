@@ -38,7 +38,7 @@ services:
     image: ${ABCD_IMAGE_REF:-abcd-control:local}
     container_name: abcd-control
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     environment:
       <<: [*odoo-env, *graph-env, *order-alert-env]
       APP_USERNAME: ${APP_USERNAME}
