@@ -197,3 +197,17 @@ def test_marcolin_excel_generation_is_repeatable_without_mutating_request(setup)
     second = connector.export_request_xlsx(request_id)
     assert first == second
     assert store.get(request_id) == before
+
+
+def test_odoo_evidence_table_is_added_without_losing_existing_requests(setup):
+    connector, store, _, _ = setup
+    request_id = connector.plan_eans([EANS[0]])["created"][0]
+    original = store.get(request_id)
+    with store.connect() as connection:
+        connection.execute("DROP TABLE request_odoo_items")
+    reopened = type(store)(store.root, clock=store.clock)
+    assert reopened.get(request_id) == original
+    with reopened.connect() as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='request_odoo_items'"
+        ).fetchone() is not None
