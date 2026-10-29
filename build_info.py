@@ -32,6 +32,36 @@ def load_build_info() -> dict[str, str]:
     return {"version": "build sin identificar", "commit": "", "published": "", "build": "Sin información"}
 
 
+NOT_AVAILABLE = "No disponible"
+CHANGELOG_URL = "https://github.com/sginfoocio/abc/blob/main/CHANGELOG.md"
+SEMVER = re.compile(r"(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)")
+
+
+def semantic_version(info: dict[str, str]) -> str:
+    """Only a real MAJOR.MINOR.PATCH counts as a version; local/sha identifiers are not versions."""
+    return info["version"] if SEMVER.fullmatch(info["version"]) else ""
+
+
+def footer_text(info: dict[str, str]) -> str:
+    version = semantic_version(info)
+    commit = info["commit"][:7] or NOT_AVAILABLE
+    return f"Cloud v{version} · commit {commit}" if version else f"Cloud · versión {NOT_AVAILABLE} · commit {commit}"
+
+
+def version_details(info: dict[str, str]) -> dict[str, str]:
+    artifact = info["build"].startswith("actions-")
+    return {
+        "Versión instalada": semantic_version(info) or NOT_AVAILABLE,
+        "Commit desplegado": info["commit"] or NOT_AVAILABLE,
+        "Fecha de publicación (UTC)": info["published"] or NOT_AVAILABLE,
+        "Identificador del release": info["build"] if artifact else NOT_AVAILABLE,
+        "Estado del despliegue": (
+            "Imagen publicada en ejecución; la confirmación del controlador no se consulta desde la aplicación"
+            if artifact else NOT_AVAILABLE
+        ),
+    }
+
+
 def render_build_footer():
     import streamlit as st
 
@@ -41,9 +71,19 @@ def render_build_footer():
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         st.error(f"No se puede identificar el artefacto: {type(error).__name__}")
         return
-    with st.expander(f"Cloud · {info['version']}"):
-        st.caption("Información de soporte · facilite estos identificadores al equipo responsable.")
-        st.write(f"Build: {info['build']}")
-        st.write(f"Commit: {info['commit'] or 'Sin información'}")
-        st.write(f"Publicación del artefacto: {info['published'] or 'Sin información (ejecución local)'}")
-        st.caption("No existe una fuente mantenida de cambios por versión en este repositorio.")
+    st.caption(footer_text(info))
+
+
+def render_version_info():
+    """Administrative section; reads only the metadata baked into the image, never GitHub."""
+    import streamlit as st
+
+    st.subheader("Información de versión")
+    try:
+        info = load_build_info()
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        st.error(f"No se puede identificar el artefacto: {type(error).__name__}")
+        return
+    for label, value in version_details(info).items():
+        st.write(f"**{label}:** {value}")
+    st.markdown(f"[Changelog]({CHANGELOG_URL})")

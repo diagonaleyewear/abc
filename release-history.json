@@ -1,0 +1,10 @@
+{
+  "policy": "docs/VERSIONING.md",
+  "releases": [
+    {
+      "version": "0.1.0",
+      "status": "prepared",
+      "note": "Versión inicial; sin etiqueta, sin publicación ni despliegue confirmados."
+    }
+  ]
+}

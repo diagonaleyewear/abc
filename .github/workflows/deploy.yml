@@ -38,8 +38,9 @@ jobs:
         id: provenance
         run: |
           COMMIT="$(git rev-parse HEAD)"
+          TAG_COMMIT="$(git ls-remote origin "refs/tags/v$(tr -d '[:space:]' < VERSION)^{}" "refs/tags/v$(tr -d '[:space:]' < VERSION)" | tail -n 1 | cut -f1)"
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "version=sha-${COMMIT:0:12}" >> "$GITHUB_OUTPUT"
+          echo "version=$(RELEASE_COMMIT="$COMMIT" RELEASE_TAG_COMMIT="$TAG_COMMIT" python3 scripts/release_version.py)" >> "$GITHUB_OUTPUT"
           echo "published=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Container Registry
@@ -167,12 +168,17 @@ jobs:
         env:
           PUBLISHED_COMMIT: ${{ steps.provenance.outputs.commit }}
           PUBLISHED_DIGEST: ${{ steps.image.outputs.digest }}
+          PUBLISHED_VERSION: ${{ steps.provenance.outputs.version }}
+          PUBLISHED_AT: ${{ steps.provenance.outputs.published }}
         run: |
           {
             echo '## GHCR publication only'
+            echo "Version: \`${PUBLISHED_VERSION}\`"
             echo "Commit: \`${PUBLISHED_COMMIT}\`"
             echo "Digest: \`${PUBLISHED_DIGEST}\`"
-            echo 'Production was NOT changed. Use Deploy Cloud Production and approve production.'
+            echo "Workflow: \`actions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`"
+            echo "Published (UTC): \`${PUBLISHED_AT}\`"
+            echo 'Deployment status: not deployed (production is changed only by Deploy Cloud Production).'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish image identity annotation
