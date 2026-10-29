@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from cloud_design import page_title
-from price_comparator import PriceComparatorStore
+from price_comparator import PriceComparatorStorageError, PriceComparatorStore
 
 
 OWN_PRICE_COLUMNS = [
@@ -51,7 +51,11 @@ def render_price_comparator_page() -> None:
         "Comparación trazable por EAN. Las ofertas sólo cuentan como confirmadas "
         "cuando son exactas, disponibles y del mismo mercado.",
     )
-    store = PriceComparatorStore()
+    try:
+        store = PriceComparatorStore()
+    except PriceComparatorStorageError as exc:
+        st.error(str(exc))
+        return
     _show_pending_reports()
     products = store.products()
     max_age = st.number_input("Antigüedad máxima de ofertas (días)", min_value=1, max_value=365,

@@ -141,3 +141,46 @@ o restricciones.
   precio de tienda de Vytria; ambas tareas requieren datos/validación del
   negocio. Las conversiones fuera de EUR requieren un tipo de cambio
   proporcionado y trazable por fila.
+
+
+## Incidencia P0: ruta SQLite en producción (hotfix)
+
+**Síntoma.** Tras el despliegue de #85 la página falla en
+`PriceComparatorStore.__init__` (`mkdir` de `/app/masterdata_data`, inexistente y
+no escribible: `/app` es root y la app corre como `1037:100`).
+
+**Causa raíz confirmada.** `PRICE_COMPARATOR_DB_PATH` sólo estaba en
+`docker-compose.yml` del repositorio. El controlador de producción no lo usa: lee
+la instantánea aprobada `/etc/cloud-production/compose.private.json` y sustituye
+únicamente la imagen de `abcd-app`. La variable nunca llegó al contenedor y el
+código caía en `masterdata_data` junto al módulo.
+
+**Corrección.** `resolve_database_path()` aplica, por orden:
+`PRICE_COMPARATOR_DB_PATH` → `/app/data/price_comparator.sqlite3` si `/app/data`
+existe → ruta de desarrollo local. No se crean directorios bajo `/app`. Si la
+ruta no es escribible se lanza `PriceComparatorStorageError` y la página muestra
+un error comprensible, sin traceback. No se cambian permisos ni otras bases.
+
+**Configuración productiva.** Con este código no se requiere editar
+`compose.private.json`. Opcionalmente, para dejarla explícita, el administrador
+puede añadir sólo `PRICE_COMPARATOR_DB_PATH=/app/data/price_comparator.sqlite3` al
+entorno de `abcd-app` en una revisión aprobada y ejecutar
+`verify_compose_transition.py`; no modificar otros servicios ni variables.
+
+**Backup (SQLite con WAL).** No copiar sólo el `.sqlite3` con la app activa. Usar
+la API de copia en línea, dentro del contenedor, hacia el volumen y luego
+verificar:
+
+```sh
+docker exec abcd-control python -c "import sqlite3; s=sqlite3.connect('file:/app/data/price_comparator.sqlite3?mode=ro',uri=True); d=sqlite3.connect('/app/data/price_comparator.backup.sqlite3'); s.backup(d); print(d.execute('PRAGMA integrity_check').fetchone()[0])"
+```
+
+Restaurar siempre primero en una ubicación temporal y comprobar
+`PRAGMA integrity_check` y el recuento de tablas antes de sustituir nada. Incluir
+`price_comparator.sqlite3` (y su copia consistente) en el procedimiento de
+backup del volumen `/app/data`; que esté en el volumen no equivale a estar
+respaldado.
+
+**Validación.** Local: 840 tests pasan, 15 omitidos (el de UID/GID 1037:100
+requiere root y Linux). Docker/producción: pendientes de CI, digest y despliegue
+aprobado; no se declaran resueltos hasta verificarlos.
