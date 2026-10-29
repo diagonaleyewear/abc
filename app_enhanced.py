@@ -617,7 +617,7 @@ def _render_login() -> None:
                 st.session_state["auth_session_id"] = claims.session_id
                 st.session_state["auth_session_expires_at"] = claims.expires_at
                 _get_cookie_controller().set(
-                    AUTH_COOKIE_NAME, token, max_age=remember_days * 86400
+                    AUTH_COOKIE_NAME, token, max_age=remember_days * 86400, secure=True
                 )
             else:
                 _remove_auth_cookie()
