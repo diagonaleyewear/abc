@@ -141,11 +141,18 @@ def _request_actions(connector, rows, engine_factory) -> None:
             try:
                 engine = _odoo_engine(engine_factory) if not store.odoo_items(selected) else None
                 workbook = connector.export_request_xlsx(selected, engine=engine, odoo_root=data_root())
-                st.download_button("Descargar Excel", workbook,
-                                   file_name=f"marcolin_solicitud_{selected}.xlsx",
+                st.download_button("Descargar Excel", workbook, file_name=f"marcolin_solicitud_{selected}.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    key=f"prov_marcolin_download_{selected}")
-            except (OdooUnavailable, ValueError, KeyError) as error:
+            except (AccessNotConfirmed, OdooUnavailable) as error:
+                st.warning(f"Odoo no disponible; el Excel conservará esas filas como pendientes: "
+                           f"{getattr(error, 'code', error)}")
+                workbook = connector.export_request_xlsx(selected)
+                st.download_button("Descargar Excel pendiente", workbook,
+                                   file_name=f"marcolin_solicitud_{selected}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=f"prov_marcolin_download_pending_{selected}")
+            except (ValueError, KeyError) as error:
                 st.error(f"No se pudo preparar el Excel: {getattr(error, 'code', error)}")
     for event in store.events(selected):
         st.text(f"{event['from_state'] or '-'} → {event['to_state']}  {event['detail'] or ''}")
