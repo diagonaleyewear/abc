@@ -815,6 +815,9 @@ def render_settings_page() -> None:
     render_sidebar_shell("Configuración")
     require_admin_access()
     cloud_page_title("Configuración")
+    from build_info import render_version_info
+    render_version_info()
+    st.divider()
     render_kering_settings(get_db_engine)
     st.divider()
     st.caption("Guarda credenciales de integración en el archivo .env local del proyecto.")

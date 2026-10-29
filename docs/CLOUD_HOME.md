@@ -75,12 +75,12 @@ archivos no reutilizables que bloquean la migración según
 
 ## Identidad del artefacto
 
-Se retira la versión fija `1.0.6`: no existe un mecanismo de publicación semántica
-mantenido que la acredite. En Docker el pie muestra `Cloud · sha-<12 caracteres>`,
-procedente del commit exacto del checkout usado para construir la imagen.
-El desplegable de soporte muestra commit completo, identificador de build de
-Actions (`actions-<run_id>-<attempt>`) y fecha UTC de creación/publicación del
-artefacto. No se afirma que esa fecha sea una publicación comercial.
+La política de versiones (SemVer, fichero `VERSION`, historial) está en
+[VERSIONING.md](VERSIONING.md). El pie muestra `Cloud vX.Y.Z · commit abc1234` y
+Configuración (admin) incluye «Información de versión»; lo que falta se muestra
+como «No disponible». CI deriva la versión de `VERSION` con
+`scripts/release_version.py` (`--check-release` falla antes de etiquetar si el número ya está etiquetado en otro commit).
+Detalle anterior, aún vigente salvo la versión: se retira la versión fija `1.0.6`.
 
 `scripts/write_build_info.py` genera `build-info.json` dentro de la imagen con
 los argumentos BUILD_COMMIT, BUILD_ID, BUILD_PUBLISHED y BUILD_VERSION opcional

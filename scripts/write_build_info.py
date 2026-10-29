@@ -11,6 +11,10 @@ def write_build_info(destination: Path) -> dict:
     published = os.environ["BUILD_PUBLISHED"]
     build = os.environ["BUILD_ID"]
     version = os.environ.get("BUILD_VERSION") or f"sha-{commit[:12]}"
+    if os.environ.get("BUILD_VERSION") and not re.fullmatch(
+        r"(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)", version
+    ):
+        raise ValueError("BUILD_VERSION must be MAJOR.MINOR.PATCH")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("BUILD_COMMIT must identify the exact source revision")
     if datetime.fromisoformat(published.replace("Z", "+00:00")).tzinfo is None:
