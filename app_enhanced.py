@@ -1996,13 +1996,46 @@ def render_kering_images_page() -> None:
     render_footer()
 
 
-KERING_IMAGES_PAGE = st.Page(render_kering_images_page, title="Imágenes Kering", url_path="imagenes-kering")
+KERING_IMAGES_PAGE = st.Page(
+    render_kering_images_page,
+    title="Imágenes Kering",
+    url_path="imagenes-kering",
+    visibility="hidden",
+)
+MASTERDATA_KERING_IMAGES_PAGE = st.Page(
+    render_kering_images_page,
+    title="Imágenes Kering",
+    url_path="imagenes-kering",
+)
 
 
 def render_provider_images_page() -> None:
     render_sidebar_shell("Proveedores de imágenes")
     from provider_images_ui import render_provider_page
-    render_provider_page(get_db_engine)
+    provider_labels = {
+        "Luxottica": "luxottica",
+        "Kering": "kering",
+        "Marcolin": "marcolin",
+        "NuORDER": "nuorder",
+        "Safilo": "safilo",
+    }
+    provider = st.radio(
+        "Proveedor",
+        tuple(provider_labels),
+        horizontal=True,
+        key="image_provider_selector",
+    )
+    if provider == "Luxottica":
+        require_admin_access()
+        cloud_page_title(
+            "Luxottica",
+            "Solicitudes pendientes, monitorización, revisión y clasificación.",
+        )
+        render_luxoptica_pending_panel()
+    elif provider == "Kering":
+        render_kering_page(get_db_engine)
+    else:
+        render_provider_page(get_db_engine, selected_provider=provider_labels[provider])
     render_footer()
 
 
@@ -2039,6 +2072,7 @@ LUXOPTICA_PENDING_PAGE = st.Page(
     title="Pendiente Luxoptica",
     icon="⏳",
     url_path="pendiente-luxoptica",
+    visibility="hidden",
 )
 ALERTA_PEDIDOS_PAGE = st.Page(
     partial(
@@ -2067,6 +2101,7 @@ navigation = build_navigation(
         "master_import": MASTER_IMPORT_PAGE,
         "master_dryrun": MASTER_DRYRUN_PAGE,
         "master_dictionary": MASTER_DICTIONARY_PAGE,
+        "masterdata_kering_images": MASTERDATA_KERING_IMAGES_PAGE,
         "luxoptica_images": LUXOPTICA_IMAGES_PAGE,
         "luxoptica_pending": LUXOPTICA_PENDING_PAGE,
         "kering_images": KERING_IMAGES_PAGE,

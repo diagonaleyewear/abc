@@ -23,7 +23,8 @@ from provider_images import (
 
 from kering_images import AccessNotConfirmed
 from provider_odoo_orders import (
-    ELIGIBLE, OdooUnavailable, create_requests, demand_preview, load_links, pick_pilot, propose_partners, save_link,
+    AssociationNotConfigured, ELIGIBLE, OdooUnavailable, create_requests, demand_preview, load_links, pick_pilot,
+    propose_partners, save_link,
 )
 
 TITLE = "Proveedores de imágenes"
@@ -31,7 +32,8 @@ MODULES = {"marcolin": marcolin_images, "nuorder": nuorder_images, "safilo": saf
 CONNECTORS = {"marcolin": marcolin_images.MarcolinConnector, "nuorder": nuorder_images.NuorderConnector,
               "safilo": safilo_images.SafiloConnector}
 STATE_LABELS = {
-    "ready": "Lista", "submitting": "Enviando", "submitted": "Enviada", "pending": "Pendiente en portal",
+    "ready": "Preparada (no enviada)", "submitting": "Enviando", "submitted": "Enviada",
+    "pending": "Pendiente en portal",
     "available": "Disponible", "downloaded": "Descargada", "imported": "Importada", "partial": "Parcial",
     "failed": "Fallida", "needs_review": "Requiere revisión", "cancelled": "Cancelada",
 }
@@ -96,10 +98,14 @@ def _guard() -> None:
         st.stop()
 
 
-def render_provider_page(engine_factory) -> None:
+def render_provider_page(engine_factory, selected_provider: str | None = None) -> None:
     _guard()
     st.title(TITLE)
-    provider = st.radio("Proveedor", PROVIDERS, horizontal=True, format_func=str.capitalize)
+    provider = selected_provider or st.radio(
+        "Proveedor", PROVIDERS, horizontal=True, format_func=str.capitalize)
+    if provider not in PROVIDERS:
+        st.error("Proveedor no válido.")
+        return
     try:
         connector = build_connector(provider, None)
     except (OSError, ValueError, RuntimeError) as error:
@@ -130,10 +136,19 @@ def export_caption(connector) -> str:
     return "Lista de EAN para pegar en el portal (separada por comas)."
 
 
+def _pending_sku_count(store: ProviderStore, request_id: int) -> int:
+    items = store.odoo_items(request_id)
+    if items:
+        return sum(not item["sku"] for item in items)
+    return len(store.get(request_id)["eans"])
+
+
 def _request_actions(connector, rows, engine_factory) -> None:
     store, service = connector.service.store, connector.service
     selected = st.selectbox("Solicitud", [r["Solicitud"] for r in rows], key="prov_request")
     request = store.get(selected)
+    if request["state"] == "ready":
+        st.info("Preparada localmente. Este estado no confirma que la solicitud se haya enviado al proveedor.")
     st.code(connector.export_ean_list(selected), language="text")
     st.caption(export_caption(connector))
     if connector.service.settings.provider == "marcolin":
@@ -144,9 +159,30 @@ def _request_actions(connector, rows, engine_factory) -> None:
                 st.download_button("Descargar Excel", workbook, file_name=f"marcolin_solicitud_{selected}.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    key=f"prov_marcolin_download_{selected}")
-            except (AccessNotConfirmed, OdooUnavailable) as error:
-                st.warning(f"Odoo no disponible; el Excel conservará esas filas como pendientes: "
-                           f"{getattr(error, 'code', error)}")
+            except AssociationNotConfigured:
+                pending = _pending_sku_count(store, selected)
+                st.warning(
+                    f"Marcolin no tiene configurada su asociación con Odoo; "
+                    f"{pending} EAN quedarán pendientes de SKU.")
+                workbook = connector.export_request_xlsx(selected)
+                st.download_button("Descargar Excel pendiente", workbook,
+                                   file_name=f"marcolin_solicitud_{selected}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=f"prov_marcolin_download_pending_{selected}")
+            except OdooUnavailable as error:
+                pending = _pending_sku_count(store, selected)
+                st.warning(
+                    f"Odoo no responde; {pending} EAN quedarán pendientes de SKU: "
+                    f"{getattr(error, 'code', error)}")
+                workbook = connector.export_request_xlsx(selected)
+                st.download_button("Descargar Excel pendiente", workbook,
+                                   file_name=f"marcolin_solicitud_{selected}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=f"prov_marcolin_download_pending_{selected}")
+            except AccessNotConfirmed as error:
+                st.warning(
+                    f"No se ha confirmado el acceso al proveedor Marcolin; "
+                    f"el Excel quedará pendiente: {getattr(error, 'code', error)}")
                 workbook = connector.export_request_xlsx(selected)
                 st.download_button("Descargar Excel pendiente", workbook,
                                    file_name=f"marcolin_solicitud_{selected}.xlsx",
