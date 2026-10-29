@@ -29,6 +29,7 @@ def _pages() -> dict[str, str]:
         "kering_images",
         "alerts",
         "reconciliation",
+        "price_comparator",
         "settings",
     )}
 
@@ -60,8 +61,10 @@ def test_admin_navigation_keeps_all_existing_page_groups() -> None:
         "Repositorio de imágenes",
         "Alertas",
         "Conciliación",
+        "Análisis comercial",
         "Configuración",
     }
+    assert streamlit.groups["Análisis comercial"] == ["price_comparator"]
 
 
 def test_streamlit_navigation_smoke_for_admin_and_masterdata() -> None:
@@ -76,7 +79,7 @@ page_names = (
     "home", "master_import", "master_dictionary", "master_dryrun",
     "abc_home", "abc_search", "abc_reports", "abc_history", "abc_detail",
     "luxoptica_images", "luxoptica_pending", "kering_images", "alerts",
-    "reconciliation", "settings",
+    "reconciliation", "price_comparator", "settings",
 )
 pages = {
     name: st.Page(render_page, title=name, url_path=name)

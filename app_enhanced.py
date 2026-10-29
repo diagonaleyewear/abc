@@ -74,6 +74,7 @@ from app_exports import (
 from app_navigation import build_navigation
 from app_pages.alerts import render_alerts_page
 from app_pages.luxoptica import render_images_page, render_pending_page
+from app_pages.price_comparator import render_price_comparator_page
 from abcd_snapshots import (
     ABCD_SNAPSHOT_TABLE,
     build_abcd_report_excel_df,
@@ -2090,6 +2091,12 @@ ALERTA_PEDIDOS_PAGE = st.Page(
 )
 SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
 ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", url_path="conciliacion-odoo")
+PRICE_COMPARATOR_PAGE = st.Page(
+    render_price_comparator_page,
+    title="Comparador de precios",
+    icon="💶",
+    url_path="comparador-precios",
+)
 
 navigation = build_navigation(
     st,
@@ -2111,6 +2118,7 @@ navigation = build_navigation(
         "provider_images": PROVIDER_IMAGES_PAGE,
         "alerts": ALERTA_PEDIDOS_PAGE,
         "reconciliation": ODOO_RECONCILIATION_PAGE,
+        "price_comparator": PRICE_COMPARATOR_PAGE,
         "settings": SETTINGS_PAGE,
     },
 )
