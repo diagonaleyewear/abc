@@ -117,7 +117,7 @@ def render_provider_page(engine_factory) -> None:
         rows = request_rows(store, provider)
         st.dataframe(rows, use_container_width=True, hide_index=True) if rows else st.info("Sin solicitudes.")
         if rows:
-            _request_actions(connector, rows)
+            _request_actions(connector, rows, engine_factory)
     with detect_tab:
         _detect(connector, engine_factory)
     with review_tab:
@@ -130,12 +130,23 @@ def export_caption(connector) -> str:
     return "Lista de EAN para pegar en el portal (separada por comas)."
 
 
-def _request_actions(connector, rows) -> None:
+def _request_actions(connector, rows, engine_factory) -> None:
     store, service = connector.service.store, connector.service
     selected = st.selectbox("Solicitud", [r["Solicitud"] for r in rows], key="prov_request")
     request = store.get(selected)
     st.code(connector.export_ean_list(selected), language="text")
     st.caption(export_caption(connector))
+    if connector.service.settings.provider == "marcolin":
+        if st.button("Exportar Excel para Marcolin", key=f"prov_marcolin_xlsx_{selected}"):
+            try:
+                engine = _odoo_engine(engine_factory) if not store.odoo_items(selected) else None
+                workbook = connector.export_request_xlsx(selected, engine=engine, odoo_root=data_root())
+                st.download_button("Descargar Excel", workbook,
+                                   file_name=f"marcolin_solicitud_{selected}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=f"prov_marcolin_download_{selected}")
+            except (OdooUnavailable, ValueError, KeyError) as error:
+                st.error(f"No se pudo preparar el Excel: {getattr(error, 'code', error)}")
     for event in store.events(selected):
         st.text(f"{event['from_state'] or '-'} → {event['to_state']}  {event['detail'] or ''}")
     upload = st.file_uploader("ZIP descargado del portal", type=["zip"], key=f"prov_zip_{selected}")

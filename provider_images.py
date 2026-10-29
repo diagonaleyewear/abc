@@ -290,6 +290,11 @@ CREATE TABLE IF NOT EXISTS request_eans(
   result TEXT NOT NULL DEFAULT '', live INTEGER NOT NULL DEFAULT 1,
   ean_key TEXT GENERATED ALWAYS AS (substr('00000000000000' || ean, -14)) VIRTUAL, PRIMARY KEY(request_id, ean));
 CREATE UNIQUE INDEX IF NOT EXISTS one_live_request_per_ean_key ON request_eans(provider, ean_key) WHERE live = 1;
+CREATE TABLE IF NOT EXISTS request_odoo_items(
+  request_id INTEGER NOT NULL REFERENCES requests(id), ean TEXT NOT NULL, sku TEXT NOT NULL DEFAULT '',
+  product TEXT NOT NULL DEFAULT '', supplier TEXT NOT NULL DEFAULT '', order_name TEXT NOT NULL DEFAULT '',
+  order_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(request_id, ean));
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, request_id INTEGER, at REAL NOT NULL, from_state TEXT, to_state TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS review_items(
@@ -429,6 +434,30 @@ class ProviderStore:
             result["eans"] = [dict(r) for r in connection.execute(
                 "SELECT ean,result,live FROM request_eans WHERE request_id=? ORDER BY ean", (request_id,))]
         return result
+
+    def save_odoo_items(self, request_id: int, items: list[dict]) -> None:
+        """Persist the read-only Odoo evidence attached to a request."""
+        with closing(self.connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM requests WHERE id=?", (request_id,)).fetchone() is None:
+                connection.execute("ROLLBACK")
+                raise KeyError(request_id)
+            connection.executemany(
+                "INSERT OR REPLACE INTO request_odoo_items"
+                "(request_id,ean,sku,product,supplier,order_name,order_date,status,reason)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                [(request_id, str(item["ean"]), str(item.get("sku") or ""), str(item.get("product") or ""),
+                  str(item.get("supplier") or ""), str(item.get("order") or ""),
+                  str(item.get("date") or ""), str(item.get("status") or "pending"),
+                  str(item.get("reason") or "")) for item in items],
+            )
+            connection.execute("COMMIT")
+
+    def odoo_items(self, request_id: int) -> list[dict]:
+        with closing(self.connect()) as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT ean,sku,product,supplier,order_name,order_date,status,reason "
+                "FROM request_odoo_items WHERE request_id=? ORDER BY ean", (request_id,))]
 
     def list_requests(self, provider: str | None = None, states: set[str] | None = None) -> list[dict]:
         query, args = "SELECT r.*, (SELECT COUNT(*) FROM request_eans e WHERE e.request_id=r.id) AS ean_count " \

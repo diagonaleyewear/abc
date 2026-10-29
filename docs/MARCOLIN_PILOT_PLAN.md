@@ -12,11 +12,11 @@ producción ni importaciones sin autorización expresa; sin nuevas solicitudes; 
 | A1 | Confirmación de los seis UPC en Odoo | `scripts/marcolin_odoo_pilot.py` por `docker exec -i … python - --partner <id> --upc-file … --out <volumen escribible> < scripts/marcolin_odoo_pilot.py` (solo lectura, informe a volumen permitido) | informe completo; exit 0; UPC literales |
 | A2 | Cobertura en catálogo | mismo script (`--catalog`, `--image-root`, `--verify-files` opcional) | «sin registros», «sin vistas válidas» o «cobertura desconocida»; catálogo inaccesible ≠ ausente |
 | A3 | Identidad UPC-12 / EAN-13 | dry-run de la migración y plan con ambos formatos | un solo registro vivo por identidad; sin solicitud duplicada |
-| A4 | Exportación Marcolin | `export_ean_list` | un código por línea, UPC originales conservados |
+| A4 | Exportación Marcolin | botón «Exportar Excel para Marcolin» en la solicitud | XLSX reabrible, UPC como texto y SKU Odoo confirmado o pendiente |
 | A5 | Relación UPC ↔ modelo/color | `record_portal_groups` con los grupos del portal (4 referencias, 6 UPC) | todos los UPC con su referencia; estados inactiva/activa conservados |
 | A6 | Pendiente sin reenvío | plan repetido con la solicitud en curso | no se crea otra; sin reenvío por días de espera |
 | A7 | Cloud sin Odoo y sin portal | abrir la página sin acciones | no contacta portales ni Odoo al renderizar |
-| A8 | Regresión Kering/Luxottica | suite completa (812 correctas / 15 omitidas en local) | sin cambios |
+| A8 | Regresión Kering/Luxottica | suite offline (801 correctas / 14 omitidas en esta rama) | sin cambios |
 
 ## 2. Pruebas bloqueadas por la entrega de Marcolin
 
@@ -44,6 +44,18 @@ no repetir la solicitud.** Cuando haya enlace/ZIP, con acceso humano autorizado:
 
 Los 300 son el máximo que indica la interfaz; solo se han probado seis. El conector tiene 50 como valor
 provisional. **Ningún código se considera validado hasta disponer de evidencia real.**
+
+## 2 bis. Exportación manual a Marcolin
+
+En cada solicitud de Marcolin, un administrador puede generar el fichero con «Exportar Excel para
+Marcolin». La operación usa la solicitud persistida y no cambia su estado. Para solicitudes creadas
+desde la selección Odoo, se conserva la evidencia de la consulta de solo lectura junto a la solicitud.
+Para solicitudes introducidas manualmente, el botón puede ejecutar una consulta Odoo explícita; no se
+consulta Odoo durante el renderizado de la página.
+
+El libro incluye el UPC/EAN literal, SKU completo, código real, referencia confirmada y datos de
+trazabilidad disponibles. Las correspondencias inexistentes o ambiguas quedan con estado pendiente/
+revisión y sin SKU inventado. La exportación repetida es idempotente y no contacta con Marcolin.
 
 - Precondición: B1–B14 superados con los seis UPC y autorización expresa.
 - Escalado: 6 → 25 → 50 → 100 → 300; un paso por solicitud, esperando entrega y verificación completa antes del siguiente.

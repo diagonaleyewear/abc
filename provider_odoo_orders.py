@@ -160,6 +160,60 @@ def read_order_lines(engine, partner_ids, start: date, end: date, *, max_lines: 
     return lines, truncated
 
 
+def read_confirmed_skus(engine, partner_ids, eans) -> list[dict]:
+    """Read exact SKU evidence for an explicit export operation, without writing to Odoo."""
+    requested = [str(e).strip() for e in dict.fromkeys(eans) if str(e).strip()]
+    if not requested:
+        return []
+    forms = {ean_key(e) for e in requested if e.isdigit()}
+    if not forms:
+        return [{"ean": e, "status": REVIEW, "reason": "EAN no numérico"} for e in requested]
+    query = text("""
+        SELECT pp.barcode, pp.default_code, pol.name AS line_name, partner.name AS supplier,
+               po.name AS order_name, po.date_order
+        FROM purchase_order po
+        JOIN res_partner partner ON partner.id = po.partner_id
+        JOIN purchase_order_line pol ON pol.order_id = po.id
+          AND COALESCE(pol.display_type, '') = '' AND pol.product_id IS NOT NULL
+        JOIN product_product pp ON pp.id = pol.product_id
+        WHERE po.partner_id IN (
+            SELECT contact.id FROM res_partner contact
+            JOIN res_partner selected ON selected.id IN :partners
+            WHERE COALESCE(contact.commercial_partner_id, contact.id)
+                = COALESCE(selected.commercial_partner_id, selected.id))
+          AND po.state IN :states AND pp.barcode IS NOT NULL
+    """).bindparams(bindparam("partners", expanding=True), bindparam("states", expanding=True))
+    try:
+        with engine.connect() as connection:
+            rows = _read_only(connection, query, {"partners": [int(p) for p in partner_ids],
+                                                   "states": list(CONFIRMED_STATES)})
+    except SQLAlchemyError as error:
+        raise OdooUnavailable(str(error.__class__.__name__)) from error
+    matches: dict[str, list[dict]] = {key: [] for key in forms}
+    for row in rows:
+        key = ean_key(str(row["barcode"]).strip())
+        if key in matches:
+            matches[key].append({
+                "ean": str(row["barcode"]).strip(), "sku": (row["default_code"] or "").strip(),
+                "product": row["line_name"] or "", "supplier": row["supplier"] or "",
+                "order": row["order_name"] or "", "date": str(row["date_order"])[:10],
+            })
+    result = []
+    for ean in requested:
+        candidates = matches.get(ean_key(ean), [])
+        skus = {candidate["sku"] for candidate in candidates if candidate["sku"]}
+        if len(skus) == 1 and len(candidates) >= 1:
+            item = next(candidate for candidate in candidates if candidate["sku"])
+            result.append({**item, "ean": ean, "status": "confirmed", "reason": ""})
+        elif not candidates:
+            result.append({"ean": ean, "status": "pending", "reason": "sin correspondencia confirmada en Odoo"})
+        elif not skus:
+            result.append({"ean": ean, "status": "pending", "reason": "Odoo no aporta SKU completo"})
+        else:
+            result.append({"ean": ean, "status": REVIEW, "reason": "referencias Odoo ambiguas"})
+    return result
+
+
 def _images_state(cov: dict) -> str:
     return IMAGE_LABELS.get(cov["label"], IMAGES_UNKNOWN)
 
@@ -246,6 +300,16 @@ def create_requests(connector, root: Path, rows, selected_eans, *, approved_by: 
     rejected = [e for e in dict.fromkeys(selected_eans) if e not in by_ean]
     result = connector.plan_eans(chosen, limit=len(chosen)) if chosen else {
         "created": [], "already_live": [], "invalid": [], "selected": 0}
+    evidence = [{**by_ean[e], "ean": e, "sku": by_ean[e].get("Referencia", ""),
+                 "status": "confirmed" if by_ean[e].get("Referencia") else "pending",
+                 "reason": "" if by_ean[e].get("Referencia") else "Odoo no aporta SKU completo"}
+                for e in chosen]
+    assigned = {}
+    for request_id in result["created"]:
+        request_eans = connector.service.store.get(request_id)["eans"]
+        assigned[request_id] = [item for item in evidence if ean_key(item["ean"]) in
+                                {ean_key(row["ean"]) for row in request_eans}]
+        connector.service.store.save_odoo_items(request_id, assigned[request_id])
     entry = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "provider": connector.service.settings.provider,
              "approved_by": str(approved_by).strip(), "source": "odoo_purchase_orders",
              "eans": [{"ean": e, "order": by_ean[e]["Pedido"], "reference": by_ean[e]["Referencia"]} for e in chosen]}
