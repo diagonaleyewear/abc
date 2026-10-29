@@ -19,18 +19,26 @@ def read_version(path: Path = ROOT / "VERSION") -> str:
     return version
 
 
-def resolve_version(commit: str, tag_commit: str = "", path: Path = ROOT / "VERSION") -> str:
-    """A version number may be tagged on one commit only; an existing tag elsewhere means it was reused."""
+def resolve_version(commit: str, path: Path = ROOT / "VERSION") -> str:
+    """Builds between releases legitimately repeat VERSION; the commit and digest tell them apart."""
     if not SHA.fullmatch(commit):
         raise ValueError("A full 40-character commit is required")
-    version = read_version(path)
+    return read_version(path)
+
+
+def check_release(commit: str, tag_commit: str = "", path: Path = ROOT / "VERSION") -> str:
+    """A number is releasable once: its tag may not exist yet (or must already be on this very commit)."""
+    version = resolve_version(commit, path)
     if tag_commit and tag_commit != commit:
-        raise ValueError(f"v{version} is already tagged on another commit; bump VERSION instead of reusing it")
+        raise ValueError(f"v{version} is already tagged on another commit; increase VERSION before releasing")
     return version
 
 
 if __name__ == "__main__":
     try:
-        print(resolve_version(os.environ["RELEASE_COMMIT"], os.environ.get("RELEASE_TAG_COMMIT", "")))
+        if "--check-release" in sys.argv[1:]:
+            print(check_release(os.environ["RELEASE_COMMIT"], os.environ.get("RELEASE_TAG_COMMIT", "")))
+        else:
+            print(resolve_version(os.environ["RELEASE_COMMIT"]))
     except (KeyError, ValueError, OSError) as error:
         sys.exit(f"release_version: {error}")

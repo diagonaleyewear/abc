@@ -79,7 +79,7 @@ La política de versiones (SemVer, fichero `VERSION`, historial) está en
 [VERSIONING.md](VERSIONING.md). El pie muestra `Cloud vX.Y.Z · commit abc1234` y
 Configuración (admin) incluye «Información de versión»; lo que falta se muestra
 como «No disponible». CI deriva la versión de `VERSION` con
-`scripts/release_version.py` (falla si el número ya está etiquetado en otro commit).
+`scripts/release_version.py` (`--check-release` falla antes de etiquetar si el número ya está etiquetado en otro commit).
 Detalle anterior, aún vigente salvo la versión: se retira la versión fija `1.0.6`.
 
 `scripts/write_build_info.py` genera `build-info.json` dentro de la imagen con

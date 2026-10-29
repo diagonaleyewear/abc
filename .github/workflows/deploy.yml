@@ -37,11 +37,18 @@ jobs:
       - name: Identify exact artifact source
         id: provenance
         run: |
+          set -euo pipefail
           COMMIT="$(git rev-parse HEAD)"
-          TAG_COMMIT="$(git ls-remote origin "refs/tags/v$(tr -d '[:space:]' < VERSION)^{}" "refs/tags/v$(tr -d '[:space:]' < VERSION)" | tail -n 1 | cut -f1)"
+          VERSION="$(RELEASE_COMMIT="$COMMIT" python3 scripts/release_version.py)"
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "version=$(RELEASE_COMMIT="$COMMIT" RELEASE_TAG_COMMIT="$TAG_COMMIT" python3 scripts/release_version.py)" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "published=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # Advisory only: a release number is unique, but ordinary builds may repeat VERSION between releases.
+          if TAGS="$(git ls-remote --tags origin "refs/tags/v${VERSION}" "refs/tags/v${VERSION}^{}")"; then
+            [ -z "$TAGS" ] || echo "::notice title=version-already-tagged::v${VERSION} exists; the next release must increase VERSION"
+          else
+            echo "::warning title=version-tag-check-unavailable::Could not list remote tags; build identity is unaffected"
+          fi
 
       - name: Log in to Container Registry
         if: github.event_name == 'push'
@@ -97,6 +104,7 @@ jobs:
             IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.image.outputs.digest }}"
             docker pull "$IMAGE"
           fi
+          test "$EXPECTED_VERSION" = "$(tr -d '[:space:]' < VERSION)"
           test "$(docker inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$EXPECTED_COMMIT"
           test "$(docker inspect "$IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$EXPECTED_VERSION"
           docker run --rm --network none -e EXPECTED_COMMIT -e EXPECTED_BUILD -e EXPECTED_PUBLISHED -e EXPECTED_VERSION "$IMAGE" python -c "
@@ -110,6 +118,8 @@ jobs:
           assert info['build'] == os.environ['EXPECTED_BUILD']
           assert info['published'] == os.environ['EXPECTED_PUBLISHED']
           assert info['version'] == os.environ['EXPECTED_VERSION']
+          from build_info import footer_text
+          assert footer_text(info) == 'Cloud v%s \u00b7 commit %s' % (os.environ['EXPECTED_VERSION'], os.environ['EXPECTED_COMMIT'][:7])
           assert cloud_dashboard.LOGO.is_file()
           print('Artifact identity and runtime imports verified; network disabled')
           "

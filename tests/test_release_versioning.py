@@ -2,11 +2,12 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import subprocess
 
 import pytest
 
 import build_info
-from scripts.release_version import read_version, resolve_version
+from scripts.release_version import check_release, read_version, resolve_version
 from scripts.write_build_info import write_build_info
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,13 +49,54 @@ def test_invalid_versions_are_rejected(tmp_path, bad):
         resolve_version(NEW, path=path)
 
 
-def test_version_numbers_cannot_be_reused_on_another_commit():
+def test_release_number_is_unique_but_ordinary_builds_are_not_blocked():
     assert resolve_version(NEW) == read_version()
-    assert resolve_version(NEW, tag_commit=NEW) == read_version()
-    with pytest.raises(ValueError, match="already tagged"):
-        resolve_version(NEW, tag_commit=OLD)
+    assert check_release(NEW) == read_version()
+    assert check_release(NEW, tag_commit=NEW) == read_version()
+    with pytest.raises(ValueError, match="increase VERSION"):
+        check_release(NEW, tag_commit=OLD)
     with pytest.raises(ValueError):
         resolve_version("abc123")
+
+
+def git(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+
+def test_tag_detection_works_from_a_shallow_checkout_without_fetching_tags(tmp_path):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    git(origin, "config", "user.email", "t@example.com")
+    git(origin, "config", "user.name", "t")
+    for number in (1, 2):
+        (origin / "f").write_text(str(number))
+        git(origin, "add", "f")
+        git(origin, "commit", "-q", "-m", str(number))
+        if number == 1:
+            git(origin, "tag", "-a", "-m", "release", "v0.1.0")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--depth", "1", origin.as_uri(), str(clone)], check=True)
+    assert "v0.1.0" not in git(clone, "tag")
+    listing = git(clone, "ls-remote", "--tags", "origin", "refs/tags/v0.1.0", "refs/tags/v0.1.0^{}")
+    peeled = [line.split()[0] for line in listing.splitlines() if line.endswith("^{}")]
+    assert peeled == [git(origin, "rev-parse", "v0.1.0^{commit}").strip()]
+    assert peeled[0] != git(clone, "rev-parse", "HEAD").strip()
+    assert git(clone, "ls-remote", "--tags", "origin", "refs/tags/v9.9.9") == ""
+    assert check_release(git(clone, "rev-parse", "HEAD").strip()) == read_version()
+    with pytest.raises(ValueError):
+        check_release(git(clone, "rev-parse", "HEAD").strip(), peeled[0])
+
+
+def test_version_is_identical_in_version_file_build_info_oci_label_and_footer():
+    workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    assert "BUILD_VERSION=${{ steps.provenance.outputs.version }}" in workflow
+    assert "org.opencontainers.image.version=${{ steps.provenance.outputs.version }}" in workflow
+    assert 'test "$EXPECTED_VERSION" = "$(tr -d \'[:space:]\' < VERSION)"' in workflow
+    assert "assert info['version'] == os.environ['EXPECTED_VERSION']" in workflow
+    assert "footer_text(info) ==" in workflow
+    assert "sha-${COMMIT" not in workflow
+    assert 'ARG BUILD_VERSION' in (ROOT / "Dockerfile").read_text()
 
 
 def test_image_metadata_ties_version_sha_and_date(tmp_path, monkeypatch):
