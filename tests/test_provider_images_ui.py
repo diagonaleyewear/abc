@@ -26,6 +26,11 @@ def test_navigation_exposes_provider_page_only_to_full_role():
     assert "provider_images" not in st.groups["Repositorio de imagenes"]
 
 
+def test_visual_provider_selector_uses_all_provider_names():
+    assert ui.IMAGE_PROVIDER_OPTIONS == ("Luxottica", "Kering", "Marcolin", "NuORDER", "Safilo")
+    assert tuple(ui.IMAGE_PROVIDER_KEYS) == ui.IMAGE_PROVIDER_OPTIONS
+
+
 def test_request_rows_show_state_progress_and_errors(tmp_path):
     store = ProviderStore(tmp_path)
     connector = ui.build_connector("marcolin", None, root=tmp_path,
