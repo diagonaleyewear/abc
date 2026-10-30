@@ -178,6 +178,8 @@ class WebPriceSearch:
                        s.enabled AS scheduled,
                        (SELECT COUNT(*) FROM competitor_product_urls u WHERE u.competitor_id=w.competitor_id
                           AND u.status IN ('verified','probable')) AS located,
+                       (SELECT COUNT(*) FROM competitor_product_urls u WHERE u.competitor_id=w.competitor_id
+                          AND u.status='pending_verification') AS candidates,
                        (SELECT COUNT(DISTINCT o.ean) FROM offers o WHERE o.competitor_id=w.competitor_id
                           AND o.match_status='exact_match' AND o.method LIKE 'web:%') AS confirmed
                 FROM competitor_web_config w JOIN competitors c ON c.id=w.competitor_id
@@ -308,14 +310,34 @@ class WebPriceSearch:
             row = rows.get(status)
             if row is None:
                 continue
-            if status == "verified":
-                key_ = "auto" if row["source"] == "auto" else "verified_user"
-            elif status == "pending_verification":
-                key_ = "blocked" if blocked else "pending"
-            else:
-                key_ = {"probable": "probable", "needs_relocation": "relocation", "rejected": "wrong"}[status]
+            key_ = page_state_key(row, blocked)
             return {"key": key_, "text": URL_STATE_TEXT[key_], "url": row["url"], "note": row["note"]}
         return {"key": "none", "text": URL_STATE_TEXT["none"], "url": "", "note": ""}
+
+    def registered_pages(self, eans: Iterable[str] | None = None, competitor_id: str | None = None) -> pd.DataFrame:
+        """Every registered page (candidate or verified) with its state and the last stored price. A page is not an
+        offer: the price shown is only what a previous check stored, and says nothing about comparability."""
+        configs = {r["competitor_id"]: r for r in self.configs().to_dict("records")}
+        wanted = set(eans) if eans is not None else None
+        with self.store._connect() as connection:
+            rows = [dict(r) for r in connection.execute(
+                """SELECT u.*,p.model,p.color FROM competitor_product_urls u LEFT JOIN products p ON p.ean=u.ean
+                WHERE u.status<>'replaced' AND (? IS NULL OR u.competitor_id=?) ORDER BY u.competitor_id,u.ean""",
+                (competitor_id, competitor_id))]
+        out = []
+        for row in rows:
+            if wanted is not None and row["ean"] not in wanted or row["competitor_id"] not in configs:
+                continue
+            config = configs[row["competitor_id"]]
+            key_ = page_state_key(row, config["access_status"] == "blocked")
+            out.append({"competitor_id": row["competitor_id"], "Competidor": config["name"], "EAN": row["ean"],
+                        "Modelo": row["model"] or "", "Color": row["color"] or "", "Estado": URL_STATE_TEXT[key_],
+                        "estado_clave": key_, "Ficha": row["url"], "Precio": row["last_price"],
+                        "Stock": {"available": "En stock", "unavailable": "Sin stock"}.get(
+                            row["last_availability"], ""),
+                        "Última consulta": row["last_ok_at"] or "", "Nota": row["note"],
+                        "Comprobación de precio": "Realizada" if row["last_price"] is not None else "Pendiente"})
+        return pd.DataFrame(out)
 
     def submit_url(self, ean: str, competitor_id: str, url: str, *, replace: bool = False,
                    fetcher: WebFetcher | None = None) -> Submission:
@@ -824,6 +846,10 @@ class WebPriceSearch:
             ORDER BY captured_at DESC,id DESC LIMIT 1""", (ean, config["competitor_id"])).fetchone()
         if last and last["match_status"] == "error":
             return "Error o bloqueo"
+        if connection.execute("""SELECT 1 FROM competitor_product_urls WHERE competitor_id=? AND ean=?
+                                 AND status IN ('verified','probable','pending_verification') LIMIT 1""",
+                              (config["competitor_id"], ean)).fetchone():
+            return "Ficha registrada: falta comprobar el precio"
         if config["access_status"] in {"blocked", "robots_restricted", "pending_authorization"}:
             return "Competidor no consultable"
         return "Sin datos"
@@ -868,6 +894,7 @@ CURRENT_URL_STATES = {"verified", "probable", "pending_verification"}
 URL_STATE_TEXT = {
     "auto": "Ficha localizada automáticamente",
     "pending": "URL aportada por el usuario, pendiente de verificar",
+    "candidate": "Ficha candidata conocida, pendiente de verificar",
     "verified_user": "URL verificada y guardada",
     "wrong": "Coincidencia incorrecta",
     "blocked": "Acceso bloqueado",
@@ -875,6 +902,15 @@ URL_STATE_TEXT = {
     "relocation": "La ficha ya no responde: facilite la nueva URL",
     "none": "Sin ficha registrada",
 }
+
+
+def page_state_key(row: dict, blocked: bool) -> str:
+    status = row["status"]
+    if status == "verified":
+        return "auto" if row["source"] == "auto" else "verified_user"
+    if status == "pending_verification":
+        return "blocked" if blocked else ("candidate" if row["source"] == "known_urls" else "pending")
+    return {"probable": "probable", "needs_relocation": "relocation", "rejected": "wrong"}.get(status, "none")
 
 
 @dataclass

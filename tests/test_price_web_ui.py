@@ -2,7 +2,7 @@
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from price_web import WebPriceSearch
+from price_web import OPERABILITY_TEXT, WebPriceSearch
 from app_pages.price_comparator import WEB_STATUS_TEXT
 from tests.test_price_review_fixes import _freeze
 from tests.web_fixtures import PRADA, FakeSite, competitor_id, index_url, make_search, prada_page, url_of
@@ -120,10 +120,10 @@ def test_web_mode_stops_after_a_block_and_reports_it(ui):
 
 def test_competitors_tab_lists_fourteen_web_configs_none_operational(ui):
     app = _run()
-    labels = [e.label for e in app.expander if e.label.endswith(WEB_STATUS_TEXT["implemented"])]
+    labels = [e.label for e in app.expander if OPERABILITY_TEXT["pending_review"] in e.label]
     assert len(labels) == 14
-    assert not [e for e in app.expander if e.label.endswith(WEB_STATUS_TEXT["operational"])
-                and e.label.split(" · ")[0] in {label.split(" · ")[0] for label in labels}]
+    assert not [e for e in app.expander if OPERABILITY_TEXT["authorized"] in e.label]
+    assert all(WEB_STATUS_TEXT["operational"] not in label for label in labels)
 
 
 def test_web_config_is_persisted_and_validated(ui):
