@@ -539,7 +539,7 @@ def test_dashboard_uses_only_confirmed_synced_price(tmp_path) -> None:
     store.import_offers(pd.DataFrame([{
         "EAN": "8056262398043", "Competidor": "Tienda", "Precio": "200", "Moneda": "EUR", "Mercado": "ES",
         "URL": "https://tienda.example/p", "Disponibilidad": "available", "Estado coincidencia": "exact_match",
-        "Evidencia": "EAN", "Método": "manual"}]))
+        "Evidencia": "EAN", "Método": "manual", "IVA incluido": "sí"}]))
 
     _sync(store, odoo).run()
     summary, _ = store.dashboard()

@@ -74,6 +74,14 @@ class CompetitorScheduler:
         self.connectors = connectors if connectors is not None else CONNECTORS
         self._now = clock
         self._sleep = sleep
+        self.stop_requested = False  # set by SIGINT/SIGTERM: finish the current request, keep the queue
+
+    def _pause(self, seconds: float) -> None:
+        remaining = seconds
+        while remaining > 0 and not self.stop_requested:
+            step = min(1.0, remaining)
+            self._sleep(step)
+            remaining -= step
 
     def _lock(self, competitor_id: str) -> FileLock:
         return FileLock(f"{self.store.database_path}.competitor-{competitor_id}.lock", timeout=0)
@@ -265,6 +273,9 @@ class CompetitorScheduler:
     def _drain(self, config: dict, connector: Connector, summary: RunSummary) -> None:
         competitor_id = config["competitor_id"]
         for request in range(config["max_requests_per_run"]):
+            if self.stop_requested:
+                summary.message = "Detenida por señal; la cola continúa en la próxima pasada"
+                return
             now = self._now()
             with self.store._connect() as connection, connection:
                 jobs = connection.execute("""
@@ -291,7 +302,7 @@ class CompetitorScheduler:
                 return
             self._apply(config, connector, jobs, observations, summary)
             if request + 1 < config["max_requests_per_run"]:
-                self._sleep(config["pause_seconds"])
+                self._pause(config["pause_seconds"])
 
     def _apply(self, config: dict, connector: Connector, jobs, observations: dict[str, Observation],
                summary: RunSummary) -> None:
@@ -481,12 +492,27 @@ class CompetitorScheduler:
         return False
 
 
+def _dash(value: object) -> str:
+    return value if isinstance(value, str) and value else "—"
+
+
 def _print_status(scheduler: CompetitorScheduler) -> None:
+    last = scheduler.recent_runs(200).drop_duplicates("competitor_id").set_index("competitor_id").to_dict("index")
     for row in scheduler.overview().to_dict("records"):
         extra = f" ({row['suspended_reason']})" if row["suspended_at"] else ""
+        run = last.get(row["competitor_id"])
+        last_run = f" · último intento {run['status']} {run['started_at']}" if run else ""
         print(f"{row['competitor_id']}: {row['state_label']}{extra} · cola {row['queued']} · "
-              f"cada {row['interval_hours']:g} h · próxima {row['next_run_at'] or '—'} · "
-              f"última correcta {row['last_ok_at'] or '—'}")
+              f"cada {row['interval_hours']:g} h · próxima {_dash(row['next_run_at'])} · "
+              f"última correcta {_dash(row['last_ok_at'])}{last_run}")
+    print("En ejecución ahora: " + ("sí" if scheduler.is_running() else "no"))
+
+
+def _print_runs(scheduler: CompetitorScheduler, limit: int) -> None:
+    for run in scheduler.recent_runs(limit).to_dict("records"):
+        print(f"{run['started_at']} {run['competitor_id']} [{run['trigger']}] {run['status']} · "
+              f"peticiones {run['requests']} · cambios {run['changed']} · sin cambio {run['unchanged']} · "
+              f"errores {run['errors']}{' · ' + run['message'] if run['message'] else ''}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -501,6 +527,16 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--pause", metavar="ID")
     action.add_argument("--resume", metavar="ID", help="Reanuda y levanta una suspensión")
     action.add_argument("--plan", metavar="ID", help="Reparto previsto de la cola")
+    action.add_argument("--configure", metavar="ID", help="Cambia conector, fuente, frecuencia y límites")
+    action.add_argument("--runs", nargs="?", const=20, type=int, metavar="N", help="Últimas N ejecuciones")
+    config = parser.add_argument_group("opciones de --configure (las no indicadas conservan su valor)")
+    config.add_argument("--connector")
+    config.add_argument("--source")
+    config.add_argument("--authorization-note")
+    config.add_argument("--interval-hours", type=float)
+    config.add_argument("--max-requests", type=int)
+    config.add_argument("--pause-seconds", type=float)
+    config.add_argument("--max-attempts", type=int)
     parser.add_argument("--competitor", action="append", help="Limita --once/--loop a estos competidores")
     parser.add_argument("--force", action="store_true", help="Inicia un ciclo aunque no toque todavía")
     parser.add_argument("--workers", type=int, default=1, help="Competidores en paralelo (uno por competidor)")
@@ -508,7 +544,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--with-odoo", action="store_true",
                         help="Incluye la sincronización de Odoo si está activada y toca por su frecuencia")
     args = parser.parse_args(argv)
-    scheduler = CompetitorScheduler(PriceComparatorStore())
+    store = PriceComparatorStore()
+    store.seed_defaults()
+    scheduler = CompetitorScheduler(store)
     try:
         for name in ("verify", "enable", "disable", "pause", "resume"):
             target = getattr(args, name)
@@ -516,6 +554,24 @@ def main(argv: list[str] | None = None) -> int:
                 getattr(scheduler, name)(target)
                 print(f"{name}: {target} correcto")
                 return 0
+        if args.configure:
+            current = scheduler.config(args.configure)
+            scheduler.configure(
+                args.configure,
+                connector=current["connector"] if args.connector is None else args.connector,
+                source=current["source"] if args.source is None else args.source,
+                authorization_note=(current["authorization_note"] if args.authorization_note is None
+                                    else args.authorization_note),
+                interval_hours=current["interval_hours"] if args.interval_hours is None else args.interval_hours,
+                max_requests_per_run=(current["max_requests_per_run"] if args.max_requests is None
+                                      else args.max_requests),
+                pause_seconds=current["pause_seconds"] if args.pause_seconds is None else args.pause_seconds,
+                max_attempts=current["max_attempts"] if args.max_attempts is None else args.max_attempts)
+            print(f"configure: {args.configure} correcto (si cambió el conector o la fuente, vuelva a --verify)")
+            return 0
+        if args.runs is not None:
+            _print_runs(scheduler, args.runs)
+            return 0
         if args.plan:
             print(scheduler.plan(args.plan))
             return 0
@@ -527,8 +583,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     stop = {"now": False}
-    signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
-    signal.signal(signal.SIGTERM, lambda *_: stop.update(now=True))
+    def request_stop(*_: object) -> None:
+        stop["now"] = True
+        scheduler.stop_requested = True
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
     failed = False
     while True:
         if args.with_odoo:
@@ -551,3 +611,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

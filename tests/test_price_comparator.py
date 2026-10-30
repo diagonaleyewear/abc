@@ -30,10 +30,11 @@ COMPETITORS = pd.DataFrame([
 
 
 def _offer(competitor, *, price, currency="EUR", fx="", promo="", available="available",
-           match="exact_match", market="ES", domain=None):
+           match="exact_match", market="ES", domain=None, tax="sí"):
     domain = domain or f"{competitor.lower()}.example"
     return {
         "EAN": "036000291452",
+        "IVA incluido": tax,
         "Competidor": competitor,
         "Precio": str(price),
         "Precio promocional": str(promo),
@@ -50,10 +51,14 @@ def _offer(competitor, *, price, currency="EUR", fx="", promo="", available="ava
     }
 
 
-def _store(tmp_path):
+def _store(tmp_path, *, configured=False):
     store = PriceComparatorStore(tmp_path / "prices.sqlite3")
     assert store.import_products(PRODUCTS).imported == 1
     store.import_competitors(COMPETITORS)
+    if not configured:
+        # Competitors without market/currency accept offers of any market, as before the ES/EUR defaults.
+        with closing(sqlite3.connect(store.database_path)) as connection, connection:
+            connection.execute("UPDATE competitors SET market='',currency=''")
     return store
 
 
@@ -106,9 +111,9 @@ def test_comparison_uses_exact_available_fresh_same_market_offers_and_eur_fx(tmp
     assert store.import_own_prices(own).imported == 1
     assert store.import_own_prices(own).imported == 0
     offers = pd.DataFrame([
+        _offer("Tienda EUR", price=70, available="unavailable", domain="eur.example"),
         _offer("Tienda EUR", price=100, promo=80, domain="eur.example"),
         _offer("Tienda USD", price=90, currency="USD", fx=0.9, domain="usd.example"),
-        _offer("Tienda EUR", price=70, available="unavailable", domain="eur.example"),
         _offer("Tienda USD", price=60, match="probable_match", currency="USD",
                fx=0.9, domain="usd.example"),
         _offer("Tienda EUR", price=10, market="FR", domain="eur.example"),
@@ -125,7 +130,8 @@ def test_comparison_uses_exact_available_fresh_same_market_offers_and_eur_fx(tmp
     assert row["competitor_mean_eur"] == pytest.approx(80.5)
     assert row["competitor_max_eur"] == pytest.approx(81)
     assert row["difference_eur"] == pytest.approx(20)
-    assert row["difference_pct"] == pytest.approx(25)
+    assert row["difference_pct"] == pytest.approx(20)
+    assert row["difference_vs_competitor_pct"] == pytest.approx(25)
     assert row["position"] == 3
     assert counts["pending_review"] == 1
 
@@ -199,7 +205,8 @@ def test_own_price_and_competitor_fx_are_normalized_to_eur(tmp_path) -> None:
 
     assert summary.iloc[0]["own_price_eur"] == pytest.approx(90)
     assert summary.iloc[0]["competitor_min_eur"] == pytest.approx(80)
-    assert summary.iloc[0]["difference_pct"] == pytest.approx(12.5)
+    assert summary.iloc[0]["difference_pct"] == pytest.approx(100 * 10 / 90)
+    assert summary.iloc[0]["difference_vs_competitor_pct"] == pytest.approx(12.5)
     assert len(store.own_price_history("036000291452")) == 1
 
 
@@ -212,7 +219,7 @@ def test_comparator_page_renders_without_external_services(tmp_path, monkeypatch
     ).run()
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Comparación", "Datos y fuentes", "Configuración"]
+    assert [tab.label for tab in app.tabs] == ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"]
 
 
 def test_comparator_import_report_survives_page_rerun(tmp_path, monkeypatch) -> None:

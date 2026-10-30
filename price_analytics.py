@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from price_comparator import PriceComparatorStore
+from price_comparator import PriceComparatorStore, comparable_offers
 
 WINDOWS = {"7 días": 7, "30 días": 30, "90 días": 90, "12 meses": 365}
 POSITION_BEST = "Vytria con el mejor precio"
@@ -74,7 +74,7 @@ def filter_table(table: pd.DataFrame, offers: pd.DataFrame, *, brands=(), compet
     return result
 
 
-def kpis(summary: pd.DataFrame, recent_change_count: int) -> dict[str, float | int]:
+def kpis(summary: pd.DataFrame, recent_change_count: int) -> dict[str, float | int | None]:
     own = int(summary["own_price_eur"].notna().sum()) if not summary.empty else 0
     comparable = int((summary["competitor_count"] > 0).sum()) if not summary.empty else 0
     compared = summary[summary["difference_eur"].notna()] if not summary.empty else summary
@@ -82,10 +82,71 @@ def kpis(summary: pd.DataFrame, recent_change_count: int) -> dict[str, float | i
     return {
         "vytria_confirmed": own,
         "comparable": comparable,
-        "best_price_pct": (best / len(compared) * 100) if len(compared) else 0.0,
+        # None (not 0) when nothing is comparable: "0 %" would claim Vytria never has the best price.
+        "best_price_pct": (best / len(compared) * 100) if len(compared) else None,
         "compared": len(compared),
+        "vytria_more_expensive": int((compared["difference_eur"] > 0).sum()) if len(compared) else 0,
+        "vytria_cheaper": int((compared["difference_eur"] < 0).sum()) if len(compared) else 0,
         "recent_changes": recent_change_count,
     }
+
+
+POSITIONING_COLUMNS = ["competitor", "references", "vytria_mean_eur", "competitor_mean_eur", "difference_pct",
+                       "cheaper_pct", "last_update", "signal"]
+SIGNAL_BELOW = "Claramente por debajo de Vytria"
+SIGNAL_ABOVE = "Claramente por encima de Vytria"
+SIGNAL_INLINE = "En línea"
+
+
+def comparable_pairs(summary: pd.DataFrame, offers: pd.DataFrame) -> pd.DataFrame:
+    """One row per (EAN, competitor) that can be compared with the validated Vytria price.
+
+    Only exact, available, same-market, tax-included offers with an EUR rate take part; each competitor
+    contributes its latest valid offer per EAN. ``difference_pct`` = (competitor - Vytria) / Vytria * 100,
+    so a negative value means the competitor is cheaper.
+    """
+    columns = ["ean", "competitor", "own_eur", "competitor_eur", "difference_pct", "checked_at"]
+    if summary.empty or offers.empty:
+        return pd.DataFrame(columns=columns)
+    own = summary[summary["own_price_eur"].notna() & (summary["own_price_eur"] > 0)][["ean", "market", "own_price_eur"]]
+    valid = comparable_offers(offers)
+    joined = valid.merge(own, on=["ean", "market"], how="inner")
+    if joined.empty:
+        return pd.DataFrame(columns=columns)
+    price = joined["promotional_price"].where(joined["promotional_price"].notna(), joined["price"])
+    joined = joined.assign(competitor_eur=price * joined["fx_to_eur"])
+    latest = joined.sort_values(["captured_at", "id"]).groupby(["ean", "competitor_id"]).tail(1)
+    result = pd.DataFrame({
+        "ean": latest["ean"], "competitor": latest["competitor_name"], "own_eur": latest["own_price_eur"],
+        "competitor_eur": latest["competitor_eur"], "checked_at": latest["checked_at"],
+    })
+    result["difference_pct"] = (result["competitor_eur"] - result["own_eur"]) / result["own_eur"] * 100
+    return result[columns].reset_index(drop=True)
+
+
+def competitor_positioning(summary: pd.DataFrame, offers: pd.DataFrame, threshold_pct: float = 5.0) -> pd.DataFrame:
+    """Average price gap of each competitor against Vytria over the same references, sorted ascending."""
+    pairs = comparable_pairs(summary, offers)
+    if pairs.empty:
+        return pd.DataFrame(columns=POSITIONING_COLUMNS)
+    rows = []
+    for name, group in pairs.groupby("competitor"):
+        gap = float(group["difference_pct"].mean())
+        rows.append({
+            "competitor": name, "references": int(group["ean"].nunique()),
+            "vytria_mean_eur": float(group["own_eur"].mean()),
+            "competitor_mean_eur": float(group["competitor_eur"].mean()),
+            "difference_pct": gap,
+            "cheaper_pct": float((group["difference_pct"] < 0).mean() * 100),
+            "last_update": group["checked_at"].max(),
+            "signal": SIGNAL_BELOW if gap <= -threshold_pct else SIGNAL_ABOVE if gap >= threshold_pct
+            else SIGNAL_INLINE,
+        })
+    return pd.DataFrame(rows, columns=POSITIONING_COLUMNS).sort_values("difference_pct", ignore_index=True)
+
+
+def mean_gap_pct(pairs: pd.DataFrame) -> float | None:
+    return float(pairs["difference_pct"].mean()) if not pairs.empty else None
 
 
 def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.DataFrame:
@@ -94,7 +155,7 @@ def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.Data
                o.fx_to_eur,o.availability,o.match_status,o.captured_at,k.last_ok_at,k.last_offer_id
         FROM offers o JOIN competitors c ON c.id=o.competitor_id
         LEFT JOIN offer_checks k ON k.last_offer_id=o.id
-        WHERE o.match_status='exact_match'"""
+        WHERE o.match_status='exact_match' AND o.price_includes_tax=1"""
     params: tuple = ()
     if ean:
         query += " AND o.ean=?"
@@ -175,7 +236,6 @@ def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime
     end = now or _utc()
     vytria = _vytria_frame(store)
     offers = _offer_frame(store)
-    offers = offers[offers["availability"] == "available"]
     if vytria.empty or offers.empty:
         return pd.DataFrame(columns=["day", "best_price_pct", "compared"])
     rows = []
@@ -185,6 +245,8 @@ def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime
         own = vytria[vytria["recorded_at"] <= cutoff].groupby("ean")["price"].last()
         latest = offers[offers["captured_at"] <= cutoff].sort_values(["captured_at", "id"]) \
             .groupby(["ean", "competitor_id", "market"]).tail(1)
+        # Availability is checked on the latest observation: an out-of-stock update must not revive an older price.
+        latest = latest[latest["availability"] == "available"]
         minimum = latest.groupby("ean")["eur"].min()
         joined = pd.concat([own.rename("own"), minimum.rename("min")], axis=1, join="inner")
         if len(joined):
@@ -199,28 +261,70 @@ def top_differences(summary: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     return table.reindex(table["difference_eur"].abs().sort_values(ascending=False).index).head(n)
 
 
+BRAND_GREEN = "#417B7B"
+# Okabe-Ito colour-blind-safe palette; Vytria keeps the corporate green.
+SERIES_COLOURS = ("#E69F00", "#0072B2", "#D55E00", "#CC79A7", "#56B4E9", "#7A5C00", "#000000", "#F0E442",
+                  "#8C564B", "#6A3D9A", "#B15928", "#1F78B4", "#E31A1C")
+
+
+def _colour(name: str, order: list[str]) -> str:
+    if name == "Vytria":
+        return BRAND_GREEN
+    others = [item for item in order if item != "Vytria"]
+    return SERIES_COLOURS[others.index(name) % len(SERIES_COLOURS)]
+
+
 def price_figure(series: pd.DataFrame, title: str = ""):
     import plotly.graph_objects as go
 
     figure = go.Figure()
+    names = sorted(series["series"].unique())
     for name, group in series.groupby("series"):
         group = group.sort_values("at")
         changes = group[group["kind"] == "change"]
+        colour = _colour(name, names)
         # Step line: a price holds until the next recorded change. Gaps are not interpolated.
         figure.add_trace(go.Scatter(x=group["at"], y=group["eur"], name=name, mode="lines",
-                                    line_shape="hv", connectgaps=False,
-                                    line={"width": 3 if name == "Vytria" else 2}))
+                                    line_shape="hv", connectgaps=False, legendgroup=name,
+                                    line={"width": 4 if name == "Vytria" else 2, "color": colour},
+                                    hoverinfo="skip"))
+        # Markers also make a series with a single observation visible.
         figure.add_trace(go.Scatter(x=changes["at"], y=changes["eur"], name=f"{name} · cambio", mode="markers",
-                                    marker={"size": 9, "symbol": "circle"}, showlegend=False,
-                                    hovertemplate="%{x}<br>%{y:.2f} €<extra>" + name + " (cambio)</extra>"))
+                                    marker={"size": 10, "symbol": "circle", "color": colour}, showlegend=False,
+                                    legendgroup=name,
+                                    hovertemplate="%{x|%d/%m/%Y %H:%M}<br>%{y:.2f} €<extra>" + name + "</extra>"))
         checks = group[group["kind"] == "check"]
         if not checks.empty:
             figure.add_trace(go.Scatter(x=checks["at"], y=checks["eur"], name=f"{name} · comprobación",
-                                        mode="markers", marker={"size": 8, "symbol": "x"}, showlegend=False,
-                                        hovertemplate="%{x}<br>%{y:.2f} €<extra>" + name + " (comprobado)</extra>"))
-    figure.update_layout(title=title, yaxis_title="Precio con IVA (EUR)", xaxis_title="Fecha (UTC)",
-                         hovermode="x unified", margin={"l": 10, "r": 10, "t": 40, "b": 10},
-                         legend={"orientation": "h"})
+                                        mode="markers", marker={"size": 8, "symbol": "x", "color": colour},
+                                        showlegend=False, legendgroup=name,
+                                        hovertemplate="%{x|%d/%m/%Y %H:%M}<br>%{y:.2f} €<extra>" + name
+                                        + " (comprobado)</extra>"))
+    figure.update_layout(title=title, yaxis_title="Precio con IVA (€)", xaxis_title="Fecha (UTC)",
+                         hovermode="closest", margin={"l": 10, "r": 10, "t": 40, "b": 10},
+                         legend={"orientation": "h"}, height=460)
+    figure.update_xaxes(tickformat="%d/%m/%Y", hoverformat="%d/%m/%Y %H:%M")
+    figure.update_yaxes(ticksuffix=" €", rangemode="normal")
+    return figure
+
+
+def positioning_figure(positioning: pd.DataFrame):
+    """Horizontal bars of the mean gap vs Vytria; negative = competitor cheaper."""
+    import plotly.graph_objects as go
+
+    data = positioning.sort_values("difference_pct", ascending=False)
+    colours = ["#C2410C" if value < 0 else BRAND_GREEN for value in data["difference_pct"]]
+    figure = go.Figure(go.Bar(
+        x=data["difference_pct"], y=data["competitor"], orientation="h", marker={"color": colours},
+        text=[f"{value:+.1f} %".replace(".", ",") for value in data["difference_pct"]], textposition="auto",
+        customdata=data[["references", "vytria_mean_eur", "competitor_mean_eur"]],
+        hovertemplate="%{y}: %{x:+.1f} %<br>Referencias comparadas: %{customdata[0]}<br>"
+                      "Media Vytria: %{customdata[1]:.2f} €<br>Media competidor: %{customdata[2]:.2f} €"
+                      "<extra></extra>"))
+    figure.update_layout(xaxis_title="Diferencia media del competidor frente a Vytria (%)", yaxis_title="",
+                         margin={"l": 10, "r": 10, "t": 20, "b": 10},
+                         height=max(240, 60 + 48 * len(data)))
+    figure.update_xaxes(ticksuffix=" %", zeroline=True, zerolinewidth=2)
     return figure
 
 

@@ -9,8 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from cloud_design import page_title
+from competitor_requirements import requirement_for
 import price_analytics as analytics
-from price_comparator import RETENTION_MONTHS_OPTIONS, PriceComparatorStorageError, PriceComparatorStore
+from price_comparator import (
+    RETENTION_MONTHS_OPTIONS, PriceComparatorStorageError, PriceComparatorStore, exclusion_reason,
+)
 from price_connectors import CONNECTORS, ConnectorError
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
@@ -26,10 +29,22 @@ OFFER_COLUMNS = [
     "Disponibilidad", "Estado coincidencia", "Evidencia", "Método", "Fecha consulta",
 ]
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+STATUS_TEXT = {
+    "not_checked": "Sin comprobar", "no_authorized_connector": "Sin conector autorizado",
+    "pending_authorization": "Pendiente de autorización", "blocked": "Bloqueado por el sitio",
+    "manual_verified": "Solo importación manual verificada", "operational": "Operativo",
+}
+# Selected tags follow the corporate green (#417B7B, 4.8:1 against white) whatever the active Streamlit theme.
+PAGE_STYLE = """<style>
+.stApp span[data-baseweb="tag"] { background-color: #417B7B; color: #FFFFFF; }
+.stApp span[data-baseweb="tag"] svg { fill: #FFFFFF; }
+[data-testid="stMetricValue"] { font-size: 1.5rem; line-height: 1.2; }
+[data-testid="stMetricLabel"] p, [data-testid="stMetricValue"] div { white-space: normal; overflow-wrap: anywhere; line-height: 1.25; }
+</style>"""
 TABLE_LABELS = {
     "brand": "Marca", "model": "Modelo", "ean": "EAN", "own_price_eur": "Precio Vytria",
     "best_competitor": "Mejor competidor", "competitor_min_eur": "Precio competidor",
-    "difference_eur": "Diferencia €", "difference_pct": "Diferencia %",
+    "difference_eur": "Diferencia €", "difference_pct": "% vs Vytria",
     "last_checked_at": "Última comprobación", "position": "Posición", "own_price_status": "Estado precio Vytria",
 }
 
@@ -197,17 +212,20 @@ def _render_actions(store: PriceComparatorStore) -> None:
 
 
 def _render_detail(store: PriceComparatorStore, summary: pd.DataFrame, expiry: int) -> None:
-    st.subheader("Detalle de referencia")
+    st.subheader("Histórico de precios por referencia")
     selected = st.selectbox("Referencia", options=summary["ean"].tolist(), key="price_detail_ean",
                             format_func=lambda ean: f"{ean} · {summary.loc[summary.ean == ean, 'commercial_name'].iloc[0]}")
     window = st.radio("Periodo", list(analytics.WINDOWS), horizontal=True, key="price_detail_window")
     available = store.competitors()
     names = sorted(available["name"].tolist())
-    chosen = st.multiselect("Competidores en el gráfico", names, default=names, key="price_detail_competitors")
-    series = analytics.price_series(store, selected, analytics.WINDOWS[window], chosen)
+    chosen = st.multiselect("Competidores en el gráfico", names, default=[], key="price_detail_competitors",
+                            help="Vacío = todos los competidores con precios almacenados. Vytria siempre se muestra.")
+    series = analytics.price_series(store, selected, analytics.WINDOWS[window], chosen or None)
     if series.empty:
         st.info("No hay precios almacenados de esta referencia en el periodo. Los periodos sin dato no se dibujan.")
     else:
+        if series.groupby("series").size().max() < 2:
+            st.info("Solo hay una observación por serie: se muestra como punto, sin línea ni tendencia.")
         st.plotly_chart(analytics.price_figure(series), width="stretch")
         st.caption("Línea escalonada: cada precio se mantiene hasta el siguiente cambio registrado. "
                    "● cambio detectado · ✕ comprobación correcta sin cambio. Zonas sin línea: sin información.")
@@ -218,8 +236,10 @@ def _render_detail(store: PriceComparatorStore, summary: pd.DataFrame, expiry: i
     if not offers.empty:
         latest = offers.sort_values(["captured_at", "id"]).groupby(["competitor_id", "market"]).tail(1).copy()
         latest["Estado del precio"] = latest["captured_at"].map(lambda value: analytics.price_state(value, expiry))
+        latest["Uso en comparación"] = latest.apply(
+            lambda item: exclusion_reason(item.to_dict()) or "Comparable", axis=1)
         st.dataframe(latest[["competitor_name", "price", "promotional_price", "currency", "availability",
-                             "match_status", "captured_at", "Estado del precio", "url"]].rename(columns={
+                             "match_status", "Uso en comparación", "captured_at", "Estado del precio", "url"]].rename(columns={
             "competitor_name": "Competidor", "price": "Precio", "promotional_price": "Promoción",
             "currency": "Moneda", "availability": "Disponibilidad", "match_status": "Coincidencia",
             "captured_at": "Último cambio", "url": "URL"}), width="stretch", hide_index=True)
@@ -227,29 +247,89 @@ def _render_detail(store: PriceComparatorStore, summary: pd.DataFrame, expiry: i
         st.dataframe(offers, width="stretch", hide_index=True)
 
 
-def _render_comparison(store: PriceComparatorStore) -> None:
+def _load(store: PriceComparatorStore) -> dict:
     expiry = store.price_expiry_days()
     summary, counts = store.dashboard(expiry)
-    if summary.empty:
-        st.info("Importe primero el catálogo piloto en la pestaña «Datos y fuentes».")
-        return
     offers = store.current_offers(expiry)
     changes = analytics.recent_changes(store, 7)
-    indicators = analytics.kpis(summary, len(changes))
-    cols = st.columns(4)
-    cols[0].metric("Con precio Vytria confirmado", f"{indicators['vytria_confirmed']}/{counts['products']}")
-    cols[1].metric("Con competencia comparable", indicators["comparable"])
-    cols[2].metric("Vytria con el mejor precio", f"{indicators['best_price_pct']:.0f}%",
-                   help=f"Sobre {indicators['compared']} referencias comparadas")
-    cols[3].metric("Cambios importantes (7 días)", indicators["recent_changes"])
-    st.caption(
-        "Se comparan los últimos datos válidos almacenados: precio Vytria validado desde Odoo (IVA incluido) frente a "
-        f"ofertas exactas y disponibles del mismo mercado comprobadas en los últimos {expiry} días. "
-        f"Última oferta comprobada: {offers['checked_at'].max() if not offers.empty else '—'}.")
-    if offers.empty:
-        st.warning("No hay datos de competencia suficientes. Importe ofertas en «Datos y fuentes» o habilite "
-                   "un conector autorizado en «Configuración». Mientras tanto solo se muestran los precios de Vytria.")
+    threshold = float(store.get_setting("alert_threshold_pct"))
+    pairs = analytics.comparable_pairs(summary, offers)
+    return {
+        "expiry": expiry, "summary": summary, "counts": counts, "offers": offers, "changes": changes,
+        "threshold": threshold, "pairs": pairs,
+        "positioning": analytics.competitor_positioning(summary, offers, threshold),
+        "indicators": analytics.kpis(summary, len(changes)),
+    }
 
+
+def _pct(value: float | None) -> str:
+    return "Sin datos" if value is None else f"{value:+.1f} %".replace(".", ",")
+
+
+def _render_kpis(data: dict) -> None:
+    """Persistent header: a metric that cannot be computed says so instead of showing 0."""
+    indicators, counts = data["indicators"], data["counts"]
+    gap = analytics.mean_gap_pct(data["pairs"])
+    cols = st.columns(5)
+    cols[0].metric("Referencias con precio Vytria", f"{indicators['vytria_confirmed']}/{counts['products']}",
+                   help="Precio Vytria validado desde Odoo (tarifa 59, IVA incluido).")
+    cols[1].metric("Con competencia comparable", indicators["comparable"],
+                   help="Referencias con al menos una oferta exacta, disponible, vigente y del mismo mercado.")
+    cols[2].metric("Competidores con datos", f"{data['pairs']['competitor'].nunique()}/{counts['competitors']}",
+                   help="Competidores con al menos una oferta comparable vigente.")
+    cols[3].metric("Diferencia media del mercado vs Vytria", _pct(gap),
+                   help="Media de (precio competidor − precio Vytria) / precio Vytria. Negativo: el mercado es "
+                        "más barato que Vytria.")
+    cols[4].metric("Vytria más caro / más barato",
+                   f"{indicators['vytria_more_expensive']} / {indicators['vytria_cheaper']}"
+                   if indicators["compared"] else "Sin datos",
+                   help="Referencias comparadas donde Vytria está por encima / por debajo del mejor competidor.")
+
+
+def _render_summary(store: PriceComparatorStore, data: dict) -> None:
+    summary, offers, positioning = data["summary"], data["offers"], data["positioning"]
+    st.caption(
+        "Se comparan los últimos datos válidos: precio Vytria validado desde Odoo (IVA incluido) frente a ofertas "
+        f"exactas y disponibles del mismo mercado comprobadas en los últimos {data['expiry']} días. "
+        f"Última oferta comprobada: {offers['checked_at'].max() if not offers.empty else '—'}.")
+    if summary.empty:
+        st.info("Importe primero el catálogo piloto en la pestaña «Configuración».")
+        return
+    if positioning.empty:
+        st.warning("No hay datos de competencia suficientes. Importe ofertas en «Configuración» o habilite "
+                   "un conector autorizado; ninguna cifra se estima ni se simula. Mientras tanto solo se muestran "
+                   "los precios de Vytria.")
+    else:
+        st.subheader("Diferencia media por competidor frente a Vytria")
+        st.plotly_chart(analytics.positioning_figure(positioning), width="stretch")
+        st.caption("Negativo: el competidor es más barato que Vytria. Solo se promedian las mismas referencias "
+                   "con oferta exacta, disponible, vigente y del mismo mercado. "
+                   f"Señal a partir de ±{data['threshold']:g} % (umbral configurable).")
+        table = positioning.rename(columns={
+            "competitor": "Competidor", "references": "Referencias comparadas", "vytria_mean_eur": "Precio medio Vytria",
+            "competitor_mean_eur": "Precio medio competidor", "difference_pct": "Diferencia media %",
+            "cheaper_pct": "% más barato que Vytria", "last_update": "Última actualización", "signal": "Señal"})
+        st.dataframe(table, width="stretch", hide_index=True)
+        if len(positioning) == 1 or int(positioning["references"].max()) == 1:
+            st.info("Muestra muy pequeña (una referencia o un competidor): úsela como indicio, no como tendencia.")
+    top = analytics.top_differences(summary)
+    if not top.empty:
+        st.subheader("Mayores diferencias")
+        st.dataframe(top.rename(columns=TABLE_LABELS), width="stretch", hide_index=True)
+    st.subheader("Evolución global")
+    window = st.radio("Periodo", list(analytics.WINDOWS), horizontal=True, key="price_global_window")
+    series = analytics.competitiveness_series(store, analytics.WINDOWS[window])
+    if series.empty:
+        st.info("Todavía no hay histórico suficiente de Vytria y competencia para calcular la competitividad.")
+    else:
+        st.plotly_chart(analytics.competitiveness_figure(series), width="stretch")
+
+
+def _render_comparison(store: PriceComparatorStore, data: dict) -> None:
+    summary, offers, changes = data["summary"], data["offers"], data["changes"]
+    if summary.empty:
+        st.info("Importe primero el catálogo piloto en la pestaña «Configuración».")
+        return
     table = analytics.commercial_table(summary)
     f1, f2, f3, f4 = st.columns(4)
     brands = f1.multiselect("Marca", sorted(v for v in table["brand"].dropna().unique() if v), key="cmp_brand")
@@ -276,19 +356,51 @@ def _render_comparison(store: PriceComparatorStore) -> None:
             st.write("Cambios de precio importantes:")
             st.dataframe(changes, width="stretch", hide_index=True)
 
-    st.subheader("Evolución global")
-    window = st.radio("Periodo", list(analytics.WINDOWS), horizontal=True, key="price_global_window")
-    series = analytics.competitiveness_series(store, analytics.WINDOWS[window])
-    if series.empty:
-        st.info("Todavía no hay histórico suficiente de Vytria y competencia para calcular la competitividad.")
-    else:
-        st.plotly_chart(analytics.competitiveness_figure(series), width="stretch")
-    top = analytics.top_differences(summary)
-    if not top.empty:
-        st.write("Mayores diferencias")
-        st.dataframe(top.rename(columns=TABLE_LABELS), width="stretch", hide_index=True)
 
-    _render_detail(store, summary, expiry)
+def _render_history(store: PriceComparatorStore, data: dict) -> None:
+    if data["summary"].empty:
+        st.info("Importe primero el catálogo piloto en la pestaña «Configuración».")
+        return
+    _render_detail(store, data["summary"], data["expiry"])
+
+
+def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
+    coverage = store.coverage_table()
+    competitors = store.competitors().set_index("name")
+    scheduler = _make_scheduler(store)
+    overview = scheduler.overview().set_index("name")
+    pairs = data["pairs"]
+    rows = []
+    for item in coverage.to_dict("records"):
+        name = item["competitor"]
+        rows.append({
+            "Competidor": name,
+            "Web": competitors.loc[name, "url"] if name in competitors.index else "",
+            "Estado": STATUS_TEXT.get(item["integration_status"], item["integration_status"]),
+            "Método": item["method"] or "—",
+            "Restricciones": item["restrictions"] or "—",
+            "Referencias localizadas": int(item["references_located"]),
+            "Ofertas confirmadas": int(item["confirmed_offers"]),
+            "Ofertas comparables vigentes": int((pairs["competitor"] == name).sum()),
+            "Última comprobación": item["last_checked_at"] or "—",
+            "Planificador": overview.loc[name, "state_label"] if name in overview.index else "—",
+        })
+    if not rows:
+        st.info("No hay competidores registrados.")
+        return
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
+        "Web": st.column_config.LinkColumn("Web", display_text=r"https?://(?:www\.)?([^/]+)")})
+    st.caption("Ningún competidor figura como operativo: hace falta un conector verificado con acceso autorizado y "
+               "al menos una oferta confirmada. Una URL pública o un robots.txt permisivo no equivalen a "
+               "autorización para consultas automáticas.")
+    st.subheader("Qué necesitamos de Vytria para obtener precios reales")
+    for item in coverage.to_dict("records"):
+        restrictions, needed = requirement_for(item["competitor"])
+        url = competitors.loc[item["competitor"], "url"] if item["competitor"] in competitors.index else ""
+        with st.expander(f"{item['competitor']} · {STATUS_TEXT.get(item['integration_status'], '')}"):
+            st.markdown(f"**Web:** [{url}]({url})" if url else "")
+            st.markdown(f"**Situación:** {restrictions or item['restrictions'] or '—'}")
+            st.markdown(f"**Necesitamos:** {needed}")
 
 
 def _render_data_sources(store: PriceComparatorStore) -> None:
@@ -439,7 +551,11 @@ def _render_settings(store: PriceComparatorStore) -> None:
         except ValueError as exc:
             st.error(str(exc))
         else:
-            st.success("Configuración guardada.")
+            saved = PriceComparatorStore(store.database_path)  # read back from disk, not from memory
+            if (saved.get_setting("retention_months"), saved.price_expiry_days()) != (str(retention), int(expiry)):
+                st.error("La configuración no se ha podido confirmar en la base de datos.")
+            else:
+                st.success(f"Configuración guardada y verificada en {saved.database_path.name}.")
     st.caption("Fechas en UTC. «Vigente»: comprobado dentro del plazo de caducidad. «Último conocido»: hasta el doble "
                "del plazo; se muestra pero no se compara. «Caducado»: más antiguo.")
 
@@ -467,15 +583,27 @@ def render_price_comparator_page() -> None:
     )
     try:
         store = PriceComparatorStore()
+        store.seed_defaults()
     except PriceComparatorStorageError as exc:
         st.error(str(exc))
         return
+    st.markdown(PAGE_STYLE, unsafe_allow_html=True)
     _show_pending_reports()
     _render_actions(store)
-    comparison_tab, data_tab, settings_tab = st.tabs(["Comparación", "Datos y fuentes", "Configuración"])
+    data = _load(store)
+    _render_kpis(data)
+    summary_tab, comparison_tab, history_tab, competitors_tab, settings_tab = st.tabs(
+        ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"])
+    with summary_tab:
+        _render_summary(store, data)
     with comparison_tab:
-        _render_comparison(store)
-    with data_tab:
-        _render_data_sources(store)
+        _render_comparison(store, data)
+    with history_tab:
+        _render_history(store, data)
+    with competitors_tab:
+        _render_competitors(store, data)
     with settings_tab:
         _render_settings(store)
+        st.divider()
+        st.header("Importación de datos")
+        _render_data_sources(store)

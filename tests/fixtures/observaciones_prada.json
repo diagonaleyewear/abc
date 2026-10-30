@@ -1,0 +1,42 @@
+{
+  "schema": "cloud-price-observations/1",
+  "origen": "Observaciones reales de Visio Factory del 2026-10-30 (prueba Prada). Fixture de test.",
+  "observaciones": [
+    {
+      "ean_consultado": "8056597875349", "competidor": "Visio Factory", "marca": "Prada",
+      "modelo": "PR 27ZS", "color": "16K08Z (Negro)", "calibre": "54-21", "ean_publicado": "8056597875349",
+      "url": "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/pr27zs-16k08z-54-21.html",
+      "precio_venta": 239.0, "moneda": "EUR", "mercado": "ES", "iva_incluido": true, "tipo_iva": 21,
+      "disponibilidad": "available", "fecha_observacion": "2026-10-30T13:45:00+01:00",
+      "metodo": "Página pública de ficha, JSON-LD schema.org Product; 1 petición",
+      "coincidencia": "exact_match",
+      "evidencia": "EAN publicado igual al consultado; modelo, color y calibre coinciden", "estado": "observada"
+    },
+    {
+      "ean_consultado": "8056597877329", "competidor": "Visio Factory", "marca": "Prada",
+      "modelo": "PR 65ZS", "color": "ZVN09T (Pale Gold)", "calibre": "55-20", "ean_publicado": "8056597877329",
+      "url": "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/pr-65zs-zvn-09t-55-20.html",
+      "precio_venta": 187.0, "moneda": "EUR", "mercado": "ES", "iva_incluido": true, "tipo_iva": 21,
+      "disponibilidad": "unavailable", "fecha_observacion": "2026-10-30T13:47:00+01:00",
+      "metodo": "Página pública de ficha, JSON-LD schema.org Product; 1 petición",
+      "coincidencia": "exact_match",
+      "evidencia": "EAN publicado igual al consultado; modelo, color y calibre coinciden", "estado": "observada"
+    },
+    {
+      "ean_consultado": "8056597875226", "competidor": "Visio Factory", "marca": "Prada",
+      "modelo": "PR 26ZS", "color": "16K08Z (Negro)", "calibre": "55-16", "ean_publicado": "8056597875226",
+      "url": "https://www.visiofactory.es/gafas-de-sol/todas-las-solares/pr26zs-16k08z-55-16.html",
+      "precio_venta": 219.0, "moneda": "EUR", "mercado": "ES", "iva_incluido": true, "tipo_iva": 21,
+      "disponibilidad": "available", "fecha_observacion": "2026-10-30T13:52:00+01:00",
+      "metodo": "Página pública de ficha, JSON-LD schema.org Product; 1 petición",
+      "coincidencia": "exact_match",
+      "evidencia": "EAN publicado igual al consultado; mismo color que la PR 27ZS pero modelo distinto", "estado": "observada"
+    },
+    {
+      "ean_consultado": "8056597875349", "competidor": "Edel-Optics", "mercado": "ES",
+      "estado": "bloqueada", "detalle": "Búsqueda pública con HTTP 403; no se reintentó ni se eludió",
+      "url": "https://www.edel-optics.es/", "metodo": "Página pública", "fecha_observacion": "2026-10-30T13:50:00+01:00"
+    }
+  ]
+}
+

@@ -74,7 +74,7 @@ def test_unvalidated_vytria_price_is_excluded_from_comparison(tmp_path, monkeypa
     summary, _ = store.dashboard(7)
     assert pd.isna(summary.iloc[0]["own_price_eur"])
     assert pa.commercial_table(summary).iloc[0]["position"] == pa.POSITION_NONE
-    assert pa.kpis(summary, 0)["best_price_pct"] == 0
+    assert pa.kpis(summary, 0)["best_price_pct"] is None
 
 
 def test_filters_by_brand_competitor_availability_and_position(tmp_path, monkeypatch):
@@ -138,8 +138,9 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     app = AppTest.from_string(script).run(timeout=30)
     assert not app.exception
     assert any("No hay datos de competencia suficientes" in w.value for w in app.warning)
-    assert [m.label for m in app.metric][:4] == ["Con precio Vytria confirmado", "Con competencia comparable",
-                                                  "Vytria con el mejor precio", "Cambios importantes (7 días)"]
+    assert [m.label for m in app.metric][:3] == ["Referencias con precio Vytria", "Con competencia comparable",
+                                                  "Competidores con datos"]
+    assert app.metric[3].value == "Sin datos" and app.metric[4].value == "Sin datos"
     assert app.button(key="update_competitors").disabled  # nothing enabled yet: Pendiente de configurar
     now = datetime.now(timezone.utc)
     with store._connect() as c, c:
