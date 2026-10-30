@@ -18,8 +18,11 @@ EXACT, PROBABLE, REJECTED = "exact_match", "probable_match", "rejected"
 LEVELS = ("ean", "brand_model_color", "model_color", "normalized_variants")
 
 _SEPARATORS = re.compile(r"[\s\-_/.·,;:|\\]+")
-_CALIBER = re.compile(r"(?<!\d)(\d{2})\s*(?:[-/x×□]|\s)\s*(\d{1,2})(?!\d)", re.IGNORECASE)
+# The bridge must end the number: "54 0PR_..." or "C54 16K08Z" (a colour code) are not a calibre.
+_CALIBER = re.compile(r"(?<!\d)(\d{2})\s*(?:[-/x×□]|\s)\s*(\d{1,2})(?:mm)?(?![\dA-Za-z])", re.IGNORECASE)
 _LENS_ONLY = re.compile(r"^\d{2}$")
+_LENS_TOKEN = re.compile(r"(?<![\dA-Za-z])C(\d{2})(?![\dA-Za-z])|\s(\d{2})\s*$")
+_CODE_CALIBER = re.compile(r"^0?[A-Z]{1,4}_[A-Z0-9]+?(\d{2})(\d{2})$")
 
 
 def _ascii(value: Any) -> str:
@@ -66,6 +69,22 @@ def compare_calibers(left: Any, right: Any) -> str:
 def extract_caliber(text: Any) -> str:
     match = _CALIBER.search(_ascii(text))
     return f"{match.group(1)}-{int(match.group(2))}" if match else ""
+
+
+def extract_lens(text: Any) -> str:
+    """Lens width alone ('C54', or a trailing '... 54'); only plausible eyewear sizes."""
+    match = _LENS_TOKEN.search(_ascii(text).strip())
+    lens = int(match.group(1) or match.group(2)) if match else 0
+    return str(lens) if 38 <= lens <= 66 else ""
+
+
+def caliber_from_code(code: Any) -> str:
+    """Manufacturer-style codes such as '0PR_27ZS16K08Z5421' end in lens + bridge ('54-21')."""
+    match = _CODE_CALIBER.match(_ascii(code).strip().upper())
+    if not match:
+        return ""
+    lens, bridge = int(match.group(1)), int(match.group(2))
+    return f"{lens}-{bridge}" if 38 <= lens <= 66 and 10 <= bridge <= 26 else ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +250,7 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
         return MatchResult(PROBABLE, reasons=reasons + ["Falta evidencia de la marca: revisar"])
     return MatchResult(EXACT, "reference", reasons + ["Marca, modelo, color y calibre coinciden"])
 
+
 class ReferenceIndex:
     """Catalogue lookup by EAN or reference, following the search order of the plan."""
 
@@ -264,6 +284,3 @@ class ReferenceIndex:
             if found:
                 return level, found
         return "", []
-
-
-

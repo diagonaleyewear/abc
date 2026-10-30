@@ -16,7 +16,9 @@ from price_comparator import (
 )
 from price_connectors import CONNECTORS, ConnectorError
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
-from price_web import WebPriceSearch, WebSearchError
+from price_web import (
+    EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError,
+)
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
 
 
@@ -52,8 +54,9 @@ WEB_STATE_TEXT = {
 WEB_LEVEL_TEXT = {"ean": "EAN exacto", "brand_model_color": "marca + modelo + color", "model_color": "modelo + color",
                   "normalized_variants": "variante normalizada de la referencia"}
 WEB_STATUS_TEXT = {
-    "implemented": "Implementado, sin verificar", "verified": "Verificado con oferta real",
-    "operational": "Operativo", "blocked": "Bloqueado por el sitio", "not_allowed": "robots.txt no lo permite",
+    "implemented": "Implementado, sin verificar", "verified": "Extracción verificada; condiciones sin revisar",
+    "operational": "Autorizado y con extracción verificada", "blocked": "Bloqueado por el sitio",
+    "not_allowed": "robots.txt no lo permite",
     "pending_authorization": "Pendiente de autorización",
 }
 WEB_ACCESS_TEXT = {
@@ -365,13 +368,22 @@ def _render_web_finder(store: PriceComparatorStore) -> None:
     show_all = f2.checkbox("Mostrar no comparables", value=True, key="web_show_all")
     mode = f3.radio("Modo", ["Almacenados", "Consultar webs"], horizontal=True, key="web_mode")
     ids = [r["competitor_id"] for r in configs.to_dict("records") if r["name"] in names]
-    if not st.button("Buscar", key="web_search_button", type="primary", disabled=not text.strip()):
-        return
+    if st.button("Buscar", key="web_search_button", type="primary", disabled=not text.strip()):
+        _run_web_search(search, text, ids, mode, only_stock, show_all)
+    active = st.session_state.get("web_active")
+    if active:
+        _render_web_results(search, active)
+
+
+def _run_web_search(search: WebPriceSearch, text: str, ids: list[str], mode: str, only_stock: bool,
+                    show_all: bool) -> None:
+    st.session_state.pop("web_active", None)
     try:
         level, products = search.resolve(text)
         if not products:
             st.warning("Sin coincidencias en el catálogo. Pruebe con el EAN o con modelo + color.")
             return
+        outcomes: list[dict] = []
         if mode == "Consultar webs":
             if not 1 <= len(ids) <= WEB_MAX_COMPETITORS:
                 st.error(f"Elija entre 1 y {WEB_MAX_COMPETITORS} competidores para consultar sus webs.")
@@ -380,29 +392,123 @@ def _render_web_finder(store: PriceComparatorStore) -> None:
                 st.error(f"La referencia coincide con {len(products)} productos; concrete (máximo {WEB_MAX_PRODUCTS}).")
                 return
             with st.spinner("Consultando fichas con pausas entre peticiones…"):
-                outcomes = search.run([p["ean"] for p in products], ids)
-            st.dataframe(pd.DataFrame([{
-                "EAN": o.ean, "Competidor": o.competitor, "Resultado": WEB_STATE_TEXT.get(o.state, o.state),
-                "Precio": o.page.price if o.priced else None, "Stock": o.page.availability if o.page else "",
-                "IVA incluido": {True: "Sí", False: "No", None: "Sin confirmar"}[o.page.includes_tax] if o.page else "",
-                "Ficha": o.url, "Detalle": o.detail} for o in outcomes]), width="stretch", hide_index=True,
-                column_config={"Ficha": st.column_config.LinkColumn("Ficha")})
-        _, frame = search.stored_results(text, only_in_stock=only_stock, include_non_comparable=show_all,
-                                         competitor_ids=ids)
+                outcomes = [{
+                    "EAN": o.ean, "Competidor": o.competitor, "Resultado": WEB_STATE_TEXT.get(o.state, o.state),
+                    "Precio": o.page.price if o.priced else None, "Stock": o.page.availability if o.page else "",
+                    "IVA incluido": {True: "Sí", False: "No", None: "Sin confirmar"}[o.page.includes_tax]
+                    if o.page else "", "Ficha": o.url, "Detalle": o.detail} for o in search.run(
+                        [p["ean"] for p in products], ids)]
     except (WebSearchError, ValueError) as exc:
         st.error(str(exc))
         return
-    st.caption(f"Identificación: {WEB_LEVEL_TEXT.get(level, level)} · {len(products)} producto(s).")
+    st.session_state["web_active"] = {"text": text, "ids": ids, "level": level, "only_stock": only_stock,
+                                      "show_all": show_all, "outcomes": outcomes, "products": len(products)}
+
+
+def _render_web_results(search: WebPriceSearch, active: dict) -> None:
+    ids = active["ids"]
+    try:
+        _, frame = search.stored_results(active["text"], only_in_stock=active["only_stock"],
+                                         include_non_comparable=active["show_all"], competitor_ids=ids)
+        _, unfiltered = search.stored_results(active["text"], competitor_ids=ids)
+    except (WebSearchError, ValueError) as exc:
+        st.error(str(exc))
+        return
+    if active["outcomes"]:
+        st.dataframe(pd.DataFrame(active["outcomes"]), width="stretch", hide_index=True,
+                     column_config={"Ficha": st.column_config.LinkColumn("Ficha")})
+    st.caption(f"Identificación: {WEB_LEVEL_TEXT.get(active['level'], active['level'])} · "
+               f"{active['products']} producto(s).")
     if frame.empty:
         st.info("No hay resultados que mostrar con estos filtros.")
+    else:
+        st.dataframe(frame, width="stretch", hide_index=True, column_config={
+            "Precio": st.column_config.NumberColumn("Precio", format="%.2f €"),
+            "Diferencia €": st.column_config.NumberColumn("Diferencia €", format="%.2f"),
+            "Diferencia %": st.column_config.NumberColumn("Diferencia %", format="%.1f %%"),
+            "Ficha": st.column_config.LinkColumn("Ficha")})
+        st.caption("La diferencia se calcula sobre el precio de Vytria; solo «Precio almacenado» entra en las "
+                   "comparativas, indicadores y gráficos.")
+    _render_url_requests(search, unfiltered, ids)
+
+
+def _render_url_requests(search: WebPriceSearch, frame: pd.DataFrame, ids: list[str]) -> None:
+    """Ask for the exact page, once, where nothing was found and no page is registered yet."""
+    if frame.empty or not ids:
+        if not ids:
+            st.caption("Elija competidores para poder facilitar la URL de una ficha que no se localice.")
         return
-    st.dataframe(frame, width="stretch", hide_index=True, column_config={
-        "Precio": st.column_config.NumberColumn("Precio", format="%.2f €"),
-        "Diferencia €": st.column_config.NumberColumn("Diferencia €", format="%.2f"),
-        "Diferencia %": st.column_config.NumberColumn("Diferencia %", format="%.1f %%"),
-        "Ficha": st.column_config.LinkColumn("Ficha")})
-    st.caption("La diferencia se calcula sobre el precio de Vytria; solo «Precio almacenado» entra en las "
-               "comparativas, indicadores y gráficos.")
+    names = {r["name"]: r["competitor_id"] for r in search.configs().to_dict("records")}
+    missing = [(row["EAN"], names[row["Competidor"]], row["Competidor"], row["Modelo"], row["Color"])
+               for row in frame.to_dict("records")
+               if row["Precio"] is None and row["Competidor"] in names
+               and search.needs_url(row["EAN"], names[row["Competidor"]])]
+    pending = [(r["EAN"], names[r["Competidor"]], r["Competidor"], r["Modelo"], r["Color"])
+               for r in frame.to_dict("records") if r["Competidor"] in names
+               and st.session_state.get(f"web_sub_{r['EAN']}_{names[r['Competidor']]}") is not None
+               and (r["EAN"], names[r["Competidor"]], r["Competidor"], r["Modelo"], r["Color"]) not in missing]
+    for ean, cid, name, model, color in [*missing, *pending][:WEB_MAX_PRODUCTS * WEB_MAX_COMPETITORS]:
+        _render_url_prompt(search, ean, cid, name, f"{model} {color}".strip())
+    registered = [(r["EAN"], names[r["Competidor"]], r["Competidor"]) for r in frame.to_dict("records")
+                  if r["Competidor"] in names and not search.needs_url(r["EAN"], names[r["Competidor"]])]
+    if registered:
+        _render_url_replacement(search, registered)
+
+
+def _render_url_prompt(search: WebPriceSearch, ean: str, cid: str, name: str, label: str) -> None:
+    box = st.container(border=True)
+    box.markdown(f"**No hemos localizado este producto en {name}. ¿Puedes facilitarnos la URL?**  \n"
+                 f"{label} · EAN {ean}")
+    state = search.url_state(ean, cid)
+    if state["key"] in {"pending", "blocked", "relocation", "wrong"}:
+        box.caption(f"{state['text']}: {state['url']}" + (f" ({state['note']})" if state["note"] else ""))
+    sub_key = f"web_sub_{ean}_{cid}"
+    sub = st.session_state.get(sub_key)
+    if sub is not None and sub.state == "needs_confirmation":
+        box.warning(sub.message)
+        c1, c2 = box.columns(2)
+        if c1.button("Confirmar: guardar pendiente de revisión", key=f"web_confirm_{ean}_{cid}"):
+            st.session_state[sub_key] = search.save_for_review(sub)
+            st.rerun()
+        if c2.button("Descartar", key=f"web_discard_{ean}_{cid}"):
+            st.session_state.pop(sub_key, None)
+            st.rerun()
+        return
+    if sub is not None:
+        _show_submission(box, sub)
+        if sub.state in {"verified", "saved_for_review"} or sub.action in {"review", "wait", "authorization"}:
+            return
+    url = box.text_input("URL de la ficha (HTTPS, del sitio del competidor)", key=f"web_url_{ean}_{cid}")
+    if box.button("Verificar y guardar", key=f"web_submit_{ean}_{cid}", disabled=not url.strip()):
+        with st.spinner("Comprobando condiciones de acceso y verificando la ficha…"):
+            st.session_state[sub_key] = search.submit_url(ean, cid, url)
+        st.rerun()
+
+
+def _render_url_replacement(search: WebPriceSearch, registered: list[tuple[str, str, str]]) -> None:
+    with st.expander("Sustituir una ficha registrada (cambió o dejó de existir)"):
+        options = {f"{name} · EAN {ean}": (ean, cid) for ean, cid, name in registered}
+        choice = st.selectbox("Producto y competidor", list(options), key="web_replace_choice")
+        ean, cid = options[choice]
+        current = search.url_state(ean, cid)
+        st.caption(f"{current['text']}: {current['url']}")
+        url = st.text_input("Nueva URL", key="web_replace_url")
+        if st.button("Verificar y sustituir", key="web_replace_button", disabled=not url.strip()):
+            sub = search.submit_url(ean, cid, url, replace=True)
+            if sub.state == "needs_confirmation":
+                st.session_state[f"web_sub_{ean}_{cid}"] = sub
+                st.rerun()
+            _show_submission(st, sub)
+
+
+def _show_submission(target, sub) -> None:
+    """A verified page whose offer is not comparable (VAT, market, price) is shown as a warning, not as success."""
+    if sub.state == "verified" and not sub.reason:
+        target.success(sub.message)
+    elif sub.state == "saved_for_review":
+        target.info(sub.message)
+    else:
+        target.warning(sub.message)
 
 
 def _render_comparison(store: PriceComparatorStore, data: dict) -> None:
@@ -524,18 +630,25 @@ def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
     scheduler = _make_scheduler(store)
     overview = scheduler.overview().set_index("name")
     pairs = data["pairs"]
+    comparable = pairs["competitor"].value_counts().to_dict() if not pairs.empty else {}
+    states = _make_web_search(store).competitor_states(comparable).set_index("name")
     rows = []
     for item in coverage.to_dict("records"):
         name = item["competitor"]
+        state = states.loc[name] if name in states.index else None
         rows.append({
             "Competidor": name,
             "Web": competitors.loc[name, "url"] if name in competitors.index else "",
+            "Localización": LOCATION_TEXT[state["location"]] if state is not None else "—",
+            "Extracción": EXTRACTION_TEXT[state["extraction"]] if state is not None else "—",
+            "Operatividad": OPERABILITY_TEXT[state["operability"]] if state is not None else "—",
+            "Ofertas": int(state["offers"]) if state is not None else 0,
+            "Comparables": int(state["comparable"]) if state is not None else 0,
             "Estado": STATUS_TEXT.get(item["integration_status"], item["integration_status"]),
             "Método": item["method"] or "—",
             "Restricciones": item["restrictions"] or "—",
             "Referencias localizadas": int(item["references_located"]),
             "Ofertas confirmadas": int(item["confirmed_offers"]),
-            "Ofertas comparables vigentes": int((pairs["competitor"] == name).sum()),
             "Última comprobación": item["last_checked_at"] or "—",
             "Planificador": overview.loc[name, "state_label"] if name in overview.index else "—",
         })
@@ -544,9 +657,11 @@ def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
         return
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
         "Web": st.column_config.LinkColumn("Web", display_text=r"https?://(?:www\.)?([^/]+)")})
-    st.caption("Ningún competidor figura como operativo: hace falta un conector verificado con acceso autorizado y "
-               "al menos una oferta confirmada. Una URL pública o un robots.txt permisivo no equivalen a "
-               "autorización para consultas automáticas.")
+    st.caption("Tres estados independientes. **Localización**: si hay una ficha del producto. **Extracción**: si "
+               "el extractor obtuvo datos reales. **Operatividad**: solo «Autorizado» cuando una persona revisó las "
+               "condiciones de uso y robots.txt lo permite; que la extracción funcione no autoriza consultas "
+               "periódicas. «Comparables»: ofertas vigentes con identificación, IVA, mercado, moneda y stock "
+               "confirmados. Una URL pública o un robots.txt permisivo no equivalen a autorización.")
     st.subheader("Qué necesitamos de Vytria para obtener precios reales")
     for item in coverage.to_dict("records"):
         restrictions, needed = requirement_for(item["competitor"])

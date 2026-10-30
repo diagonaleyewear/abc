@@ -56,6 +56,7 @@ class Outcome:
     match_status: str = ""
     requests: int = 0
     notes: list[str] = field(default_factory=list)
+    reason: str = ""  # key of FAILURES when something prevents a comparable offer
 
     @property
     def priced(self) -> bool:
@@ -64,6 +65,80 @@ class Outcome:
 
 class WebSearchError(ValueError):
     pass
+
+
+# reason -> (what happened and what to do, action). Actions: url = ask for another URL; review = keep the URL and
+# review the extractor or the reference; wait = access blocked, do not retry; authorization = wait for the
+# terms review/authorisation; retry = temporary, try again later; none = nothing to do.
+FAILURES: dict[str, tuple[str, str]] = {
+    "gone": ("La URL no existe (HTTP 404/410): la ficha se retiró o cambió de dirección. Facilite la URL actual.",
+             "url"),
+    "wrong_product": ("La ficha es de otro producto (marca o modelo distintos). Facilite la URL correcta; la anterior "
+                      "se conserva y el histórico de precios no se toca.", "url"),
+    "variant_differs": ("La ficha es del mismo modelo pero de otro color o calibre. Busque la variante exacta y "
+                        "facilite su URL.", "url"),
+    "ean_conflict": ("La ficha publica un EAN distinto del solicitado. Compruebe la referencia y facilite la URL "
+                     "correcta.", "url"),
+    "ambiguous": ("La ficha es probable o ambigua (varias variantes u ofertas, o datos insuficientes): confirme la "
+                  "referencia antes de guardarla; no genera ofertas comparables.", "review"),
+    "no_product_data": ("La página responde pero no publica datos de producto legibles. La URL se conserva: necesita "
+                        "revisión del extractor, no otra URL.", "review"),
+    "no_price": ("La ficha es la correcta pero no se ha encontrado el precio. La URL se conserva: necesita revisión "
+                 "del extractor (o del selector de precio), no otra URL.", "review"),
+    "vat_unconfirmed": ("Ficha y precio localizados, pero el IVA no está confirmado: la oferta se guarda sin entrar "
+                        "en las comparativas. Compruebe en la web si el precio incluye IVA y configúrelo en el "
+                        "competidor.", "review"),
+    "market_currency": ("El precio no es comparable todavía: moneda o mercado no verificados, o distintos de EUR/ES. "
+                        "La oferta no entra en las comparativas; confirme mercado y moneda del competidor.", "review"),
+    "redirect": ("La URL redirige fuera del dominio del competidor y no se sigue. Facilite la URL definitiva.", "url"),
+    "robots": ("robots.txt no permite consultar esta ruta. La URL se conserva; no se consulta hasta que el acceso "
+               "esté autorizado.", "authorization"),
+    "authorization": ("El competidor está pendiente de autorización. La URL se conserva; no se consulta hasta "
+                      "entonces.", "authorization"),
+    "http_blocked": ("El sitio rechazó o limitó la petición (HTTP 403/429). No es un producto inexistente: la URL se "
+                     "conserva y no se reintenta; espere a que se autorice o se levante el bloqueo.", "wait"),
+    "captcha": ("El sitio presenta un CAPTCHA o control antibot. No es un producto inexistente: la URL se conserva y "
+                "no se intenta superarlo.", "wait"),
+    "unchecked": ("No se pudo comprobar el acceso (robots.txt). La URL se conserva; repita la comprobación más "
+                  "tarde.", "retry"),
+    "temporary": ("Error temporal de conexión o del servidor. No se ha guardado nada ni se reintenta solo: inténtelo "
+                  "de nuevo más tarde.", "retry"),
+}
+
+
+def failure_reason(exc: Exception) -> str:
+    """Map a fetch exception to a FAILURES key; a 403/429 or CAPTCHA is never presented as a missing product."""
+    text = str(exc)
+    if isinstance(exc, RobotsDenied):
+        return "robots"
+    if isinstance(exc, PageGone):
+        return "gone"
+    if isinstance(exc, ConnectorBlocked):
+        return "captcha" if re.search(r"captcha|antibot", text, re.I) else "http_blocked"
+    if "otro dominio" in text:
+        return "redirect"
+    return "temporary"
+
+
+def mismatch_reason(status: str, reasons: list[str]) -> str:
+    """Why a page is not the requested product, from the reasons given by ``classify``."""
+    text = "; ".join(reasons).lower()
+    if "ean publicado distinto" in text:
+        return "ean_conflict"
+    found = re.search(r"(?:contradice:|distinto) ([^:;]*)", text)
+    if found:
+        return "wrong_product" if re.search(r"marca|modelo", found.group(1)) else "variant_differs"
+    return "wrong_product" if status == REJECTED else "ambiguous"
+
+
+def comparability_gap(page: ProductPage, config: dict) -> str:
+    """First reason why an exact page does not yield a comparable offer (empty when it does)."""
+    if not page.has_price:
+        return "no_price"
+    currency, market = page.currency or config["currency"], page.market or config["market"]
+    if currency != "EUR" or market != "ES":
+        return "market_currency"
+    return "vat_unconfirmed" if page.includes_tax is None else ""
 
 
 class WebPriceSearch:
@@ -109,6 +184,49 @@ class WebPriceSearch:
                 LEFT JOIN competitor_schedule s ON s.competitor_id=w.competitor_id ORDER BY c.name""", connection)
         frame["connector_status"] = [self.connector_status(row) for row in frame.to_dict("records")]
         return frame
+
+    def competitor_states(self, comparable: dict[str, int] | None = None) -> pd.DataFrame:
+        """Three independent states per competitor, derived from the stored configuration and URL index:
+        location (is there a page), extraction (did it yield real data) and operability (is periodic access
+        authorised). A working extractor never implies authorisation."""
+        comparable = comparable or {}
+        configs = self.configs()
+        with self.store._connect() as connection:
+            urls = pd.read_sql_query("SELECT competitor_id,status,last_price FROM competitor_product_urls", connection)
+            offers = {r[0]: r[1] for r in connection.execute(
+                "SELECT competitor_id,COUNT(DISTINCT ean) FROM offers GROUP BY competitor_id")}
+        rows = []
+        for cfg in configs.to_dict("records"):
+            mine = urls[urls["competitor_id"] == cfg["competitor_id"]]
+            statuses = set(mine["status"])
+            priced = bool(((mine["status"] == "verified") & mine["last_price"].notna()).any())
+            if "verified" in statuses:
+                location = "verified"
+            elif statuses & {"probable", "pending_verification", "needs_relocation", "rejected"}:
+                location = "candidate"
+            else:
+                location = "none"
+            if priced:
+                extraction = "verified"
+            elif statuses & {"verified", "probable"}:
+                extraction = "incomplete"
+            elif statuses & {"rejected", "needs_relocation"}:
+                extraction = "failed"
+            else:
+                extraction = "untested"
+            if cfg["access_status"] == "blocked":
+                operability = "blocked"
+            elif cfg["access_status"] == "robots_restricted":
+                operability = "not_operational"
+            elif cfg["terms_reviewed"] and cfg["access_status"] == "robots_allowed":
+                operability = "authorized"
+            else:
+                operability = "pending_review"
+            rows.append({"competitor_id": cfg["competitor_id"], "name": cfg["name"], "location": location,
+                         "extraction": extraction, "operability": operability,
+                         "offers": int(offers.get(cfg["competitor_id"], 0)),
+                         "comparable": int(comparable.get(cfg["name"], 0))})
+        return pd.DataFrame(rows)
 
     @staticmethod
     def connector_status(row: dict) -> str:
@@ -158,26 +276,163 @@ class WebPriceSearch:
             connection.execute("UPDATE competitors SET market=?,currency=? WHERE id=?", (market, currency, competitor_id))
 
     def add_known_url(self, competitor_id: str, ean: str, url: str) -> None:
-        """Register a product page a person already knows; it is verified (not trusted) on the next lookup."""
+        """Register a page a person already knows without querying it: it stays pending until it is verified."""
         product, config = self._product(ean), self.config(competitor_id)
-        if urlparse(url).scheme != "https" or not _same_site(url, config["domain"]):
-            raise WebSearchError("La URL debe ser HTTPS y del dominio del competidor")
+        self._store_pending(product, competitor_id, validate_competitor_url(url, config["domain"]),
+                            "Aportada manualmente; pendiente de verificar")
+
+    def _registered(self, competitor_id: str, ean: str) -> list[dict]:
+        with self.store._connect() as connection:
+            return [dict(r) for r in connection.execute(
+                "SELECT * FROM competitor_product_urls WHERE competitor_id=? AND ean=?", (competitor_id, ean))]
+
+    def _store_pending(self, product: dict, competitor_id: str, url: str, note: str) -> None:
+        stamp = _iso(self._now())
         with self.store._connect() as connection, connection:
-            connection.execute("""INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at)
-                VALUES(?,?,?,'manual_review','probable',?) ON CONFLICT(competitor_id,ean,url) DO UPDATE SET
-                status=CASE WHEN status='needs_relocation' THEN 'probable' ELSE status END""",
-                               (competitor_id, product["ean"], url, _iso(self._now())))
+            connection.execute("""
+                INSERT INTO competitor_product_urls(competitor_id,ean,url,match_status,status,verified_at,source,note,
+                    submitted_at) VALUES(?,?,?,'manual_review','pending_verification',?,'user',?,?)
+                ON CONFLICT(competitor_id,ean,url) DO UPDATE SET note=excluded.note,
+                    status=CASE WHEN status IN ('verified','probable') THEN status ELSE 'pending_verification' END""",
+                               (competitor_id, product["ean"], url, stamp, note[:300], stamp))
+
+    def needs_url(self, ean: str, competitor_id: str) -> bool:
+        """True when the user should be asked for the page: nothing current is registered (a pending URL counts)."""
+        return not any(r["status"] in CURRENT_URL_STATES for r in self._registered(competitor_id, normalize_gtin(ean)))
+
+    def url_state(self, ean: str, competitor_id: str) -> dict[str, str]:
+        """How the registered page of a product at a competitor must be presented."""
+        rows = {r["status"]: r for r in self._registered(competitor_id, normalize_gtin(ean))}
+        blocked = self.config(competitor_id)["access_status"] == "blocked"
+        for status in ("verified", "probable", "pending_verification", "needs_relocation", "rejected"):
+            row = rows.get(status)
+            if row is None:
+                continue
+            if status == "verified":
+                key_ = "auto" if row["source"] == "auto" else "verified_user"
+            elif status == "pending_verification":
+                key_ = "blocked" if blocked else "pending"
+            else:
+                key_ = {"probable": "probable", "needs_relocation": "relocation", "rejected": "wrong"}[status]
+            return {"key": key_, "text": URL_STATE_TEXT[key_], "url": row["url"], "note": row["note"]}
+        return {"key": "none", "text": URL_STATE_TEXT["none"], "url": "", "note": ""}
+
+    def submit_url(self, ean: str, competitor_id: str, url: str, *, replace: bool = False,
+                   fetcher: WebFetcher | None = None) -> Submission:
+        """A person supplies the exact product page. It is validated, checked against the access rules, read once and
+        verified against the requested product; being supplied by a person never makes it verified."""
+        product, config = self._product(ean), self.config(competitor_id)
+        try:
+            clean = validate_competitor_url(url, config["domain"])
+        except WebSearchError as exc:
+            return Submission("invalid", str(exc))
+        rows = self._registered(competitor_id, product["ean"])
+        if any(r["url"] == clean and r["status"] in {"verified", "probable"} for r in rows):
+            return Submission("duplicate", "Esta URL ya está registrada para este producto y competidor.", clean)
+        current = [r for r in rows if r["status"] in {"verified", "probable"} and r["url"] != clean]
+        if current and not replace:
+            return Submission("already_registered", f"Ya hay una ficha vigente ({current[0]['url']}). "
+                                                    "Marque «Sustituir la ficha registrada» para cambiarla.", clean)
+        lock = self._lock(competitor_id)
+        try:
+            lock.acquire()
+        except Timeout:
+            return Submission("error", "Otra ejecución está consultando a este competidor", clean)
+        try:
+            return self._verify_submitted(product, competitor_id, clean, replace, fetcher)
+        finally:
+            lock.release()
+
+    def _verify_submitted(self, product: dict, competitor_id: str, url: str, replace: bool,
+                          fetcher: WebFetcher | None) -> Submission:
+        config = self.config(competitor_id)
+        fetcher = fetcher or self._factory(config)
+        if config["access_status"] == "unknown":
+            self.check_access(competitor_id, fetcher=fetcher)
+            config = self.config(competitor_id)
+        reason = self._gate(config)
+        if reason:
+            return self._keep_pending(product, config, url, reason, self._gate_reason(config))
+        try:
+            outcome = self._visit(product, config, fetcher, url, "user", persist_index=False)
+        except ConnectorBlocked as exc:
+            self._note_failure(competitor_id, str(exc), blocked=True)
+            return self._keep_pending(product, self.config(competitor_id), url, str(exc), failure_reason(exc))
+        except RobotsDenied as exc:
+            return self._keep_pending(product, config, url, str(exc), "robots")
+        except ConnectorError as exc:
+            code = failure_reason(exc)
+            return self._submission("error", f"No se pudo consultar la ficha: {exc}.", url, reason=code)
+        self._touch_query(competitor_id, ok=outcome.state != "error")
+        if outcome.state == "exact":
+            self._upsert_index(product, config, outcome, source="user", note="URL aportada y verificada")
+            self._supersede(competitor_id, product["ean"], url, replace)
+            problem = self.record(outcome)
+            text = "Coincidencia exacta: URL verificada y guardada."
+            return self._submission("verified", f"{text} {problem}".strip(), url, outcome, outcome.reason)
+        if outcome.state == "probable":
+            return self._submission("needs_confirmation", f"Coincidencia probable o ambigua: {outcome.detail}", url,
+                                    outcome, outcome.reason or "ambiguous")
+        if outcome.state == "rejected":
+            self._upsert_index(product, config, outcome, source="user", note="URL aportada: producto distinto")
+            return self._submission("rejected", f"Coincidencia incorrecta: {outcome.detail}", url, outcome,
+                                    outcome.reason)
+        if outcome.reason == "no_product_data":
+            self._store_pending(product, competitor_id, url, "Extracción fallida: la página no publica datos de producto")
+            return self._submission("needs_review", f"{outcome.detail}.", url, outcome, outcome.reason)
+        return self._submission("error", outcome.detail or "La página no se pudo interpretar", url, outcome,
+                                outcome.reason or "temporary")
+
+    @staticmethod
+    def _submission(state: str, message: str, url: str = "", outcome: Outcome | None = None,
+                    reason: str = "") -> Submission:
+        """Append what to do next so every failure says what happened and what the person can do."""
+        help_text, action = FAILURES.get(reason, ("", "none"))
+        return Submission(state, f"{message} {help_text}".strip(), url, outcome, reason, action)
+
+    @staticmethod
+    def _gate_reason(config: dict) -> str:
+        if config["access_status"] == "blocked":
+            return "captcha" if re.search(r"captcha|antibot", config.get("last_error") or "", re.I) else "http_blocked"
+        return {"robots_restricted": "robots", "pending_authorization": "authorization"}.get(
+            config["access_status"], "unchecked")
+
+    def save_for_review(self, submission: Submission, *, replace: bool = False) -> Submission:
+        """Store a probable page, after a person confirmed it, as a reference pending review. It never yields a
+        comparable offer: the page is not recorded and its match status stays non-exact."""
+        outcome = submission.outcome
+        if submission.state != "needs_confirmation" or outcome is None:
+            raise WebSearchError("Solo se pueden guardar coincidencias probables pendientes de confirmar")
+        product, config = self._product(outcome.ean), self.config(outcome.competitor_id)
+        self._upsert_index(product, config, outcome, source="user",
+                           note="Probable: confirmada por una persona; pendiente de revisión")
+        self._supersede(outcome.competitor_id, product["ean"], submission.url, replace)
+        return Submission("saved_for_review", "Guardada como referencia pendiente de revisión; no genera ofertas "
+                                              "comparables.", submission.url, outcome)
+
+    def _keep_pending(self, product: dict, config: dict, url: str, reason: str, code: str) -> Submission:
+        self._store_pending(product, config["competitor_id"], url, reason)
+        state = "blocked" if config["access_status"] == "blocked" else "not_allowed"
+        return self._submission(state, f"{reason}. La URL queda guardada como pendiente de verificación; no se "
+                                       "consulta.", url, reason=code)
+
+    def _supersede(self, competitor_id: str, ean: str, keep: str, replace: bool) -> None:
+        """A new verified page replaces dead ones (and, if asked, current ones). Offer history is untouched."""
+        states = "('needs_relocation','verified','probable')" if replace else "('needs_relocation')"
+        with self.store._connect() as connection, connection:
+            connection.execute(f"""UPDATE competitor_product_urls SET status='replaced' WHERE competitor_id=? AND ean=?
+                AND url<>? AND status IN {states}""", (competitor_id, ean, keep))
 
     def _lock(self, competitor_id: str) -> FileLock:
         # Same lock as price_scheduler: a manual search and a scheduled run never hit a competitor together.
         return FileLock(f"{self.store.database_path}.competitor-{competitor_id}.lock", timeout=0)
 
     # access -----------------------------------------------------------------------------------
-    def check_access(self, competitor_id: str) -> dict[str, Any]:
+    def check_access(self, competitor_id: str, fetcher: WebFetcher | None = None) -> dict[str, Any]:
         """Read robots.txt once and record whether public product pages may be consulted by an agent."""
         config = self.config(competitor_id)
         base = config["site_url"]
-        fetcher = self._factory(config)
+        fetcher = fetcher or self._factory(config)
         stamp = _iso(self._now())
         try:
             rules = fetcher.rules(base)
@@ -220,9 +475,12 @@ class WebPriceSearch:
 
     def _indexed(self, competitor_id: str, ean: str) -> list[dict]:
         with self.store._connect() as connection:
-            return [dict(r) for r in connection.execute("""
-                SELECT * FROM competitor_product_urls WHERE competitor_id=? AND ean=? AND status IN ('verified','probable')
-                ORDER BY CASE status WHEN 'verified' THEN 0 ELSE 1 END, verified_at DESC""", (competitor_id, ean))]
+            rows = connection.execute("""
+                SELECT * FROM competitor_product_urls WHERE competitor_id=? AND ean=?
+                  AND status IN ('verified','probable','pending_verification')
+                ORDER BY CASE status WHEN 'verified' THEN 0 WHEN 'probable' THEN 1 ELSE 2 END, verified_at DESC
+                """, (competitor_id, ean))
+            return [dict(r) for r in rows]
 
     def _known_urls(self, competitor_id: str, ean: str) -> set[str]:
         with self.store._connect() as connection:
@@ -236,7 +494,7 @@ class WebPriceSearch:
         outcome = Outcome(product["ean"], competitor_id, config["name"], "not_found")
         reason = self._gate(config)
         if reason:
-            outcome.state, outcome.detail = "not_allowed", reason
+            outcome.state, outcome.detail, outcome.reason = "not_allowed", reason, self._gate_reason(config)
             return outcome
         fetcher = fetcher or self._factory(config)
         strategies = config["locate_strategy"].split(",")
@@ -255,16 +513,16 @@ class WebPriceSearch:
                 if found.state == "exact":
                     break
         except ConnectorBlocked as exc:
-            outcome.state, outcome.detail = "blocked", str(exc)
+            outcome.state, outcome.detail, outcome.reason = "blocked", str(exc), failure_reason(exc)
             self._note_failure(competitor_id, str(exc), blocked=True)
             outcome.requests = fetcher.requests
             return outcome
         except RobotsDenied as exc:
-            outcome.state, outcome.detail = "not_allowed", str(exc)
+            outcome.state, outcome.detail, outcome.reason = "not_allowed", str(exc), "robots"
             outcome.requests = fetcher.requests
             return outcome
         except ConnectorError as exc:
-            outcome.state, outcome.detail = "error", str(exc)
+            outcome.state, outcome.detail, outcome.reason = "error", str(exc), failure_reason(exc)
             self._note_failure(competitor_id, str(exc))
             outcome.requests = fetcher.requests
             return outcome
@@ -345,14 +603,14 @@ class WebPriceSearch:
         try:
             fetched = fetcher.get(url)
         except PageGone as exc:
-            outcome.detail = str(exc)
+            outcome.detail, outcome.reason = str(exc), "gone"
             if persist_index:
                 self._mark_relocation(competitor_id, product["ean"], url)
             return outcome
         page = extract_product(fetched.text, fetched.url, price_selector=config["price_selector"],
                                availability_selector=config["availability_selector"], tax_policy=config["tax_policy"])
         if page is None:
-            outcome.detail = "La página no publica datos de producto"
+            outcome.detail, outcome.reason = "La página no publica datos de producto", "no_product_data"
             return outcome
         match = classify(product, page.candidate())
         status = match.status
@@ -360,34 +618,42 @@ class WebPriceSearch:
             status = "manual_review"
             match.reasons.append("Ficha ambigua (varias variantes u ofertas): revisión manual")
         outcome.page, outcome.url, outcome.match_status = page, fetched.url, status
+        if not _same_site(fetched.url, config["domain"]):
+            outcome.state, outcome.detail = "error", "La URL redirige fuera del dominio del competidor"
+            outcome.reason = "redirect"
+            return outcome
         outcome.notes = [*match.reasons, *page.notes]
         outcome.method = f"web:{page.method}"
         outcome.state = {EXACT: "exact", PROBABLE: "probable", REJECTED: "rejected"}.get(status, "probable")
         outcome.detail = "; ".join(outcome.notes)
+        outcome.reason = comparability_gap(page, config) if outcome.state == "exact" else (
+            "ambiguous" if status == "manual_review" else mismatch_reason(status, match.reasons))
         if persist_index and outcome.state in {"exact", "probable", "rejected"}:
             self._upsert_index(product, config, outcome)
         return outcome
 
     # persistence ------------------------------------------------------------------------------
-    def _upsert_index(self, product: dict, config: dict, outcome: Outcome) -> None:
+    def _upsert_index(self, product: dict, config: dict, outcome: Outcome, *, source: str = "auto",
+                      note: str = "") -> None:
         page = outcome.page
         status = {"exact": "verified", "probable": "probable", "rejected": "rejected"}[outcome.state]
         stamp = _iso(self._now())
         with self.store._connect() as connection, connection:
             connection.execute("""
                 INSERT INTO competitor_product_urls(competitor_id,ean,url,model_code,color_code,caliber,ean_published,
-                    match_status,status,verified_at,last_price,last_availability,last_ok_at,failures)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+                    match_status,status,verified_at,last_price,last_availability,last_ok_at,failures,source,note)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)
                 ON CONFLICT(competitor_id,ean,url) DO UPDATE SET match_status=excluded.match_status,
                     status=excluded.status,verified_at=excluded.verified_at,caliber=excluded.caliber,
                     ean_published=excluded.ean_published,failures=0,
+                    note=CASE WHEN excluded.note<>'' THEN excluded.note ELSE competitor_product_urls.note END,
                     last_price=COALESCE(excluded.last_price,competitor_product_urls.last_price),
                     last_availability=CASE WHEN excluded.last_price IS NULL THEN competitor_product_urls.last_availability
                                            ELSE excluded.last_availability END,
                     last_ok_at=COALESCE(excluded.last_ok_at,competitor_product_urls.last_ok_at)
             """, (config["competitor_id"], product["ean"], outcome.url, product["model"], product["color"],
                   page.caliber, page.ean_published, outcome.match_status, status, stamp, page.price,
-                  page.availability, stamp if outcome.state == "exact" and page.has_price else None))
+                  page.availability, stamp if outcome.state == "exact" and page.has_price else None, source, note))
 
     def _mark_relocation(self, competitor_id: str, ean: str, url: str) -> None:
         with self.store._connect() as connection, connection:
@@ -516,7 +782,8 @@ class WebPriceSearch:
                     base = {"EAN": product["ean"], "Competidor": config["name"], "Modelo": product["model"],
                             "Color": product["color"], "Calibre": product.get("caliber", ""), "Precio": None,
                             "Diferencia €": None, "Diferencia %": None, "Stock": "", "Última revisión": "",
-                            "Estado": "", "Ficha": "", "Origen": ""}
+                            "Estado": "", "Ficha": "", "Origen": "",
+                            "Ficha registrada": self.url_state(product["ean"], competitor_id)["text"]}
                     if offer is None:
                         base["Estado"] = self._empty_state(connection, config, product["ean"])
                         rows.append(base)
@@ -565,6 +832,60 @@ class WebPriceSearch:
 def _same_site(url: str, domain: str) -> bool:
     host = (urlparse(url).hostname or "").lower().removeprefix("www.")
     return host == domain or host.endswith("." + domain)
+
+
+def validate_competitor_url(url: str, domain: str) -> str:
+    """Return the cleaned URL or raise: HTTPS only, the competitor's own domain, no credentials, no custom port,
+    no IP literal or local name. Fragments are dropped. DNS targets are checked again when the page is fetched."""
+    raw = (url or "").strip()
+    if not raw or len(raw) > MAX_URL_LENGTH or any(ch.isspace() or ord(ch) < 32 for ch in raw):
+        raise WebSearchError("La URL no es válida")
+    parts = urlparse(raw)
+    if parts.scheme != "https":
+        raise WebSearchError("La URL debe usar HTTPS")
+    try:
+        host, port = (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        raise WebSearchError("La URL no es válida") from None
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise WebSearchError("La URL no puede incluir credenciales")
+    if port not in (None, 443):
+        raise WebSearchError("La URL no puede usar un puerto no estándar")
+    if not host or "." not in host or host.endswith(".local") or re.fullmatch(r"[\d.]+|[0-9a-f:]+", host):
+        raise WebSearchError("La URL debe usar el nombre de dominio del competidor, no una dirección IP o local")
+    if not _same_site(raw, domain):
+        raise WebSearchError(f"La URL no pertenece al dominio autorizado del competidor ({domain})")
+    return parts._replace(netloc=host, fragment="").geturl()
+
+
+MAX_URL_LENGTH = 500
+LOCATION_TEXT = {"none": "Sin ficha", "candidate": "URL candidata", "verified": "Ficha verificada"}
+EXTRACTION_TEXT = {"untested": "Sin probar", "verified": "Verificada con datos reales", "incomplete": "Incompleta",
+                   "failed": "Fallida"}
+OPERABILITY_TEXT = {"pending_review": "Pendiente de revisión de condiciones", "authorized": "Autorizado",
+                    "blocked": "Bloqueado", "not_operational": "No operativo (robots.txt)"}
+CURRENT_URL_STATES = {"verified", "probable", "pending_verification"}
+URL_STATE_TEXT = {
+    "auto": "Ficha localizada automáticamente",
+    "pending": "URL aportada por el usuario, pendiente de verificar",
+    "verified_user": "URL verificada y guardada",
+    "wrong": "Coincidencia incorrecta",
+    "blocked": "Acceso bloqueado",
+    "probable": "Coincidencia probable: pendiente de revisión",
+    "relocation": "La ficha ya no responde: facilite la nueva URL",
+    "none": "Sin ficha registrada",
+}
+
+
+@dataclass
+class Submission:
+    state: str  # verified | needs_confirmation | saved_for_review | rejected | blocked | not_allowed | invalid |
+    #             duplicate | already_registered | needs_review | error
+    message: str
+    url: str = ""
+    outcome: Outcome | None = None
+    reason: str = ""  # key of FAILURES
+    action: str = ""  # url | review | wait | authorization | retry | none
 
 
 class WebFichaConnector:
