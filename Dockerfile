@@ -63,7 +63,7 @@ COPY scripts/regenerate_image_thumbnails.py ./scripts/regenerate_image_thumbnail
 COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh
 COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY price_comparator.py vytria_price_sync.py price_connectors.py price_scheduler.py price_analytics.py price_web.py price_web_extract.py price_web_fetch.py .
-COPY price_references.py price_observations.py competitor_requirements.py .
+COPY price_references.py price_observations.py competitor_requirements.py price_known_urls.py .
 COPY assets ./assets
 COPY logo ./logo
 COPY scripts/write_build_info.py ./scripts/write_build_info.py

@@ -108,6 +108,9 @@ Tres dimensiones independientes, calculadas con los campos existentes (`competit
 La extracción correcta no autoriza consultas periódicas. La tabla muestra además «Ofertas» (EAN con oferta registrada) y
 «Comparables» (vigentes, con identificación, IVA, mercado, moneda y stock confirmados). Hoy ninguno está «Autorizado».
 
+Las fichas importadas con `price_known_urls.py` aparecen como «Ficha candidata conocida, pendiente de verificar» y no cuentan
+como ofertas ni como competidor con precio. Ver [IMPORTAR_FICHAS.md](IMPORTAR_FICHAS.md).
+
 ## Mensajes cuando falla una URL
 
 `Submission.reason` y `Submission.action` (también `Outcome.reason`) indican la causa y qué hacer. Cada mensaje explica
