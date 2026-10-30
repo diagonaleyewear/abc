@@ -94,6 +94,41 @@ verificar · URL verificada y guardada · Coincidencia incorrecta · Acceso bloq
   239 € / 187 € (sin stock) / 219 €.
 - Resto de competidores: acceso comprobado, fichas no localizadas todavía (sin fichas conocidas ni sitemap probado).
 
+## Estados por competidor (pestaña Competidores)
+
+Tres dimensiones independientes, calculadas con los campos existentes (`competitor_product_urls`, `competitor_web_config`,
+`offers`); no hay migraciones nuevas.
+
+| Dimensión | Valores |
+|---|---|
+| Localización | Sin ficha · URL candidata (probable, pendiente, retirada o descartada) · Ficha verificada |
+| Extracción | Sin probar · Verificada con datos reales (ficha verificada con precio) · Incompleta (sin precio o solo probable) · Fallida (ficha descartada o retirada) |
+| Operatividad | Pendiente de revisión de condiciones · Autorizado (condiciones revisadas por una persona y robots.txt permite) · Bloqueado (403/429/CAPTCHA) · No operativo (robots.txt) |
+
+La extracción correcta no autoriza consultas periódicas. La tabla muestra además «Ofertas» (EAN con oferta registrada) y
+«Comparables» (vigentes, con identificación, IVA, mercado, moneda y stock confirmados). Hoy ninguno está «Autorizado».
+
+## Mensajes cuando falla una URL
+
+`Submission.reason` y `Submission.action` (también `Outcome.reason`) indican la causa y qué hacer. Cada mensaje explica
+qué ha pasado.
+
+| Causa | Qué ocurre con la URL | Acción |
+|---|---|---|
+| `gone` (404/410) | No se guarda | Facilitar otra URL |
+| `wrong_product` / `variant_differs` / `ean_conflict` | Se guarda como descartada; el histórico no se toca | Facilitar la URL correcta (sustituye) |
+| `ambiguous` | Pide confirmación; solo referencia pendiente | Confirmar o descartar |
+| `no_product_data` | Se conserva pendiente | Revisión del extractor; no se pide otra URL |
+| `no_price` | Ficha verificada, sin oferta | Revisión del extractor; no se pide otra URL |
+| `vat_unconfirmed` | Ficha verificada; oferta no comparable | Confirmar IVA en la web y en el competidor |
+| `market_currency` | Ficha verificada; oferta no comparable | Confirmar mercado y moneda (EUR/ES) |
+| `robots` / `authorization` | Se conserva pendiente; no se consulta | Esperar a la autorización |
+| `http_blocked` (403/429) / `captcha` | Se conserva pendiente; no se reintenta ni es «producto inexistente» | Esperar |
+| `temporary` (conexión, 5xx) | No se guarda nada | Reintentar manualmente más tarde |
+| `unchecked` | Se conserva pendiente | Repetir la comprobación de robots.txt |
+
+Cuando la acción es revisión, espera o autorización la interfaz oculta el campo de URL. Tests: `tests/test_price_web_failures.py`.
+
 ## Validación de 14 fichas candidatas (2026-10-30, una consulta por URL, base temporal)
 
 Estados independientes: ficha localizada / extracción verificada / operativo. Ninguno es operativo.

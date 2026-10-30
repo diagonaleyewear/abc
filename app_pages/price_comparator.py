@@ -16,7 +16,9 @@ from price_comparator import (
 )
 from price_connectors import CONNECTORS, ConnectorError
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
-from price_web import WebPriceSearch, WebSearchError
+from price_web import (
+    EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError,
+)
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
 
 
@@ -52,8 +54,9 @@ WEB_STATE_TEXT = {
 WEB_LEVEL_TEXT = {"ean": "EAN exacto", "brand_model_color": "marca + modelo + color", "model_color": "modelo + color",
                   "normalized_variants": "variante normalizada de la referencia"}
 WEB_STATUS_TEXT = {
-    "implemented": "Implementado, sin verificar", "verified": "Verificado con oferta real",
-    "operational": "Operativo", "blocked": "Bloqueado por el sitio", "not_allowed": "robots.txt no lo permite",
+    "implemented": "Implementado, sin verificar", "verified": "Extracción verificada; condiciones sin revisar",
+    "operational": "Autorizado y con extracción verificada", "blocked": "Bloqueado por el sitio",
+    "not_allowed": "robots.txt no lo permite",
     "pending_authorization": "Pendiente de autorización",
 }
 WEB_ACCESS_TEXT = {
@@ -472,8 +475,8 @@ def _render_url_prompt(search: WebPriceSearch, ean: str, cid: str, name: str, la
             st.rerun()
         return
     if sub is not None:
-        {"verified": box.success, "saved_for_review": box.info}.get(sub.state, box.warning)(sub.message)
-        if sub.state in {"verified", "saved_for_review"}:
+        _show_submission(box, sub)
+        if sub.state in {"verified", "saved_for_review"} or sub.action in {"review", "wait", "authorization"}:
             return
     url = box.text_input("URL de la ficha (HTTPS, del sitio del competidor)", key=f"web_url_{ean}_{cid}")
     if box.button("Verificar y guardar", key=f"web_submit_{ean}_{cid}", disabled=not url.strip()):
@@ -495,7 +498,17 @@ def _render_url_replacement(search: WebPriceSearch, registered: list[tuple[str, 
             if sub.state == "needs_confirmation":
                 st.session_state[f"web_sub_{ean}_{cid}"] = sub
                 st.rerun()
-            {"verified": st.success}.get(sub.state, st.warning)(sub.message)
+            _show_submission(st, sub)
+
+
+def _show_submission(target, sub) -> None:
+    """A verified page whose offer is not comparable (VAT, market, price) is shown as a warning, not as success."""
+    if sub.state == "verified" and not sub.reason:
+        target.success(sub.message)
+    elif sub.state == "saved_for_review":
+        target.info(sub.message)
+    else:
+        target.warning(sub.message)
 
 
 def _render_comparison(store: PriceComparatorStore, data: dict) -> None:
@@ -617,18 +630,25 @@ def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
     scheduler = _make_scheduler(store)
     overview = scheduler.overview().set_index("name")
     pairs = data["pairs"]
+    comparable = pairs["competitor"].value_counts().to_dict() if not pairs.empty else {}
+    states = _make_web_search(store).competitor_states(comparable).set_index("name")
     rows = []
     for item in coverage.to_dict("records"):
         name = item["competitor"]
+        state = states.loc[name] if name in states.index else None
         rows.append({
             "Competidor": name,
             "Web": competitors.loc[name, "url"] if name in competitors.index else "",
+            "Localización": LOCATION_TEXT[state["location"]] if state is not None else "—",
+            "Extracción": EXTRACTION_TEXT[state["extraction"]] if state is not None else "—",
+            "Operatividad": OPERABILITY_TEXT[state["operability"]] if state is not None else "—",
+            "Ofertas": int(state["offers"]) if state is not None else 0,
+            "Comparables": int(state["comparable"]) if state is not None else 0,
             "Estado": STATUS_TEXT.get(item["integration_status"], item["integration_status"]),
             "Método": item["method"] or "—",
             "Restricciones": item["restrictions"] or "—",
             "Referencias localizadas": int(item["references_located"]),
             "Ofertas confirmadas": int(item["confirmed_offers"]),
-            "Ofertas comparables vigentes": int((pairs["competitor"] == name).sum()),
             "Última comprobación": item["last_checked_at"] or "—",
             "Planificador": overview.loc[name, "state_label"] if name in overview.index else "—",
         })
@@ -637,9 +657,11 @@ def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
         return
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True, column_config={
         "Web": st.column_config.LinkColumn("Web", display_text=r"https?://(?:www\.)?([^/]+)")})
-    st.caption("Ningún competidor figura como operativo: hace falta un conector verificado con acceso autorizado y "
-               "al menos una oferta confirmada. Una URL pública o un robots.txt permisivo no equivalen a "
-               "autorización para consultas automáticas.")
+    st.caption("Tres estados independientes. **Localización**: si hay una ficha del producto. **Extracción**: si "
+               "el extractor obtuvo datos reales. **Operatividad**: solo «Autorizado» cuando una persona revisó las "
+               "condiciones de uso y robots.txt lo permite; que la extracción funcione no autoriza consultas "
+               "periódicas. «Comparables»: ofertas vigentes con identificación, IVA, mercado, moneda y stock "
+               "confirmados. Una URL pública o un robots.txt permisivo no equivalen a autorización.")
     st.subheader("Qué necesitamos de Vytria para obtener precios reales")
     for item in coverage.to_dict("records"):
         restrictions, needed = requirement_for(item["competitor"])
