@@ -37,10 +37,7 @@ STATUS_TEXT = {
     "pending_authorization": "Pendiente de autorización", "blocked": "Bloqueado por el sitio",
     "manual_verified": "Solo importación manual verificada", "operational": "Operativo",
 }
-# Selected tags follow the corporate green (#417B7B, 4.8:1 against white) whatever the active Streamlit theme.
 PAGE_STYLE = """<style>
-.stApp span[data-baseweb="tag"] { background-color: #417B7B; color: #FFFFFF; }
-.stApp span[data-baseweb="tag"] svg { fill: #FFFFFF; }
 [data-testid="stMetricValue"] { font-size: 1.5rem; line-height: 1.2; }
 [data-testid="stMetricLabel"] p, [data-testid="stMetricValue"] div { white-space: normal; overflow-wrap: anywhere; line-height: 1.25; }
 </style>"""

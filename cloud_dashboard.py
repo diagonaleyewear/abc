@@ -1,6 +1,5 @@
 """Cloud home reads bounded persisted status only: no Odoo, providers or asset scans."""
 from dataclasses import dataclass, field
-import base64
 from datetime import datetime
 import json
 import os
@@ -17,6 +16,7 @@ from build_info import render_build_footer
 from kering_images import ConfigStore, data_root
 from order_alerts import default_order_alert_store_path, scheduler_state, RESULT_LABELS
 from process_activity import activity_path, read_state
+from cloud_design import home_header_html, inject_styles, render
 
 
 MADRID = ZoneInfo("Europe/Madrid")
@@ -231,17 +231,11 @@ def render_dashboard(pages: dict, loader=dashboard_snapshot):
     if role not in {"admin", "masterdata"}:
         st.error("Acceso reservado a usuarios autenticados.")
         return
-    header = st.columns([2, 5])
-    with header[0]:
-        if LOGO.is_file():
-            logo = base64.b64encode(LOGO.read_bytes()).decode("ascii")
-            st.html(f'<img src="data:image/png;base64,{logo}" alt="Óptica Diagonal" '
-                    'style="width:240px;max-width:100%;height:auto;border:0;display:block">')
-        else:
-            st.caption("Logo Diagonal pendiente: logo/logo.png")
-    with header[1]:
-        st.title("Cloud Diagonal")
-        st.caption("Catálogo, imágenes y automatizaciones")
+    inject_styles()
+    if LOGO.is_file():
+        render(home_header_html(LOGO.read_bytes(), variant="a"))
+    else:
+        st.caption("Logo Diagonal pendiente: logo/logo.png")
     refresh = st.button("Actualizar", icon=":material/refresh:", type="primary")
     snapshot = st.session_state.get("cloud_home_snapshot")
     if refresh or not snapshot or snapshot["role"] != role:

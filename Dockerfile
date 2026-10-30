@@ -65,6 +65,8 @@ COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY price_comparator.py vytria_price_sync.py price_connectors.py price_scheduler.py price_analytics.py price_web.py price_web_extract.py price_web_fetch.py .
 COPY price_references.py price_observations.py competitor_requirements.py .
 COPY assets ./assets
+COPY static ./static
+COPY .streamlit/config.toml ./.streamlit/config.toml
 COPY logo ./logo
 COPY scripts/write_build_info.py ./scripts/write_build_info.py
 ARG BUILD_COMMIT
@@ -100,10 +102,6 @@ ENV PYTHONUNBUFFERED=1
 
 # Configurar Streamlit
 RUN echo "\
-[theme]\n\
-primaryColor = '#417B7B'\n\
-base = 'light'\n\
-\n\
 [server]\n\
 port = 8501\n\
 headless = true\n\

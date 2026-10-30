@@ -1,39 +1,56 @@
 """Cloud Diagonal design system: tokens and reusable components.
 
-Colour/radius/font values come from the public Vytria theme (theme.css, custom.css):
-body text #42403B, page tint #fbfbfa, neutral #f2f2f2, border #d9d9d9, accent #003399,
-highlight #FFCB03, radii 0/4px, Arial sans body with Cormorant Garamond for display text.
-The font file is not bundled (licence unverified): headings fall back to Times New Roman (lining figures, so references such as GU1060S stay legible; Georgia uses old-style figures).
+Corporate interaction colours and typography come from .streamlit/config.toml,
+also used by native controls. Inter is bundled with its SIL Open Font License.
+Neutral surfaces, semantic states and existing component geometry are preserved.
 
 Every colour comes from a theme palette (`TOKENS["color"]` light, `TOKENS["color_dark"]` dark) chosen from the
 active Streamlit theme, so text is never painted with a fixed colour over a background it does not own.
 `CONTRAST_PAIRS` lists the text/background pairs that must reach WCAG AA; tests check them for both palettes.
 
-Styles target our own `cd-*` classes plus the documented `st-key-*` classes of containers that this
-design system creates itself (`lib_grid`, `lib_filters`, `lib_card_*`). No Streamlit-internal selectors.
+Component styles target our own classes. Native sidebar/tag colour adapters are
+isolated in build_widget_styles and tested against the pinned Streamlit version.
 Builders return escaped HTML strings so they can be tested without Streamlit.
 """
 from __future__ import annotations
 
 import base64
 from html import escape
+from pathlib import Path
+import tomllib
+
+with (Path(__file__).parent / ".streamlit" / "config.toml").open("rb") as _config:
+    THEME = tomllib.load(_config)["theme"]
+
+BRAND_GREEN = THEME["primaryColor"]
+NAV_ICONS = {
+    "home": ":material/home:", "abc_home": ":material/bar_chart:",
+    "abc_search": ":material/search:", "abc_reports": ":material/monitoring:",
+    "abc_history": ":material/calendar_month:", "abc_detail": ":material/query_stats:",
+    "master_import": ":material/upload_file:", "master_dryrun": ":material/science:",
+    "master_dictionary": ":material/menu_book:", "kering_images": ":material/photo_library:",
+    "masterdata_kering_images": ":material/photo_library:", "provider_images": ":material/storefront:",
+    "luxoptica_images": ":material/image:", "luxoptica_pending": ":material/pending_actions:",
+    "alerts": ":material/notifications:", "reconciliation": ":material/account_balance:",
+    "price_comparator": ":material/price_check:", "settings": ":material/settings:",
+}
 
 TOKENS = {
     "color": {
         "page": "#ffffff", "ink": "#111111", "text": "#42403B", "muted": "#5f5d58", "surface": "#ffffff",
-        "tint": "#fbfbfa", "neutral": "#f2f2f2", "border": "#d9d9d9", "accent": "#003399",
-        "accent_soft": "#eef2fb", "highlight": "#FFCB03", "success": "#1e6b3a", "warning": "#7a5200",
+        "tint": "#fbfbfa", "neutral": "#f2f2f2", "border": "#d9d9d9", "accent": BRAND_GREEN,
+        "accent_soft": "#f4f8f8", "on_accent": "#ffffff", "highlight": "#FFCB03", "success": "#1e6b3a", "warning": "#7a5200",
         "danger": "#b3361a", "frame": "#f4f4f2", "frame_text": "#4a4842",
     },
     "color_dark": {
         "page": "#0e1117", "ink": "#f7f6f2", "text": "#dcdad4", "muted": "#b3b1ab", "surface": "#171b24",
-        "tint": "#12151c", "neutral": "#222732", "border": "#3b4252", "accent": "#9db8ff",
-        "accent_soft": "#1b2a55", "highlight": "#FFCB03", "success": "#6fd596", "warning": "#f2c15c",
+        "tint": "#12151c", "neutral": "#222732", "border": "#3b4252", "accent": THEME["dark"]["primaryColor"],
+        "accent_soft": "#1a3030", "on_accent": "#0e1117", "highlight": "#FFCB03", "success": "#6fd596", "warning": "#f2c15c",
         "danger": "#ff9a82", "frame": "#f4f4f2", "frame_text": "#4a4842",
     },
     "font": {
-        "body": 'Arial, "Helvetica Neue", Helvetica, sans-serif',
-        "display": '"Cormorant Garamond", "Times New Roman", Georgia, serif',
+        "body": THEME["font"],
+        "display": THEME["headingFont"],
     },
     "space": {"xs": "4px", "sm": "8px", "md": "16px", "lg": "24px", "xl": "32px"},
     "radius": {"sm": "0", "md": "4px"},
@@ -52,6 +69,7 @@ CONTRAST_PAIRS = (
     ("accent", "accent_soft", 4.5), ("frame_text", "frame", 4.5),
     ("accent", "tint", 4.5), ("text", "tint", 4.5), ("ink", "tint", 4.5),
     ("success", "tint", 4.5), ("warning", "tint", 4.5), ("danger", "tint", 4.5),
+    ("on_accent", "accent", 4.5),
 )
 
 
@@ -88,6 +106,16 @@ def build_styles(theme: str = "light") -> str:
     _C = palette(theme)
     return f"""
 <style>
+.cd-home {{ display: flex; align-items: center; gap: {_S['lg']}; margin: 0 0 {_S['lg']}; padding: {_S['sm']} 0; font-family: {TOKENS['font']['body']}; }}
+.cd-home__logo {{ display: block; width: 200px; max-width: 40%; height: auto; flex-shrink: 0; }}
+.cd-home__identity {{ min-width: 0; }}
+.cd-home--a .cd-home__logo {{ margin-left: auto; }}
+.cd-home__eyebrow {{ color: {_C['muted']}; font-size: .7rem; font-weight: 500; letter-spacing: .04em; line-height: 1.5; margin: 0 0 {_S['sm']}; }}
+.cd-home__title {{ color: {_C['ink']}; font-family: {TOKENS['font']['body']}; font-size: 2rem; font-weight: 500; line-height: 1.2; margin: 0; }}
+.cd-home__sub {{ color: {_C['muted']}; font-size: .875rem; line-height: 1.5; margin: {_S['xs']} 0 0; overflow-wrap: anywhere; }}
+.cd-home--b {{ background: {_C['tint']}; border: 1px solid {_C['border']}; border-radius: {TOKENS['radius']['md']}; padding: {_S['md']}; }}
+.cd-home--b .cd-home__logo {{ width: 168px; }}
+.cd-home--b .cd-home__identity {{ border-left: 1px solid {_C['border']}; padding-left: {_S['lg']}; }}
 .cd-header {{ padding: {_S['sm']} 0 0; margin-bottom: {_S['sm']}; font-family: {TOKENS['font']['body']}; }}
 .cd-header__title {{ font-family: {TOKENS['font']['display']}; color: {_C['ink']}; font-size: 2rem; font-weight: 600; line-height: 1.15; margin: 0; overflow-wrap: anywhere; }}
 .cd-header__sub {{ color: {_C['muted']}; margin: {_S['xs']} 0 0; font-size: .95rem; }}
@@ -135,6 +163,12 @@ ul.cd-badges li.cd-badge--off {{ color: {_C['muted']}; border-style: dashed; bac
 .cd-pager {{ color: {_C['text']}; font-size: .9rem; text-align: center; padding: {_S['sm']} 0; }}
 @media (max-width: {TOKENS['breakpoint']['mobile']}px) {{
   .cd-header__title {{ font-size: 1.6rem; }}
+  .cd-home {{ gap: {_S['md']}; }}
+  .cd-home__logo {{ width: 128px; }}
+  .cd-home__title {{ font-size: 1.25rem; }}
+  .cd-home__sub {{ font-size: .8rem; }}
+  .cd-home--b {{ flex-wrap: wrap; }}
+  .cd-home--b .cd-home__identity {{ border-left: 0; padding-left: 0; flex-basis: 100%; }}
 }}
 </style>
 """
@@ -143,6 +177,38 @@ ul.cd-badges li.cd-badge--off {{ color: {_C['muted']}; border-style: dashed; bac
 STYLES = build_styles("auto")
 STYLES_LIGHT = build_styles("light")
 STYLES_DARK = build_styles("dark")
+
+
+def build_widget_styles(theme: str = "auto") -> str:
+    """Pinned native adapters for navigation, tags and contrast on primary fills."""
+    colours = palette(theme)
+    return f"""<style>
+[data-testid="stSidebarNavLink"] {{ color: {colours['text']}; font-weight: 500; }}
+[data-testid="stSidebarNavLink"] span {{ color: inherit; }}
+[data-testid="stSidebarNavLink"]:hover {{ background-color: transparent; color: {colours['accent']}; }}
+[data-testid="stSidebarNavLink"][aria-current="page"] {{ background-color: transparent; color: {colours['accent']}; font-weight: 600; text-decoration: none; }}
+[data-testid="stSidebarNavLink"][aria-current="page"] p {{ text-decoration: underline; text-underline-offset: .25em; }}
+[data-testid="stSidebarNavLink"]:focus-visible {{ outline-color: {colours['accent']}; }}
+[data-testid="stSidebarNav"] [data-testid="stNavSectionHeader"] {{ color: {colours['muted']}; font-size: .75rem; font-weight: 600; letter-spacing: .02em; line-height: 1.5; }}
+.stApp button[kind^="primary"]:not(:disabled) {{ color: {colours['on_accent']}; }}
+.stApp [data-testid="stCheckbox"] label[data-selected="true"]:not([data-disabled]) svg {{ stroke: {colours['on_accent']}; }}
+.stApp span[data-baseweb="tag"]:not([aria-disabled="true"]) {{ background-color: {colours['accent']}; color: {colours['on_accent']}; }}
+.stApp span[data-baseweb="tag"]:not([aria-disabled="true"]) svg {{ fill: currentColor; }}
+.stApp [data-baseweb="select"]:has(input:disabled) span[data-baseweb="tag"] {{ background-color: {colours['neutral']}; color: {colours['muted']}; }}
+</style>"""
+
+
+def home_header_html(logo: bytes, variant: str = "a") -> str:
+    if variant not in {"a", "b"}:
+        raise ValueError(f"Unknown home header variant: {variant}")
+    image = f'<img class="cd-home__logo" src="{image_data_uri(logo)}" alt="Óptica Diagonal">'
+    identity = (
+        '<div class="cd-home__identity"><p class="cd-home__eyebrow">DIAGONAL EYEWEAR</p>'
+        '<h1 class="cd-home__title">Cloud</h1>'
+        '<p class="cd-home__sub">Gestión inteligente, información conectada.</p></div>'
+    )
+    content = identity + image if variant == "a" else image + identity
+    return f'<header class="cd-home cd-home--{variant}">{content}</header>'
 
 
 def image_data_uri(content: bytes) -> str:
@@ -235,6 +301,7 @@ def inject_styles() -> None:
     import streamlit as st
 
     st.html(STYLES)
+    st.html(build_widget_styles())
 
 
 def render(markup: str) -> None:

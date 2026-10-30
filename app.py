@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from engine import load_input_file, run_abcd_engine
+from cloud_design import BRAND_GREEN, inject_styles
 
 
 APP_TITLE = "📦 Control ABCD de Productos"
@@ -19,6 +20,7 @@ def configure_page() -> None:
         page_icon=APP_ICON,
         layout="wide",
     )
+    inject_styles()
 
 
 @st.cache_data
@@ -47,7 +49,7 @@ def style_table(df: pd.DataFrame) -> pd.DataFrame.style:
     pd.set_option("styler.render.max_elements", len(df) * len(df.columns))
     
     abcd_palette = {
-        "A": "background-color: #e63946; color: white",
+        "A": f"background-color: {BRAND_GREEN}; color: white",
         "B": "background-color: #fca311; color: black",
         "C": "background-color: #ffdd57; color: black",
         "D": "background-color: #212121; color: white",

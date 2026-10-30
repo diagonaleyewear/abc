@@ -1,3 +1,18 @@
 [theme]
 primaryColor = "#417B7B"
 base = "light"
+font = "Inter, sans-serif"
+headingFont = "Inter, sans-serif"
+
+[[theme.fontFaces]]
+family = "Inter"
+url = "app/static/fonts/Inter.ttf"
+weight = "100 900"
+style = "normal"
+
+[theme.dark]
+# Accessible tonal counterpart of the same corporate green on dark surfaces.
+primaryColor = "#83B9B9"
+
+[server]
+enableStaticServing = true
