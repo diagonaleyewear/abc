@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import sqlite3
+import threading
 from zipfile import BadZipFile
 
 import pandas as pd
@@ -9,6 +10,7 @@ import streamlit as st
 
 from cloud_design import page_title
 from price_comparator import PriceComparatorStorageError, PriceComparatorStore
+from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
 
 
 OWN_PRICE_COLUMNS = [
@@ -43,6 +45,107 @@ def _excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
         for sheet, frame in sheets.items():
             frame.to_excel(writer, sheet_name=sheet[:31], index=False)
     return output.getvalue()
+
+
+def _make_sync(store: PriceComparatorStore) -> VytriaPriceSync:
+    return VytriaPriceSync(store)
+
+
+def _run_sync(sync: VytriaPriceSync) -> None:
+    # Outcome and errors are persisted in the run log; nothing may escape the worker thread.
+    try:
+        sync.run(trigger="manual")
+    except SyncInProgress:
+        pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _launch(target, *args) -> None:
+    """Run the long Odoo read outside the Streamlit script thread so the page stays responsive."""
+    threading.Thread(target=target, args=args, name="vytria-price-sync", daemon=True).start()
+
+
+@st.fragment(run_every=2)
+def _watch_running_sync(sync: VytriaPriceSync) -> None:
+    if sync.is_running():
+        st.info("Sincronización con Odoo en curso. Puede seguir usando el comparador; esta vista se actualiza sola.")
+    else:
+        st.rerun()
+
+
+def _render_vytria_prices(store: PriceComparatorStore) -> None:
+    sync = _make_sync(store)
+    st.subheader("Precio de venta Vytria")
+    st.caption("Fuente: Odoo, tarifa 59 (Vytria España, EUR). El precio ya incluye IVA y descuentos de la tarifa; "
+               "no se recalcula ni se le suma IVA. Integración de solo lectura. "
+               "Contraste directo con PrestaShop: pendiente (no validado).")
+    last = sync.last_run()
+    prices = sync.prices()
+    confirmed = int(prices["usable"].sum()) if not prices.empty else 0
+    columns = st.columns(4)
+    columns[0].metric("Estado de conexión", {"ok": "Correcta", "partial": "Correcta (con incidencias)",
+                                              "error": "Error", "running": "En curso"}.get(
+        last["status"], last["status"]) if last else "Sin sincronizar")
+    good = sync.last_successful_run()
+    columns[1].metric("Última sincronización correcta",
+                      good["finished_at"][:16].replace("T", " ") if good else "—")
+    columns[2].metric("Con precio confirmado", f"{confirmed}/{len(prices)}")
+    columns[3].metric("Sin precio confirmado", len(prices) - confirmed)
+    if last and last["status"] == "error":
+        st.error(f"La última sincronización falló: {last['error']} Se conservan los últimos precios, "
+                 "marcados como desactualizados cuando superan el plazo de vigencia.")
+
+    running = sync.is_running()
+    if st.button("Actualizar precios Vytria", type="primary", key="sync_vytria_prices", disabled=running):
+        _launch(_run_sync, sync)
+        st.rerun()
+    if running:
+        _watch_running_sync(sync)
+
+    auto = st.toggle("Sincronización diaria automática", value=sync.auto_enabled, key="vytria_auto_sync",
+                     help="Desactivada por defecto. Requiere además un disparador diario aprobado que ejecute "
+                          "`python vytria_price_sync.py --scheduled`.")
+    if auto != sync.auto_enabled:
+        sync.set_auto_enabled(auto)
+    if auto:
+        st.info("Activada: la sincronización sólo se ejecuta cuando el disparador diario aprobado invoque el comando.")
+
+    table = prices.assign(
+        validation=prices["current_status"].map(lambda s: STATUS_LABELS.get(s, s) if isinstance(s, str) else "Sin precio"),
+        iva=prices["price_includes_tax"].map({1: "Incluido", 0: "No incluido"}),
+    )
+    st.dataframe(table[["brand", "commercial_name", "ean", "price", "currency", "iva", "vat_rate", "source",
+                        "synced_at", "validation", "validation_detail", "stale_reason"]].rename(columns={
+        "brand": "Marca", "commercial_name": "Producto", "ean": "EAN", "price": "Precio actual",
+        "currency": "Moneda", "iva": "IVA", "vat_rate": "IVA %", "source": "Origen",
+        "synced_at": "Última sincronización", "validation": "Validación", "validation_detail": "Detalle", "stale_reason": "Incidencia",
+    }), width="stretch", hide_index=True)
+    st.caption("Precio promocional: no aplica; la tarifa 59 ya incorpora los descuentos. "
+               "Disponibilidad: no proviene de esta fuente.")
+    issues = sync.last_issues()
+    if issues:
+        with st.expander(f"Productos sin precio confirmado en la última sincronización ({len(issues)})"):
+            for item in issues:
+                st.write(f"{item['ean']}: {ISSUE_LABELS.get(item['code'], item['code'])} {item['detail']}")
+
+    with st.expander("Contingencia administrativa: importar precios Vytria (.xlsx)"):
+        st.warning("Uso excepcional. No es la operativa habitual. Un precio sincronizado desde Odoo "
+                   "tiene prioridad sobre el importado manualmente para el mismo EAN.")
+        own_file = st.file_uploader("Importar precios Vytria (.xlsx)", type=["xlsx"], key="own_price_upload")
+        if own_file and st.button("Importar precios Vytria", key="import_own_prices"):
+            try:
+                frame = pd.read_excel(BytesIO(own_file.getvalue()), dtype=str).fillna("")
+                result = store.import_own_prices(frame)
+            except (OSError, ValueError, sqlite3.Error, BadZipFile) as exc:
+                st.error(f"No se pudieron importar los precios: {exc}")
+            else:
+                st.session_state["price_comparator_import_reports"] = [("Precios Vytria", result)]
+                st.rerun()
+        st.download_button("Descargar plantilla de precios Vytria",
+                           _excel_bytes({"Precios Vytria": pd.DataFrame(columns=OWN_PRICE_COLUMNS)}),
+                           "plantilla_precios_vytria.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 def render_price_comparator_page() -> None:
@@ -106,24 +209,7 @@ def render_price_comparator_page() -> None:
                 st.rerun()
 
         st.divider()
-        st.subheader("Precio publicado por Vytria")
-        st.caption("No se consulta Odoo automáticamente: hasta confirmar la fuente del precio final de tienda, "
-                   "cárguelo con su mercado, moneda, origen y fecha.")
-        own_file = st.file_uploader("Importar precios Vytria (.xlsx)", type=["xlsx"], key="own_price_upload")
-        if own_file and st.button("Importar precios Vytria", key="import_own_prices"):
-            try:
-                frame = pd.read_excel(BytesIO(own_file.getvalue()), dtype=str).fillna("")
-                result = store.import_own_prices(frame)
-            except (OSError, ValueError, sqlite3.Error, BadZipFile) as exc:
-                st.error(f"No se pudieron importar los precios: {exc}")
-            else:
-                st.session_state["price_comparator_import_reports"] = [("Precios Vytria", result)]
-                st.rerun()
-        template = pd.DataFrame(columns=OWN_PRICE_COLUMNS)
-        st.download_button("Descargar plantilla de precios Vytria",
-                           _excel_bytes({"Precios Vytria": template}),
-                           "plantilla_precios_vytria.xlsx",
-                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        _render_vytria_prices(store)
         st.dataframe(products, width="stretch", hide_index=True)
 
     with offers_tab:
