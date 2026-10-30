@@ -23,6 +23,8 @@ AVAILABILITY_STATES = {"available", "unavailable", "unknown"}
 DEFAULT_DB_PATH = Path(__file__).parent / "masterdata_data" / "price_comparator.sqlite3"
 CLOUD_DATA_DIR = Path("/app/data")
 CLOUD_DB_PATH = CLOUD_DATA_DIR / "price_comparator.sqlite3"
+# A synchronized price older than this is no longer treated as current for commercial comparisons.
+SYNCED_PRICE_MAX_AGE_DAYS = 7
 
 
 class PriceComparatorStorageError(RuntimeError):
@@ -214,6 +216,8 @@ class PriceComparatorStore:
                         validation_status TEXT NOT NULL,
                         validation_detail TEXT NOT NULL DEFAULT '',
                         comparable INTEGER NOT NULL,
+                        stale_since TEXT,
+                        stale_reason TEXT NOT NULL DEFAULT '',
                         fingerprint TEXT NOT NULL,
                         first_seen_at TEXT NOT NULL,
                         changed_at TEXT NOT NULL,
@@ -597,17 +601,28 @@ class PriceComparatorStore:
             competitor_count = connection.execute("SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
             synced = pd.read_sql_query("SELECT * FROM vytria_prices", connection)
 
-        # A synchronized Odoo price supersedes the manual contingency import for its EAN. It is
-        # used only when confirmed (comparable); otherwise the product stays without own price.
+        # A synchronized Odoo price supersedes the manual contingency import for its EAN. It takes part
+        # in comparisons only when validated, not flagged stale by a later incident and recently synced.
+        synced_cutoff = (datetime.now(timezone.utc) - timedelta(days=SYNCED_PRICE_MAX_AGE_DAYS)).isoformat()
         if not synced.empty:
             own = own[~own["ean"].isin(synced["ean"])]
-            confirmed = synced[synced["comparable"] == 1]
+            confirmed = synced[
+                (synced["validation_status"] == "validated") & (synced["comparable"] == 1)
+                & synced["stale_since"].isna() & (synced["synced_at"] >= synced_cutoff)
+            ]
             own = pd.concat([own, pd.DataFrame({
                 "ean": confirmed["ean"], "market": confirmed["market"], "price": confirmed["price"],
                 "promotional_price": None, "currency": confirmed["currency"], "fx_to_eur": 1.0,
                 "captured_at": confirmed["synced_at"], "source": confirmed["source"],
             })], ignore_index=True)
         synced_by_ean = {row["ean"]: row for row in synced.to_dict("records")}
+
+        def synced_status(row: dict[str, Any]) -> str:
+            if row["stale_since"] is not None and not pd.isna(row["stale_since"]):
+                return "stale"
+            if row["synced_at"] < synced_cutoff:
+                return "expired"
+            return row["validation_status"]
 
         rows: list[dict[str, Any]] = []
         for product in products.to_dict("records"):
@@ -665,7 +680,8 @@ class PriceComparatorStore:
                 "market": own_record["market"] if own_record else "",
                 "own_price_source": (own_record["source"] if own_record else
                                      ("Odoo (sin precio confirmado)" if product["ean"] in synced_by_ean else "")),
-                "own_price_status": synced_by_ean.get(product["ean"], {}).get("validation_status", ""),
+                "own_price_status": (synced_status(synced_by_ean[product["ean"]])
+                                     if product["ean"] in synced_by_ean else ""),
             })
         result = pd.DataFrame(rows)
         statuses = {

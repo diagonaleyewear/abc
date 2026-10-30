@@ -25,7 +25,7 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-from price_comparator import PriceComparatorStore, normalize_gtin
+from price_comparator import SYNCED_PRICE_MAX_AGE_DAYS, PriceComparatorStore, normalize_gtin
 
 
 VYTRIA_PRICELIST_ID = 59
@@ -47,6 +47,8 @@ STATUS_LABELS = {
     "tax_issue": "IVA no verificable",
     "currency_issue": "Moneda no EUR",
     "discontinued": "Producto no vendible/descatalogado",
+    "stale": "Desactualizado: incidencia en la última sincronización",
+    "expired": "Desactualizado: sin sincronizar recientemente",
 }
 ISSUE_LABELS = {
     "not_in_odoo": "EAN no encontrado en Odoo",
@@ -409,8 +411,20 @@ class VytriaPriceSync:
         finally:
             lock.release()
 
+    def is_running(self) -> bool:
+        lock = FileLock(self._lock_path, timeout=0)
+        try:
+            lock.acquire()
+        except Timeout:
+            return True
+        lock.release()
+        return False
+
     def _run_locked(self, trigger: str) -> SyncResult:
         with self.store._connect() as connection, connection:
+            # Holding the lock means any run still marked as running died without closing.
+            connection.execute("""UPDATE vytria_sync_runs SET status='error',finished_at=?,
+                error='Interrumpida antes de terminar' WHERE status='running'""", (_now(),))
             run_id = connection.execute(
                 "INSERT INTO vytria_sync_runs(trigger,started_at,status) VALUES(?,?,'running')",
                 (trigger, _now())).lastrowid
@@ -451,6 +465,9 @@ class VytriaPriceSync:
                 chosen, issue = self._choose(by_ean.get(ean, []))
                 if issue:
                     issues.append((ean, *issue))
+                    # The last confirmed price and its history stay, but it is flagged as not re-verified.
+                    connection.execute("""UPDATE vytria_prices SET stale_reason=?,
+                        stale_since=COALESCE(stale_since,?) WHERE ean=?""", (issue[0], now, ean))
                     continue
                 product, row = chosen
                 validation = validate_product(product, row)
@@ -493,7 +510,8 @@ class VytriaPriceSync:
                   float(validation.expected) if validation.expected is not None else None,
                   validation.status, validation.detail, int(validation.comparable), fingerprint)
         if current and current["fingerprint"] == fingerprint:
-            connection.execute("UPDATE vytria_prices SET synced_at=? WHERE ean=?", (now, ean))
+            connection.execute("""UPDATE vytria_prices SET synced_at=?,stale_since=NULL,stale_reason=''
+                                  WHERE ean=?""", (now, ean))
             result.unchanged += 1
             return
         connection.execute("""
@@ -510,7 +528,8 @@ class VytriaPriceSync:
                 source_updated_at=excluded.source_updated_at,expected_price=excluded.expected_price,
                 validation_status=excluded.validation_status,validation_detail=excluded.validation_detail,
                 comparable=excluded.comparable,fingerprint=excluded.fingerprint,
-                changed_at=excluded.changed_at,synced_at=excluded.synced_at
+                changed_at=excluded.changed_at,synced_at=excluded.synced_at,
+                stale_since=NULL,stale_reason=''
         """, (*values, ean, current["first_seen_at"] if current else now, now, now))
         connection.execute("""
             INSERT INTO vytria_price_history(ean,market,price,currency,price_includes_tax,vat_rate,source,
@@ -554,12 +573,19 @@ class VytriaPriceSync:
         import pandas as pd
 
         with self.store._connect() as connection:
-            return pd.read_sql_query("""
+            frame = pd.read_sql_query("""
                 SELECT p.ean,p.brand,p.commercial_name,v.price,v.currency,v.price_includes_tax,v.vat_rate,
                        v.source,v.validation_status,v.validation_detail,v.comparable,v.expected_price,
-                       v.source_updated_at,v.synced_at
+                       v.source_updated_at,v.synced_at,v.stale_since,v.stale_reason
                 FROM products p LEFT JOIN vytria_prices v ON v.ean=p.ean ORDER BY p.brand,p.commercial_name
             """, connection)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=SYNCED_PRICE_MAX_AGE_DAYS)).isoformat()
+        stale = frame["stale_since"].notna()
+        expired = frame["synced_at"].notna() & (frame["synced_at"] < cutoff)
+        frame["current_status"] = frame["validation_status"].where(~expired, "expired").where(~stale, "stale")
+        # Same rule as the comparator dashboard: only fresh, validated prices are commercially usable.
+        frame["usable"] = (frame["validation_status"] == VALIDATED) & (frame["comparable"] == 1) & ~stale & ~expired
+        return frame
 
     def price_history(self, ean: str):
         import pandas as pd

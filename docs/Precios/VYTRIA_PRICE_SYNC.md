@@ -85,3 +85,11 @@ sincronizado desde Odoo tiene prioridad sobre el manual para el mismo EAN.
   hasta confirmarse.
 - La muestra auditada (12 EAN) no contenía mapas 65 % ni CT0649S: se cubren con datos de prueba.
 - El Dockerfile copia `vytria_price_sync.py`; sin él la página del comparador no arranca.
+
+## Revisión previa al merge (PR #88)
+
+- **Vigencia**: un precio sincronizado solo participa en comparaciones si es alidated, comparable, sin incidencia abierta y con sincronización de menos de 7 días (SYNCED_PRICE_MAX_AGE_DAYS). Si no, se muestra como stale (incidencia) o xpired (antiguo) y no se compara.
+- **Incidencias**: ante un fallo de un EAN con precio previo se conserva precio e histórico, se marca `stale_since`/`stale_reason` y no se actualiza `synced_at`. Se limpia al volver a sincronizar correctamente.
+- **Interfaz**: el botón lanza la sincronización en un hilo en segundo plano (bloqueo de fichero junto a la SQLite); la página se refresca cada 2 s mientras corre. Las ejecuciones huérfanas en `running` se cierran como `error` en la siguiente.
+- **Migración**: solo `CREATE TABLE IF NOT EXISTS` de tablas `vytria_*`; no se tocan tablas existentes. Ruta SQLite (PR #87) intacta.
+- **Pendiente**: contraste con PrestaShop y disparador diario (desactivado).

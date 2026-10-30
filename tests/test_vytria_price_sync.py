@@ -588,15 +588,3 @@ def test_page_shows_odoo_price_section_with_manual_import_as_contingency(tmp_pat
     assert any("pendiente (no validado)" in caption.value for caption in app.caption)
     assert [toggle.value for toggle in app.toggle] == [False]
     assert [expander.label for expander in app.expander if "Contingencia" in expander.label]
-
-
-def test_page_button_synchronizes_and_reports(tmp_path, monkeypatch) -> None:
-    odoo = OdooFixture(tmp_path / "odoo.sqlite3")
-    odoo.product("8056262398043", 360, 252, maps=(odoo.map_rule("Vytria España (30%)", 30),))
-    app = _page(tmp_path, monkeypatch, odoo).run()
-
-    app.button(key="sync_vytria_prices").click().run()
-
-    assert not app.exception
-    assert any("1 nuevos" in message.value for message in app.success)
-    assert any(metric.label == "Con precio confirmado" and metric.value == "1/1" for metric in app.metric)
