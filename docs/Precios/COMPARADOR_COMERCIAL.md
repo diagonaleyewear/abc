@@ -49,14 +49,18 @@ Ninguno ha demostrado disponer de API o feed autorizado: eso debe solicitarse a 
 
 ## Planificador (comando independiente)
 
+Guía operativa completa (ejecutar, verificar, detener, recuperar): [PLANIFICADOR_COMPETIDORES.md](PLANIFICADOR_COMPETIDORES.md).
+Resumen:
+
 Tablas en el SQLite persistente: `competitor_schedule`, `scheduler_jobs` (cola persistente, un job por EAN),
 `scheduler_runs`, `offer_checks`, `comparator_settings`.
 
 Ejecutar (desde el contenedor actual, no hay disparador configurado):
 
 ```
-python price_scheduler.py --status
+python price_scheduler.py --status ; python price_scheduler.py --runs 20
 python price_scheduler.py --plan <id>
+python price_scheduler.py --configure <id> --connector feed_csv --source <fichero|URL> --interval-hours 12
 python price_scheduler.py --verify <id> ; python price_scheduler.py --enable <id>
 python price_scheduler.py --once [--competitor <id>] [--workers N] [--force] [--with-odoo]
 python price_scheduler.py --loop --tick-seconds 300

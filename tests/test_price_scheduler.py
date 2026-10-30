@@ -226,3 +226,32 @@ def test_odoo_frequency_is_configurable_and_separate(tmp_path):
     assert sync.interval == timedelta(hours=6)
     with pytest.raises(ValueError):
         sync.set_interval_hours(0)
+
+
+def test_stop_request_keeps_queue_for_the_next_pass(tmp_path):
+    store, scheduler, clock, feed, cid = _setup(tmp_path)
+    scheduler.stop_requested = True
+    assert scheduler.run_once()[0].requests == 0
+    assert feed.calls == 1  # only the verification call
+    with store._connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM scheduler_jobs WHERE status='pending'").fetchone()[0] == 1
+    scheduler.stop_requested = False
+    assert scheduler.run_once()[0].ok == 1
+
+
+def test_cli_configure_status_runs_and_manual_once(tmp_path, monkeypatch, capsys):
+    import price_scheduler
+
+    store, scheduler, *_ , cid = _setup(tmp_path)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(price_scheduler, "CONNECTORS", {"feed_csv": FeedConnector(get=Feed())})
+    assert price_scheduler.main(["--configure", cid, "--interval-hours", "6", "--max-requests", "3"]) == 0
+    config = scheduler.config(cid)
+    assert (config["interval_hours"], config["max_requests_per_run"], bool(config["verified_at"])) == (6, 3, True)
+    assert price_scheduler.main(["--once", "--force", "--competitor", cid]) == 0
+    assert price_scheduler.main(["--status"]) == 0
+    assert price_scheduler.main(["--runs", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "cada 6 h" in out and "[cli] ok" in out and "En ejecución ahora: no" in out
+    assert price_scheduler.main(["--configure", cid, "--interval-hours", "0"]) == 1
+
