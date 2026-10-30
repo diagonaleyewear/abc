@@ -25,7 +25,7 @@ from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-from price_comparator import SYNCED_PRICE_MAX_AGE_DAYS, PriceComparatorStore, normalize_gtin
+from price_comparator import PriceComparatorStore, normalize_gtin
 
 
 VYTRIA_PRICELIST_ID = 59
@@ -396,9 +396,23 @@ class VytriaPriceSync:
             return None
         now = now or datetime.now(timezone.utc)
         last = self.last_successful_run()
-        if last and now - datetime.fromisoformat(last["finished_at"]) < SCHEDULE_INTERVAL:
+        if last and now - datetime.fromisoformat(last["finished_at"]) < self.interval:
             return None
         return self.run(trigger="scheduled")
+
+    @property
+    def interval(self) -> timedelta:
+        """Configurable frequency of the Odoo sync, independent from the competitors' (default 23 h)."""
+        try:
+            hours = float(self.get_setting("interval_hours", ""))
+        except ValueError:
+            return SCHEDULE_INTERVAL
+        return timedelta(hours=hours) if hours >= 1 else SCHEDULE_INTERVAL
+
+    def set_interval_hours(self, hours: float) -> None:
+        if not 1 <= hours <= 24 * 30:
+            raise ValueError("La frecuencia de Odoo debe estar entre 1 hora y 30 días")
+        self.set_setting("interval_hours", str(hours))
 
     def run(self, trigger: str = "manual") -> SyncResult:
         lock = FileLock(self._lock_path, timeout=0)
@@ -579,7 +593,7 @@ class VytriaPriceSync:
                        v.source_updated_at,v.synced_at,v.stale_since,v.stale_reason
                 FROM products p LEFT JOIN vytria_prices v ON v.ean=p.ean ORDER BY p.brand,p.commercial_name
             """, connection)
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=SYNCED_PRICE_MAX_AGE_DAYS)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.store.price_expiry_days())).isoformat()
         stale = frame["stale_since"].notna()
         expired = frame["synced_at"].notna() & (frame["synced_at"] < cutoff)
         frame["current_status"] = frame["validation_status"].where(~expired, "expired").where(~stale, "stale")

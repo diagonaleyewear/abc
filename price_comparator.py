@@ -23,8 +23,11 @@ AVAILABILITY_STATES = {"available", "unavailable", "unknown"}
 DEFAULT_DB_PATH = Path(__file__).parent / "masterdata_data" / "price_comparator.sqlite3"
 CLOUD_DATA_DIR = Path("/app/data")
 CLOUD_DB_PATH = CLOUD_DATA_DIR / "price_comparator.sqlite3"
-# A synchronized price older than this is no longer treated as current for commercial comparisons.
+# Default validity of a price for commercial comparisons; configurable through comparator_settings.
 SYNCED_PRICE_MAX_AGE_DAYS = 7
+RETENTION_MONTHS_OPTIONS = (3, 6, 12, 24)
+SETTING_DEFAULTS = {"retention_months": "12", "price_expiry_days": str(SYNCED_PRICE_MAX_AGE_DAYS),
+                    "alert_threshold_pct": "5"}
 
 
 class PriceComparatorStorageError(RuntimeError):
@@ -263,11 +266,104 @@ class PriceComparatorStore:
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS comparator_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS offer_checks (
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        market TEXT NOT NULL,
+                        last_offer_id INTEGER REFERENCES offers(id),
+                        last_ok_at TEXT NOT NULL,
+                        checks INTEGER NOT NULL DEFAULT 1,
+                        PRIMARY KEY (ean, competitor_id, market)
+                    );
+                    CREATE TABLE IF NOT EXISTS competitor_schedule (
+                        competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
+                        connector TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT '',
+                        authorization_note TEXT NOT NULL DEFAULT '',
+                        verified_at TEXT,
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        paused INTEGER NOT NULL DEFAULT 0,
+                        suspended_at TEXT,
+                        suspended_reason TEXT NOT NULL DEFAULT '',
+                        interval_hours REAL NOT NULL DEFAULT 24,
+                        max_requests_per_run INTEGER NOT NULL DEFAULT 20,
+                        pause_seconds REAL NOT NULL DEFAULT 2,
+                        max_attempts INTEGER NOT NULL DEFAULT 3,
+                        next_run_at TEXT,
+                        cycle_started_at TEXT,
+                        last_run_at TEXT,
+                        last_ok_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS scheduler_runs (
+                        id INTEGER PRIMARY KEY,
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        trigger TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        status TEXT NOT NULL,
+                        requests INTEGER NOT NULL DEFAULT 0,
+                        ok INTEGER NOT NULL DEFAULT 0,
+                        changed INTEGER NOT NULL DEFAULT 0,
+                        unchanged INTEGER NOT NULL DEFAULT 0,
+                        not_listed INTEGER NOT NULL DEFAULT 0,
+                        rejected INTEGER NOT NULL DEFAULT 0,
+                        errors INTEGER NOT NULL DEFAULT 0,
+                        message TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS scheduler_jobs (
+                        id INTEGER PRIMARY KEY,
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        cycle_started_at TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        not_before TEXT NOT NULL,
+                        lease_until TEXT,
+                        outcome TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS scheduler_jobs_open_idx
+                        ON scheduler_jobs(competitor_id, ean) WHERE status IN ('pending', 'running');
+                    CREATE INDEX IF NOT EXISTS scheduler_jobs_due_idx ON scheduler_jobs(competitor_id, status, not_before);
                     CREATE INDEX IF NOT EXISTS vytria_history_ean_idx ON vytria_price_history(ean, recorded_at DESC);
                     CREATE INDEX IF NOT EXISTS offers_ean_date_idx ON offers(ean, captured_at DESC);
                     CREATE INDEX IF NOT EXISTS offers_competitor_date_idx ON offers(competitor_id, captured_at DESC);
                     CREATE INDEX IF NOT EXISTS search_results_ean_date_idx ON search_results(ean, captured_at DESC);
                 """)
+
+    def get_setting(self, key: str) -> str:
+        if key not in SETTING_DEFAULTS:
+            raise ValueError(f"Ajuste desconocido: {key}")
+        with self._connect() as connection:
+            row = connection.execute("SELECT value FROM comparator_settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else SETTING_DEFAULTS[key]
+
+    def set_setting(self, key: str, value: Any) -> None:
+        if key not in SETTING_DEFAULTS:
+            raise ValueError(f"Ajuste desconocido: {key}")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("El valor del ajuste debe ser numérico") from exc
+        if key == "retention_months" and number not in RETENTION_MONTHS_OPTIONS:
+            raise ValueError("La conservación del histórico debe ser de 3, 6, 12 o 24 meses")
+        if key == "price_expiry_days" and not (number == int(number) and 1 <= number <= 90):
+            raise ValueError("La caducidad debe ser un número entero de días entre 1 y 90")
+        if key == "alert_threshold_pct" and not (0.5 <= number <= 100):
+            raise ValueError("El umbral de cambio importante debe estar entre 0,5 % y 100 %")
+        with self._connect() as connection, connection:
+            connection.execute("""INSERT INTO comparator_settings(key,value) VALUES(?,?)
+                                  ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                               (key, str(int(number)) if number == int(number) else str(number)))
+
+    def price_expiry_days(self) -> int:
+        return int(float(self.get_setting("price_expiry_days")))
 
     def _connect(self):
         connection = sqlite3.connect(self.database_path, timeout=10)
@@ -555,10 +651,12 @@ class PriceComparatorStore:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
         with self._connect() as connection:
             return pd.read_sql_query("""
-                SELECT o.*,c.name AS competitor_name,p.brand,p.commercial_name
+                SELECT o.*,c.name AS competitor_name,p.brand,p.commercial_name,
+                       COALESCE(k.last_ok_at,o.captured_at) AS checked_at
                 FROM offers o JOIN competitors c ON c.id=o.competitor_id
                 JOIN products p ON p.ean=o.ean
-                WHERE o.captured_at>=? AND c.active=1
+                LEFT JOIN offer_checks k ON k.last_offer_id=o.id
+                WHERE COALESCE(k.last_ok_at,o.captured_at)>=? AND c.active=1
                 ORDER BY o.captured_at DESC,o.id DESC
             """, connection, params=(cutoff,))
 
@@ -582,9 +680,10 @@ class PriceComparatorStore:
         with self._connect() as connection:
             products = pd.read_sql_query("SELECT * FROM products ORDER BY brand,commercial_name", connection)
             offers = pd.read_sql_query("""
-                SELECT o.*,c.name AS competitor_name FROM offers o
-                JOIN competitors c ON c.id=o.competitor_id
-                WHERE o.captured_at>=? AND c.active=1
+                SELECT o.*,c.name AS competitor_name,COALESCE(k.last_ok_at,o.captured_at) AS checked_at
+                FROM offers o JOIN competitors c ON c.id=o.competitor_id
+                LEFT JOIN offer_checks k ON k.last_offer_id=o.id
+                WHERE COALESCE(k.last_ok_at,o.captured_at)>=? AND c.active=1
                 ORDER BY o.captured_at DESC,o.id DESC
             """, connection, params=(cutoff,))
             search_results = pd.read_sql_query("""
@@ -603,7 +702,7 @@ class PriceComparatorStore:
 
         # A synchronized Odoo price supersedes the manual contingency import for its EAN. It takes part
         # in comparisons only when validated, not flagged stale by a later incident and recently synced.
-        synced_cutoff = (datetime.now(timezone.utc) - timedelta(days=SYNCED_PRICE_MAX_AGE_DAYS)).isoformat()
+        synced_cutoff = (datetime.now(timezone.utc) - timedelta(days=self.price_expiry_days())).isoformat()
         if not synced.empty:
             own = own[~own["ean"].isin(synced["ean"])]
             confirmed = synced[
@@ -654,6 +753,7 @@ class PriceComparatorStore:
             own_eur = None
             minimum = mean = maximum = diff = diff_pct = None
             position = None
+            best_competitor = best_url = best_checked_at = ""
             if own_record and own_record["fx_to_eur"] is not None and not pd.isna(own_record["fx_to_eur"]):
                 own_price = own_record["promotional_price"]
                 if own_price is None or pd.isna(own_price):
@@ -662,6 +762,9 @@ class PriceComparatorStore:
             if comparable:
                 prices = [item[0] for item in comparable]
                 minimum, mean, maximum = min(prices), sum(prices) / len(prices), max(prices)
+                best_price, best_offer = min(comparable, key=lambda item: item[0])
+                best_competitor, best_url = best_offer["competitor_name"], best_offer["url"]
+                best_checked_at = best_offer["checked_at"]
                 if own_eur is not None:
                     diff = own_eur - minimum
                     diff_pct = (diff / minimum * 100) if minimum else None
@@ -670,6 +773,9 @@ class PriceComparatorStore:
                 **product,
                 "own_price_eur": own_eur,
                 "competitor_min_eur": minimum,
+                "best_competitor": best_competitor,
+                "best_url": best_url,
+                "last_checked_at": best_checked_at,
                 "competitor_mean_eur": mean,
                 "competitor_max_eur": maximum,
                 "competitor_count": len(comparable),
