@@ -29,7 +29,7 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 TABLE_LABELS = {
     "brand": "Marca", "model": "Modelo", "ean": "EAN", "own_price_eur": "Precio Vytria",
     "best_competitor": "Mejor competidor", "competitor_min_eur": "Precio competidor",
-    "difference_eur": "Diferencia €", "difference_pct": "Diferencia %",
+    "difference_eur": "Diferencia €", "difference_pct": "% vs Vytria",
     "last_checked_at": "Última comprobación", "position": "Posición", "own_price_status": "Estado precio Vytria",
 }
 

@@ -50,6 +50,8 @@ Ninguno ha demostrado disponer de API o feed autorizado: eso debe solicitarse a 
 ## Planificador (comando independiente)
 
 Guía operativa completa (ejecutar, verificar, detener, recuperar): [PLANIFICADOR_COMPETIDORES.md](PLANIFICADOR_COMPETIDORES.md).
+
+Búsqueda por EAN, modelo y color, importación JSON y cobertura de competidores: [BUSQUEDA_POR_REFERENCIA.md](BUSQUEDA_POR_REFERENCIA.md).
 Resumen:
 
 Tablas en el SQLite persistente: `competitor_schedule`, `scheduler_jobs` (cola persistente, un job por EAN),

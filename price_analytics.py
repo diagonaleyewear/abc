@@ -94,7 +94,7 @@ def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.Data
                o.fx_to_eur,o.availability,o.match_status,o.captured_at,k.last_ok_at,k.last_offer_id
         FROM offers o JOIN competitors c ON c.id=o.competitor_id
         LEFT JOIN offer_checks k ON k.last_offer_id=o.id
-        WHERE o.match_status='exact_match'"""
+        WHERE o.match_status='exact_match' AND COALESCE(o.price_includes_tax,1)=1"""
     params: tuple = ()
     if ean:
         query += " AND o.ean=?"

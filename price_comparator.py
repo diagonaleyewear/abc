@@ -18,7 +18,22 @@ from filelock import FileLock, Timeout
 
 
 GTIN_ERROR = "EAN/UPC debe ser GTIN-12 o GTIN-13 válido"
-MATCH_STATES = {"exact_match", "probable_match", "manual_review", "not_found", "error"}
+MATCH_STATES = {"exact_match", "probable_match", "manual_review", "not_found", "error", "rejected"}
+MATCH_BASES = {"", "ean", "reference"}
+DEFAULT_MARKET, DEFAULT_CURRENCY = "ES", "EUR"
+COVERAGE_STATUSES = {"not_checked", "no_authorized_connector", "pending_authorization", "blocked",
+                     "manual_verified", "operational"}
+# Columns added after the first release; CREATE TABLE IF NOT EXISTS cannot add them to existing databases.
+_ADDED_COLUMNS = {
+    "products": {"caliber": "TEXT NOT NULL DEFAULT ''"},
+    "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
+               "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
+               "match_basis": "TEXT NOT NULL DEFAULT ''", "price_includes_tax": "INTEGER",
+               "vat_rate": "REAL"},
+    "search_results": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
+                       "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
+                       "match_basis": "TEXT NOT NULL DEFAULT ''"},
+}
 AVAILABILITY_STATES = {"available", "unavailable", "unknown"}
 DEFAULT_DB_PATH = Path(__file__).parent / "masterdata_data" / "price_comparator.sqlite3"
 CLOUD_DATA_DIR = Path("/app/data")
@@ -335,7 +350,21 @@ class PriceComparatorStore:
                     CREATE INDEX IF NOT EXISTS offers_ean_date_idx ON offers(ean, captured_at DESC);
                     CREATE INDEX IF NOT EXISTS offers_competitor_date_idx ON offers(competitor_id, captured_at DESC);
                     CREATE INDEX IF NOT EXISTS search_results_ean_date_idx ON search_results(ean, captured_at DESC);
+                    CREATE TABLE IF NOT EXISTS competitor_coverage (
+                        competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
+                        method TEXT NOT NULL DEFAULT '',
+                        integration_status TEXT NOT NULL DEFAULT 'not_checked',
+                        restrictions TEXT NOT NULL DEFAULT '',
+                        allowed_frequency TEXT NOT NULL DEFAULT '',
+                        notes TEXT NOT NULL DEFAULT '',
+                        last_checked_at TEXT
+                    );
                 """)
+                for table, columns in _ADDED_COLUMNS.items():
+                    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+                    for name, definition in columns.items():
+                        if name not in existing:
+                            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def get_setting(self, key: str) -> str:
         if key not in SETTING_DEFAULTS:
@@ -420,6 +449,13 @@ class PriceComparatorStore:
                             internal_reference=CASE WHEN excluded.internal_reference='' THEN products.internal_reference ELSE excluded.internal_reference END,
                             updated_at=excluded.updated_at
                     """, (ean, original, *values.values(), datetime.now(timezone.utc).isoformat(timespec="seconds")))
+                    caliber_text = _text(row.get("CALIBRE"))
+                    if caliber_text:
+                        from price_references import normalize_caliber
+                        caliber = normalize_caliber(caliber_text)
+                        if not caliber:
+                            raise ValueError(f"Calibre no válido: {caliber_text}")
+                        connection.execute("UPDATE products SET caliber=? WHERE ean=?", (caliber, ean))
                     if old:
                         updated += 1
                     else:
@@ -443,9 +479,11 @@ class PriceComparatorStore:
                     competitor_id = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
                     old = connection.execute("SELECT 1 FROM competitors WHERE id=?", (competitor_id,)).fetchone()
                     connection.execute("""
-                        INSERT INTO competitors(id,name,url,domain) VALUES(?,?,?,?)
-                        ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,domain=excluded.domain
-                    """, (competitor_id, name, url, domain))
+                        INSERT INTO competitors(id,name,url,domain,market,currency) VALUES(?,?,?,?,?,?)
+                        ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,domain=excluded.domain,
+                            market=CASE WHEN competitors.market='' THEN excluded.market ELSE competitors.market END,
+                            currency=CASE WHEN competitors.currency='' THEN excluded.currency ELSE competitors.currency END
+                    """, (competitor_id, name, url, domain, DEFAULT_MARKET, DEFAULT_CURRENCY))
                     if old:
                         updated += 1
                     else:
@@ -453,6 +491,16 @@ class PriceComparatorStore:
                 except ValueError as exc:
                     rejected.append(f"Fila {index + 2}: {exc}")
         return ImportReport(imported, updated, tuple(rejected))
+
+    def fill_competitor_defaults(self, *, apply: bool = False) -> list[str]:
+        """Fill the empty market/currency of existing competitors (ES/EUR). Only reports unless ``apply``."""
+        with self._connect() as connection, connection:
+            pending = connection.execute(
+                "SELECT id,market,currency FROM competitors WHERE market='' OR currency=''").fetchall()
+            if apply:
+                connection.execute("UPDATE competitors SET market=? WHERE market=''", (DEFAULT_MARKET,))
+                connection.execute("UPDATE competitors SET currency=? WHERE currency=''", (DEFAULT_CURRENCY,))
+        return [row["id"] for row in pending]
 
     def save_competitors(self, frame: pd.DataFrame) -> None:
         _required_columns(frame, {"id", "market", "currency", "active", "query_method"}, "competidores")
@@ -508,7 +556,7 @@ class PriceComparatorStore:
         required = {"EAN", "Competidor", "Precio", "Moneda", "Mercado", "URL", "Disponibilidad",
                     "Estado coincidencia", "Evidencia", "Método"}
         _required_columns(frame, required, "Ofertas")
-        imported = rejected = 0
+        imported = updated = rejected = 0
         errors: list[str] = []
         with self._connect() as connection, connection:
             competitors = {row["name"].casefold(): row for row in connection.execute("SELECT * FROM competitors")}
@@ -516,7 +564,8 @@ class PriceComparatorStore:
             for index, row in frame.iterrows():
                 try:
                     ean = normalize_gtin(row["EAN"])
-                    if not connection.execute("SELECT 1 FROM products WHERE ean=?", (ean,)).fetchone():
+                    product = connection.execute("SELECT * FROM products WHERE ean=?", (ean,)).fetchone()
+                    if not product:
                         raise ValueError("EAN no importado en el catálogo")
                     competitor = competitors.get(_text(row["Competidor"]).casefold())
                     if not competitor:
@@ -542,15 +591,18 @@ class PriceComparatorStore:
                         if offer_domain != competitor["domain"] and not offer_domain.endswith("." + competitor["domain"]):
                             raise ValueError("El dominio de la oferta no coincide con el competidor")
 
-                    if not _text(row["Precio"]):
+                    identity = self._offer_identity(row, ean, product, match_status)
+
+                    if not _text(row["Precio"]) or match_status == "rejected":
                         fingerprint = _fingerprint((ean, competitor["id"], market, url, captured,
-                                                    method, match_status, evidence))
+                                                    method, match_status, evidence, *identity[:5]))
                         cursor = connection.execute("""
                             INSERT OR IGNORE INTO search_results(
-                                ean,competitor_id,market,url,captured_at,method,match_status,evidence,fingerprint
-                            ) VALUES(?,?,?,?,?,?,?,?,?)
+                                ean,competitor_id,market,url,captured_at,method,match_status,evidence,fingerprint,
+                                ean_published,model_code,color_code,caliber,match_basis
+                            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """, (ean, competitor["id"], market, url, captured, method, match_status,
-                              evidence, fingerprint))
+                              evidence, fingerprint, *identity[:5]))
                         imported += cursor.rowcount
                         connection.execute(
                             "UPDATE competitors SET last_checked_at=?,connectivity='manual_import' WHERE id=?",
@@ -580,16 +632,49 @@ class PriceComparatorStore:
                         fx = 1.0
                     elif fx is not None and fx <= 0:
                         raise ValueError("Tipo cambio EUR debe ser mayor que cero")
+                    tax_included, vat_rate = identity[5], identity[6]
+                    content = (price, promo, previous, shipping, currency, fx, availability, url, match_status,
+                               *identity)
+                    latest = connection.execute("""
+                        SELECT id,captured_at,price,promotional_price,previous_price,shipping_cost,currency,
+                               fx_to_eur,availability,url,match_status,ean_published,model_code,color_code,
+                               caliber,match_basis,price_includes_tax,vat_rate
+                        FROM offers WHERE ean=? AND competitor_id=? AND market=?
+                        ORDER BY captured_at DESC,id DESC LIMIT 1
+                    """, (ean, competitor["id"], market)).fetchone()
+                    if latest and captured >= latest["captured_at"] and content == (
+                            latest["price"], latest["promotional_price"], latest["previous_price"],
+                            latest["shipping_cost"], latest["currency"], latest["fx_to_eur"],
+                            latest["availability"], latest["url"], latest["match_status"],
+                            latest["ean_published"], latest["model_code"], latest["color_code"],
+                            latest["caliber"], latest["match_basis"], latest["price_includes_tax"],
+                            latest["vat_rate"]):
+                        # Unchanged: keep the single row and only record the latest successful check.
+                        connection.execute("""
+                            INSERT INTO offer_checks(ean,competitor_id,market,last_offer_id,last_ok_at,checks)
+                            VALUES(?,?,?,?,?,1)
+                            ON CONFLICT(ean,competitor_id,market) DO UPDATE SET
+                                last_offer_id=excluded.last_offer_id,
+                                last_ok_at=MAX(offer_checks.last_ok_at,excluded.last_ok_at),
+                                checks=CASE WHEN offer_checks.last_offer_id=excluded.last_offer_id
+                                       THEN offer_checks.checks+1 ELSE 1 END
+                        """, (ean, competitor["id"], market, latest["id"], captured))
+                        connection.execute(
+                            "UPDATE competitors SET last_checked_at=?,connectivity='manual_import' WHERE id=?",
+                            (captured, competitor["id"]))
+                        updated += 1
+                        continue
                     fingerprint = _fingerprint((ean, competitor["id"], market, price, promo, previous, shipping,
                                                 currency, fx, availability, url, captured, method,
-                                                match_status, evidence))
+                                                match_status, evidence, *identity))
                     cursor = connection.execute("""
                         INSERT OR IGNORE INTO offers(
                             ean,competitor_id,market,price,promotional_price,previous_price,shipping_cost,
-                            currency,fx_to_eur,availability,url,captured_at,method,match_status,evidence,fingerprint
-                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            currency,fx_to_eur,availability,url,captured_at,method,match_status,evidence,fingerprint,
+                            ean_published,model_code,color_code,caliber,match_basis,price_includes_tax,vat_rate
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (ean, competitor["id"], market, price, promo, previous, shipping, currency, fx,
-                          availability, url, captured, method, match_status, evidence, fingerprint))
+                          availability, url, captured, method, match_status, evidence, fingerprint, *identity))
                     imported += cursor.rowcount
                     connection.execute(
                         "UPDATE competitors SET last_checked_at=?,connectivity='manual_import' WHERE id=?",
@@ -598,7 +683,137 @@ class PriceComparatorStore:
                 except ValueError as exc:
                     rejected += 1
                     errors.append(f"Fila {index + 2}: {exc}")
-        return ImportReport(imported, 0, tuple(errors))
+        return ImportReport(imported, updated, tuple(errors))
+
+    @staticmethod
+    def _offer_identity(row: Any, ean: str, product: Any, match_status: str) -> tuple:
+        """Structured identity of an offer: (ean_published, model, colour, caliber, basis, tax_included, vat).
+
+        An exact match is accepted only if the declared identity really verifies against the catalogue.
+        """
+        from price_references import EXACT, REJECTED, classify, normalize_caliber
+
+        published = _text(row.get("EAN publicado"))
+        if published:
+            published = normalize_gtin(published)
+        model, color = _text(row.get("Modelo")), _text(row.get("Color"))
+        raw_caliber = _text(row.get("Calibre"))
+        caliber = normalize_caliber(raw_caliber)
+        if raw_caliber and not caliber:
+            raise ValueError(f"Calibre no válido: {raw_caliber}")
+        basis = _text(row.get("Base coincidencia")).lower()
+        if basis not in MATCH_BASES:
+            raise ValueError("Base de coincidencia no válida")
+        tax_raw = _text(row.get("IVA incluido")).lower()
+        if tax_raw in {"", "nan", "none", "indeterminado"}:
+            tax_included = None
+        elif tax_raw in {"1", "true", "si", "sí", "yes"}:
+            tax_included = 1
+        elif tax_raw in {"0", "false", "no"}:
+            tax_included = 0
+        else:
+            raise ValueError("IVA incluido debe ser sí, no o vacío")
+        vat_rate = _number(row.get("Tipo IVA"), "Tipo IVA", optional=True)
+        if any((published, model, color, caliber, _text(row.get("Marca")), _text(row.get("Título")))):
+            result = classify(dict(product), {
+                "ean_published": published, "brand": _text(row.get("Marca")), "model": model,
+                "color": color, "caliber": caliber, "title": _text(row.get("Título"))})
+            if match_status == "exact_match" and result.status != EXACT:
+                raise ValueError("Marcado exact_match, pero no se verifica: " + "; ".join(result.reasons))
+            if result.status == REJECTED and match_status not in {"rejected", "not_found", "error"}:
+                raise ValueError("Identidad descartada: " + "; ".join(result.reasons))
+            if match_status == "exact_match" and not basis:
+                basis = result.basis
+        elif match_status == "exact_match" and basis:
+            raise ValueError("Base de coincidencia sin datos de identidad")
+        return (published, model, color, caliber, basis, tax_included, vat_rate)
+
+    def update_catalog_references(self, records: list[dict[str, str]], *, apply: bool = False) -> list[dict]:
+        """Complete model, colour and calibre of catalogue products (e.g. from Odoo). Returns the changes.
+
+        Only fills fields that are empty or differ; never touches EAN, brand or names. Nothing is written
+        unless ``apply``.
+        """
+        from price_references import normalize_caliber
+
+        changes: list[dict] = []
+        with self._connect() as connection, connection:
+            for record in records:
+                ean = normalize_gtin(record["ean"])
+                product = connection.execute("SELECT * FROM products WHERE ean=?", (ean,)).fetchone()
+                if not product:
+                    continue
+                new = {"model": _text(record.get("model")), "color": _text(record.get("color")),
+                       "caliber": normalize_caliber(record.get("caliber"))}
+                diff = {name: (product[name], value) for name, value in new.items()
+                        if value and product[name] != value}
+                if not diff:
+                    continue
+                changes.append({"ean": ean, "changes": diff})
+                if apply:
+                    sets = ",".join(f"{name}=?" for name in diff)
+                    connection.execute(f"UPDATE products SET {sets},updated_at=? WHERE ean=?",
+                                       (*[value[1] for value in diff.values()],
+                                        datetime.now(timezone.utc).isoformat(timespec="seconds"), ean))
+        return changes
+
+    def save_coverage(self, records: list[dict[str, Any]]) -> None:
+        """Store the per-competitor query mechanism state. ``operational`` needs real proof."""
+        with self._connect() as connection, connection:
+            known = {}
+            for row in connection.execute("SELECT id,name FROM competitors"):
+                known[row["id"].casefold()] = row
+                known[row["name"].casefold()] = row
+            for record in records:
+                competitor = known.get(_text(record.get("competitor")).casefold())
+                if not competitor:
+                    raise ValueError(f"Competidor desconocido: {record.get('competitor')}")
+                status = _text(record.get("integration_status")) or "not_checked"
+                if status not in COVERAGE_STATUSES:
+                    raise ValueError(f"Estado de integración no válido: {status}")
+                if status == "operational":
+                    verified = connection.execute(
+                        "SELECT 1 FROM competitor_schedule WHERE competitor_id=? AND connector!='' "
+                        "AND verified_at IS NOT NULL", (competitor["id"],)).fetchone()
+                    confirmed = connection.execute(
+                        "SELECT 1 FROM offers WHERE competitor_id=? AND match_status='exact_match'",
+                        (competitor["id"],)).fetchone()
+                    if not (verified and confirmed):
+                        raise ValueError(f"{competitor['id']}: 'operational' exige conector verificado "
+                                         "y al menos una oferta confirmada")
+                connection.execute("""
+                    INSERT INTO competitor_coverage(competitor_id,method,integration_status,restrictions,
+                                                    allowed_frequency,notes,last_checked_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(competitor_id) DO UPDATE SET method=excluded.method,
+                        integration_status=excluded.integration_status,restrictions=excluded.restrictions,
+                        allowed_frequency=excluded.allowed_frequency,notes=excluded.notes,
+                        last_checked_at=excluded.last_checked_at
+                """, (competitor["id"], _text(record.get("method")), status, _text(record.get("restrictions")),
+                      _text(record.get("allowed_frequency")), _text(record.get("notes")),
+                      _text(record.get("last_checked_at")) or None))
+
+    def coverage_table(self) -> pd.DataFrame:
+        """One row per competitor; reference and offer counts are computed from stored observations."""
+        with self._connect() as connection:
+            return pd.read_sql_query("""
+                SELECT c.name AS competitor,c.domain,
+                       COALESCE(v.method,'') AS method,
+                       COALESCE(v.integration_status,'not_checked') AS integration_status,
+                       COALESCE(v.restrictions,'') AS restrictions,
+                       COALESCE(v.allowed_frequency,'') AS allowed_frequency,
+                       COALESCE(v.notes,'') AS notes,
+                       v.last_checked_at AS last_checked_at,
+                       (SELECT COUNT(DISTINCT ean) FROM (
+                            SELECT ean FROM offers WHERE competitor_id=c.id AND match_status IN ('exact_match','probable_match')
+                            UNION ALL
+                            SELECT ean FROM search_results WHERE competitor_id=c.id AND match_status IN ('exact_match','probable_match')
+                       )) AS references_located,
+                       (SELECT COUNT(DISTINCT ean) FROM offers
+                         WHERE competitor_id=c.id AND match_status='exact_match') AS confirmed_offers
+                FROM competitors c LEFT JOIN competitor_coverage v ON v.competitor_id=c.id
+                ORDER BY c.name
+            """, connection)
 
     def competitors(self) -> pd.DataFrame:
         with self._connect() as connection:
@@ -727,10 +942,12 @@ class PriceComparatorStore:
         for product in products.to_dict("records"):
             own_rows = own[own["ean"] == product["ean"]]
             own_record = own_rows.sort_values("captured_at").iloc[-1].to_dict() if not own_rows.empty else None
+            tax_ok = offers["price_includes_tax"].isna() | (offers["price_includes_tax"] == 1)
             valid_product_offers = offers[
                 (offers["ean"] == product["ean"])
                 & (offers["match_status"] == "exact_match")
                 & (offers["availability"] == "available")
+                & tax_ok
             ]
             comparable = []
             if own_record:
@@ -739,6 +956,7 @@ class PriceComparatorStore:
                     & (offers["market"] == own_record["market"])
                     & (offers["match_status"] == "exact_match")
                     & (offers["availability"] == "available")
+                    & tax_ok
                 ]
                 for competitor_id, group in matched.groupby("competitor_id"):
                     offer = group.sort_values("captured_at").iloc[-1].to_dict()
@@ -751,7 +969,7 @@ class PriceComparatorStore:
                     effective_eur = float(effective) * float(rate)
                     comparable.append((effective_eur, offer))
             own_eur = None
-            minimum = mean = maximum = diff = diff_pct = None
+            minimum = mean = maximum = diff = diff_pct = diff_vs_competitor_pct = None
             position = None
             best_competitor = best_url = best_checked_at = ""
             if own_record and own_record["fx_to_eur"] is not None and not pd.isna(own_record["fx_to_eur"]):
@@ -767,7 +985,8 @@ class PriceComparatorStore:
                 best_checked_at = best_offer["checked_at"]
                 if own_eur is not None:
                     diff = own_eur - minimum
-                    diff_pct = (diff / minimum * 100) if minimum else None
+                    diff_pct = (diff / own_eur * 100) if own_eur else None
+                    diff_vs_competitor_pct = (diff / minimum * 100) if minimum else None
                     position = 1 + sum(price < own_eur for price in prices)
             rows.append({
                 **product,
@@ -782,6 +1001,7 @@ class PriceComparatorStore:
                 "confirmed_offer_count": int(valid_product_offers["competitor_id"].nunique()),
                 "difference_eur": diff,
                 "difference_pct": diff_pct,
+                "difference_vs_competitor_pct": diff_vs_competitor_pct,
                 "position": position,
                 "market": own_record["market"] if own_record else "",
                 "own_price_source": (own_record["source"] if own_record else

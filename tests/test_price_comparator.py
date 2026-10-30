@@ -50,10 +50,14 @@ def _offer(competitor, *, price, currency="EUR", fx="", promo="", available="ava
     }
 
 
-def _store(tmp_path):
+def _store(tmp_path, *, configured=False):
     store = PriceComparatorStore(tmp_path / "prices.sqlite3")
     assert store.import_products(PRODUCTS).imported == 1
     store.import_competitors(COMPETITORS)
+    if not configured:
+        # Competitors without market/currency accept offers of any market, as before the ES/EUR defaults.
+        with closing(sqlite3.connect(store.database_path)) as connection, connection:
+            connection.execute("UPDATE competitors SET market='',currency=''")
     return store
 
 
@@ -125,7 +129,8 @@ def test_comparison_uses_exact_available_fresh_same_market_offers_and_eur_fx(tmp
     assert row["competitor_mean_eur"] == pytest.approx(80.5)
     assert row["competitor_max_eur"] == pytest.approx(81)
     assert row["difference_eur"] == pytest.approx(20)
-    assert row["difference_pct"] == pytest.approx(25)
+    assert row["difference_pct"] == pytest.approx(20)
+    assert row["difference_vs_competitor_pct"] == pytest.approx(25)
     assert row["position"] == 3
     assert counts["pending_review"] == 1
 
@@ -199,7 +204,8 @@ def test_own_price_and_competitor_fx_are_normalized_to_eur(tmp_path) -> None:
 
     assert summary.iloc[0]["own_price_eur"] == pytest.approx(90)
     assert summary.iloc[0]["competitor_min_eur"] == pytest.approx(80)
-    assert summary.iloc[0]["difference_pct"] == pytest.approx(12.5)
+    assert summary.iloc[0]["difference_pct"] == pytest.approx(100 * 10 / 90)
+    assert summary.iloc[0]["difference_vs_competitor_pct"] == pytest.approx(12.5)
     assert len(store.own_price_history("036000291452")) == 1
 
 
