@@ -196,6 +196,70 @@ class PriceComparatorStore:
                         evidence TEXT NOT NULL,
                         fingerprint TEXT NOT NULL UNIQUE
                     );
+                    CREATE TABLE IF NOT EXISTS vytria_prices (
+                        ean TEXT PRIMARY KEY REFERENCES products(ean),
+                        market TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        currency TEXT NOT NULL,
+                        price_includes_tax INTEGER NOT NULL,
+                        vat_rate REAL,
+                        source TEXT NOT NULL,
+                        pricelist_id INTEGER NOT NULL,
+                        source_product_id INTEGER,
+                        source_template_id INTEGER,
+                        source_catalog_id INTEGER,
+                        source_price_id INTEGER,
+                        source_updated_at TEXT,
+                        expected_price REAL,
+                        validation_status TEXT NOT NULL,
+                        validation_detail TEXT NOT NULL DEFAULT '',
+                        comparable INTEGER NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        first_seen_at TEXT NOT NULL,
+                        changed_at TEXT NOT NULL,
+                        synced_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS vytria_price_history (
+                        id INTEGER PRIMARY KEY,
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        market TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        currency TEXT NOT NULL,
+                        price_includes_tax INTEGER NOT NULL,
+                        vat_rate REAL,
+                        source TEXT NOT NULL,
+                        pricelist_id INTEGER NOT NULL,
+                        source_product_id INTEGER,
+                        source_price_id INTEGER,
+                        validation_status TEXT NOT NULL,
+                        recorded_at TEXT NOT NULL,
+                        sync_run_id INTEGER
+                    );
+                    CREATE TABLE IF NOT EXISTS vytria_sync_runs (
+                        id INTEGER PRIMARY KEY,
+                        trigger TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        status TEXT NOT NULL,
+                        monitored INTEGER NOT NULL DEFAULT 0,
+                        inserted INTEGER NOT NULL DEFAULT 0,
+                        changed INTEGER NOT NULL DEFAULT 0,
+                        unchanged INTEGER NOT NULL DEFAULT 0,
+                        issues INTEGER NOT NULL DEFAULT 0,
+                        error TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS vytria_sync_issues (
+                        id INTEGER PRIMARY KEY,
+                        run_id INTEGER NOT NULL REFERENCES vytria_sync_runs(id),
+                        ean TEXT NOT NULL,
+                        code TEXT NOT NULL,
+                        detail TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS vytria_sync_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS vytria_history_ean_idx ON vytria_price_history(ean, recorded_at DESC);
                     CREATE INDEX IF NOT EXISTS offers_ean_date_idx ON offers(ean, captured_at DESC);
                     CREATE INDEX IF NOT EXISTS offers_competitor_date_idx ON offers(competitor_id, captured_at DESC);
                     CREATE INDEX IF NOT EXISTS search_results_ean_date_idx ON search_results(ean, captured_at DESC);
@@ -531,6 +595,19 @@ class PriceComparatorStore:
                 ) latest ON latest.ean=p.ean AND latest.market=p.market AND latest.captured_at=p.captured_at
             """, connection, params=(cutoff,))
             competitor_count = connection.execute("SELECT COUNT(*) FROM competitors WHERE active=1").fetchone()[0]
+            synced = pd.read_sql_query("SELECT * FROM vytria_prices", connection)
+
+        # A synchronized Odoo price supersedes the manual contingency import for its EAN. It is
+        # used only when confirmed (comparable); otherwise the product stays without own price.
+        if not synced.empty:
+            own = own[~own["ean"].isin(synced["ean"])]
+            confirmed = synced[synced["comparable"] == 1]
+            own = pd.concat([own, pd.DataFrame({
+                "ean": confirmed["ean"], "market": confirmed["market"], "price": confirmed["price"],
+                "promotional_price": None, "currency": confirmed["currency"], "fx_to_eur": 1.0,
+                "captured_at": confirmed["synced_at"], "source": confirmed["source"],
+            })], ignore_index=True)
+        synced_by_ean = {row["ean"]: row for row in synced.to_dict("records")}
 
         rows: list[dict[str, Any]] = []
         for product in products.to_dict("records"):
@@ -586,6 +663,9 @@ class PriceComparatorStore:
                 "difference_pct": diff_pct,
                 "position": position,
                 "market": own_record["market"] if own_record else "",
+                "own_price_source": (own_record["source"] if own_record else
+                                     ("Odoo (sin precio confirmado)" if product["ean"] in synced_by_ean else "")),
+                "own_price_status": synced_by_ean.get(product["ean"], {}).get("validation_status", ""),
             })
         result = pd.DataFrame(rows)
         statuses = {

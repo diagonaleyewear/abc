@@ -184,3 +184,8 @@ respaldado.
 **Validación.** Local: 840 tests pasan, 15 omitidos (el de UID/GID 1037:100
 requiere root y Linux). Docker/producción: pendientes de CI, digest y despliegue
 aprobado; no se declaran resueltos hasta verificarlos.
+
+## Sincronización automática del precio Vytria
+
+Véase [VYTRIA_PRICE_SYNC.md](VYTRIA_PRICE_SYNC.md): el PVP se lee de Odoo (tarifa 59), en solo lectura; la importación Excel queda como contingencia.
+
