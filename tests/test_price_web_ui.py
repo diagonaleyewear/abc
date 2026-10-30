@@ -164,4 +164,4 @@ def test_known_url_form_rejects_other_domains(ui):
     submit = [b for b in app.button if b.label == "Añadir ficha conocida"][position]
     submit.click()
     app = app.run(timeout=90)
-    assert any("dominio del competidor" in e.value for e in app.error)
+    assert any("dominio" in e.value for e in app.error)

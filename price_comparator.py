@@ -26,6 +26,8 @@ COVERAGE_STATUSES = {"not_checked", "no_authorized_connector", "pending_authoriz
                      "manual_verified", "operational"}
 # Columns added after the first release; CREATE TABLE IF NOT EXISTS cannot add them to existing databases.
 _ADDED_COLUMNS = {
+    "competitor_product_urls": {"source": "TEXT NOT NULL DEFAULT 'auto'", "note": "TEXT NOT NULL DEFAULT ''",
+                                "submitted_at": "TEXT"},
     "products": {"caliber": "TEXT NOT NULL DEFAULT ''"},
     "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",

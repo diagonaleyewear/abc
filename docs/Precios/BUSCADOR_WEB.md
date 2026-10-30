@@ -60,6 +60,33 @@ Detener / recuperar: no hay proceso residente. Si un sitio queda `blocked`, revi
 exige `terms_reviewed` con nota, `robots.txt` permitido y una oferta real previa. Frecuencia, pausas y límites son los
 del propio planificador (ver `PLANIFICADOR_COMPETIDORES.md`).
 
+## Colaboración manual: facilitar la URL de una ficha
+
+Si la búsqueda (EAN, marca + modelo + color, sitemap/búsqueda interna permitidos) no localiza el producto, la
+interfaz muestra «No hemos localizado este producto en [competidor]. ¿Puedes facilitarnos la URL?» con un campo y el
+botón «Verificar y guardar». Se pide una sola vez por producto y competidor.
+
+1. Validación sin red: HTTPS, dominio del competidor (no vale `visiofactory.es.otro.com`), sin credenciales (`@`),
+   sin puerto distinto de 443, sin IP ni nombres locales. En la consulta real se vuelve a comprobar que el DNS no
+   apunte a direcciones privadas y que una redirección no salga del dominio.
+2. Acceso: si el sitio no está comprobado se lee `robots.txt`; si no permite consultar o hay bloqueo previo
+   (403/429/CAPTCHA) la URL se guarda **pendiente de verificación** y no se consulta ni se insiste.
+3. Se lee la ficha una vez y se compara con el producto pedido (EAN publicado, marca, modelo, color, calibre).
+   - Exacta → «URL verificada y guardada»; se registra la oferta por el importador habitual y la URL se reutiliza.
+   - Probable o ambigua → se pide confirmación; al confirmar se guarda como referencia pendiente de revisión, sin
+     oferta comparable.
+   - Producto distinto → «Coincidencia incorrecta»; no se guarda como válida y se puede facilitar otra URL.
+4. Facilitar una URL nunca la marca como verificada por sí solo. «Añadir ficha conocida» (Competidores) y el CLI
+   `add-url` dejan la URL pendiente hasta que una búsqueda la verifique.
+5. Duplicados: la misma URL (ignorando `#fragmento`) no se registra dos veces. Una segunda URL distinta exige
+   «Sustituir una ficha registrada».
+6. Si una ficha deja de responder queda «necesita reubicación» y se vuelve a pedir; la nueva sustituye a la anterior
+   (`replaced`) y el histórico de precios (`offers`) no se toca.
+
+Estados en la columna «Ficha registrada»: Ficha localizada automáticamente · URL aportada por el usuario, pendiente de
+verificar · URL verificada y guardada · Coincidencia incorrecta · Acceso bloqueado. Se guardan en
+`competitor_product_urls` (columnas `source` = auto/user, `status`, `note`).
+
 ## Estado real (2026-10-30, base temporal)
 
 - `robots.txt` permite la raíz en los 14 sitios; ninguno tiene las condiciones de uso revisadas → ninguno es operativo.
