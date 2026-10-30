@@ -93,3 +93,26 @@ verificar · URL verificada y guardada · Coincidencia incorrecta · Acceso bloq
 - Visiofactory: 3 fichas Prada con JSON-LD, EAN idéntico, IVA 21 % demostrado y mercado ES declarado por la página.
   239 € / 187 € (sin stock) / 219 €.
 - Resto de competidores: acceso comprobado, fichas no localizadas todavía (sin fichas conocidas ni sitemap probado).
+
+## Validación de 14 fichas candidatas (2026-10-30, una consulta por URL, base temporal)
+
+Estados independientes: ficha localizada / extracción verificada / operativo. Ninguno es operativo.
+
+| Competidor | Ficha | Extracción (PR 27ZS 16K08Z salvo indicación) | Comparable hoy |
+|---|---|---|---|
+| Visiofactory | sí | 239 €, stock, IVA y ES demostrados, EAN | sí |
+| Óptica Óptima | sí | 273 €, stock, IVA (precio sin IVA) y ES, EAN | sí |
+| Domanci | sí | 240,5 €, stock, IVA y ES, EAN | sí |
+| Amevista | sí | 273 €, stock, EAN; sin IVA ni mercado | no (IVA/mercado sin confirmar) |
+| Edel-Optics | sí | 243,5 €, stock, EAN; sin IVA ni mercado; PVP 390 € ignorado | no |
+| Otticait | sí | 241,8 €, stock, EAN; sin IVA ni mercado | no |
+| ConGafasDeSol | sí | 253,5 €, stock, EAN; sin IVA ni mercado | no |
+| Blickers | sí | 273 €, stock, EAN; sin IVA ni mercado | no |
+| Mia Burton | URL de PR 26ZS (EAN 8056597875226, 247 €) | no es la referencia buscada | no; falta URL de PR 27ZS |
+| Óptica Universitaria | sí | EAN en `data-ean`; precio cargado con JavaScript | no; requiere extractor específico |
+| Óptica Bassol, Visual-Click, Optical H, Céline | URL guardada | HTTP 429, acceso bloqueado, sin reintento | no; pendiente |
+
+Céline puede mostrar varias variantes: no se usa ninguna hasta verificar color, calibre y EAN.
+El IVA y el mercado se confirman por oferta (JSON-LD, precio sin IVA publicado, o `tax_policy`/`confirm_market`
+decididos por una persona); nunca por el dominio. Tests: `tests/test_price_web_competitor_pages.py` con fixtures en
+`tests/fixtures/web_pages/`.

@@ -14,9 +14,14 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from price_comparator import normalize_gtin
-from price_references import extract_caliber
+from price_references import caliber_from_code, extract_caliber, extract_lens
 
 _LD_JSON = re.compile(r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>", re.I | re.S)
+_EAN_LABELLED = re.compile(r"(?:\bEAN(?:/GTIN)?\b|\bGTIN(?:-?13)?\b|c[oó]digo\s+de\s+barras)\s*:?\s*"
+                           r"(?:<[^>]{0,200}>\s*){0,4}:?\s*(\d{13})(?!\d)", re.I)
+_EAN_DATA_ATTR = re.compile(r"\bdata-ean=[\"'](\d{13})[\"']", re.I)
+_PRESTASHOP_CURRENCY = re.compile(r"var prestashop\s*=\s*\{\"currency\":\{[^{}]*?\"iso_code\":\"([A-Z]{3})\"")
+_PRESTASHOP_LOCALE = re.compile(r"var prestashop\s*=.{0,2000}?\"locale\":\"[a-z]{2}-([A-Z]{2})\"", re.S)
 _AVAILABLE = {"instock", "limitedavailability", "onlineonly", "instoreonly"}
 _UNAVAILABLE = {"outofstock", "soldout", "discontinued"}
 _VOID = {"meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"}
@@ -166,11 +171,16 @@ def _offer_facts(node: dict) -> dict[str, Any]:
     return facts
 
 
+def _color_code(value: str) -> str:
+    """A colour *code* has digits (16K08Z). Descriptive names ('black', 'Nero') say nothing about the variant."""
+    return value if re.search(r"\d", value) else ""
+
+
 def _from_json_ld(html: str, url: str) -> ProductPage | None:
     products: list[dict] = []
     for block in _LD_JSON.findall(html):
         try:
-            data = json.loads(block.strip())
+            data = json.loads(block.strip(), strict=False)  # shops often leave raw line breaks inside strings
         except json.JSONDecodeError:
             continue
         for node in _nodes(data):
@@ -190,7 +200,7 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
             page.notes.append("La ficha describe varias variantes: no se elige ninguna")
     page.title = _name(node.get("name"))
     page.brand = _name(node.get("brand"))
-    page.color = _name(node.get("color"))
+    page.color = _color_code(_name(node.get("color")))
     gtins = _gtins(node)
     page.ean_published = gtins[0] if gtins else ""
     page.identifiers = [str(node[k]) for k in ("mpn", "sku") if node.get(k)]
@@ -232,6 +242,8 @@ class _Collector(HTMLParser):
         if tag in _VOID:
             if attrs.get("itemprop") and "content" in attrs:
                 self.meta.setdefault(attrs["itemprop"].lower(), attrs["content"])
+            elif attrs.get("itemprop") and attrs.get("href"):
+                self.meta.setdefault(attrs["itemprop"].lower(), attrs["href"])
             return
         element = {"tag": tag, "attrs": attrs, "text": ""}
         self.elements.append(element)
@@ -288,7 +300,7 @@ def css_text(parsed: _Collector, selector: str) -> str:
 
 def parse_html(html: str) -> _Collector:
     parsed = _Collector()
-    parsed.feed(html)
+    parsed.feed(html.replace("--!>", "-->"))  # HTML5 closes a comment with --!>; the stdlib parser would swallow the page
     parsed.close()
     return parsed
 
@@ -334,10 +346,39 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
         page.includes_tax = tax_policy == "included"
         page.notes.append(f"IVA según la política verificada del competidor ({tax_policy})")
     _infer_tax_from_pretax(page, meta)
+    _enrich(page, html, url)
     region = re.fullmatch(r"[a-z]{2}[-_]([A-Za-z]{2})", parsed.lang.strip())
     if region:  # the page declares its own locale, e.g. <html lang="es-ES">; the domain is never used
         page.market = region.group(1).upper()
+    elif (locale := _PRESTASHOP_LOCALE.search(html)):
+        page.market = locale.group(1)
+        page.notes.append("Mercado según el idioma/región publicado por la tienda (PrestaShop)")
     return page
+
+
+def _enrich(page: ProductPage, html: str, url: str) -> None:
+    """Facts the page publishes outside JSON-LD: EAN in the visible specification, calibre in a manufacturer code,
+    currency in the shop's own configuration. Each is used only when the structured data left the field empty."""
+    if not page.ean_published:
+        found: list[str] = []
+        for raw in [*_EAN_LABELLED.findall(html), *_EAN_DATA_ATTR.findall(html)]:
+            try:
+                found.append(normalize_gtin(raw))
+            except ValueError:
+                continue
+        distinct = list(dict.fromkeys(found))
+        if len(distinct) == 1:
+            page.ean_published = distinct[0]
+            page.notes.append("EAN leído de la especificación visible de la ficha")
+        elif len(distinct) > 1:
+            page.notes.append("La ficha muestra varios EAN (variantes): no se toma ninguno")
+    if "-" not in page.caliber:
+        from_code = next((c for c in map(caliber_from_code, page.identifiers) if c), "")
+        lens = extract_lens(page.title) or extract_lens(urlparse(page.url).path.rstrip("/").rsplit("/", 1)[-1])
+        page.caliber = from_code or page.caliber or lens
+    if page.price is not None and not page.currency and (found := _PRESTASHOP_CURRENCY.search(html)):
+        page.currency = found.group(1)
+        page.notes.append("Moneda según la configuración de la tienda publicada en la ficha")
 
 
 _VAT_FACTORS = {1.21: 21.0, 1.10: 10.0, 1.04: 4.0}
