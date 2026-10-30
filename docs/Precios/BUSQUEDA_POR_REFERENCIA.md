@@ -30,7 +30,7 @@ Un `exact_match` declarado en un JSON que no se verifica contra el catálogo **s
 
 ## Datos estructurados
 
-`offers` y `search_results` guardan `ean_published`, `model_code`, `color_code`, `caliber` y `match_basis`; `offers` también `price_includes_tax` y `vat_rate`. IVA no incluido queda fuera de las comparaciones y gráficos; IVA no determinado en una observación nueva la deja en `manual_review`. El calibre del catálogo está en `products.caliber` (`lente-puente`, p. ej. `63-13`). Las columnas se añaden solas a bases existentes.
+`offers` y `search_results` guardan `ean_published`, `model_code`, `color_code`, `caliber` y `match_basis`; `offers` también `price_includes_tax` y `vat_rate`. IVA no incluido o no determinado (NULL) queda fuera de las comparaciones y gráficos (se conserva almacenado); IVA no determinado en una observación nueva la deja en `manual_review`. El calibre del catálogo está en `products.caliber` (`lente-puente`, p. ej. `63-13`). Las columnas se añaden solas a bases existentes.
 
 ## Importar observaciones (JSON)
 
@@ -49,7 +49,7 @@ python price_observations.py import observaciones.json --apply    # escribe en l
 ## Catálogo y competidores
 
 - `python price_observations.py sync-catalog [--apply]`: completa modelo, color y calibre desde Odoo (**solo lectura**, simulación por defecto).
-- Mercado y moneda de los competidores: por defecto `ES`/`EUR` al importarlos (editable en la interfaz). Para bases existentes, `PriceComparatorStore.fill_competitor_defaults(apply=True)` rellena solo los vacíos.
+- Mercado y moneda de los competidores: no se asumen. Quedan vacíos hasta que se verifiquen (editable en la interfaz). `ES`/`EUR` es solo el mercado objetivo de la comparación (precio Vytria). Las observaciones JSON deben traer `mercado` (y `moneda` si hay precio); si faltan se rechazan con aviso. `PriceComparatorStore.fill_competitor_defaults()` solo lista los pendientes; `apply=True` exige `market=` y `currency=` confirmados explícitamente.
 - «Diferencia %» principal = diferencia ÷ precio Vytria (`difference_pct`); sobre el competidor queda en `difference_vs_competitor_pct`.
 
 ## Cobertura de competidores

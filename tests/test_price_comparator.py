@@ -30,10 +30,11 @@ COMPETITORS = pd.DataFrame([
 
 
 def _offer(competitor, *, price, currency="EUR", fx="", promo="", available="available",
-           match="exact_match", market="ES", domain=None):
+           match="exact_match", market="ES", domain=None, tax="sí"):
     domain = domain or f"{competitor.lower()}.example"
     return {
         "EAN": "036000291452",
+        "IVA incluido": tax,
         "Competidor": competitor,
         "Precio": str(price),
         "Precio promocional": str(promo),
@@ -110,9 +111,9 @@ def test_comparison_uses_exact_available_fresh_same_market_offers_and_eur_fx(tmp
     assert store.import_own_prices(own).imported == 1
     assert store.import_own_prices(own).imported == 0
     offers = pd.DataFrame([
+        _offer("Tienda EUR", price=70, available="unavailable", domain="eur.example"),
         _offer("Tienda EUR", price=100, promo=80, domain="eur.example"),
         _offer("Tienda USD", price=90, currency="USD", fx=0.9, domain="usd.example"),
-        _offer("Tienda EUR", price=70, available="unavailable", domain="eur.example"),
         _offer("Tienda USD", price=60, match="probable_match", currency="USD",
                fx=0.9, domain="usd.example"),
         _offer("Tienda EUR", price=10, market="FR", domain="eur.example"),

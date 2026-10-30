@@ -11,7 +11,9 @@ import streamlit as st
 from cloud_design import page_title
 from competitor_requirements import requirement_for
 import price_analytics as analytics
-from price_comparator import RETENTION_MONTHS_OPTIONS, PriceComparatorStorageError, PriceComparatorStore
+from price_comparator import (
+    RETENTION_MONTHS_OPTIONS, PriceComparatorStorageError, PriceComparatorStore, exclusion_reason,
+)
 from price_connectors import CONNECTORS, ConnectorError
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
@@ -234,8 +236,10 @@ def _render_detail(store: PriceComparatorStore, summary: pd.DataFrame, expiry: i
     if not offers.empty:
         latest = offers.sort_values(["captured_at", "id"]).groupby(["competitor_id", "market"]).tail(1).copy()
         latest["Estado del precio"] = latest["captured_at"].map(lambda value: analytics.price_state(value, expiry))
+        latest["Uso en comparación"] = latest.apply(
+            lambda item: exclusion_reason(item.to_dict()) or "Comparable", axis=1)
         st.dataframe(latest[["competitor_name", "price", "promotional_price", "currency", "availability",
-                             "match_status", "captured_at", "Estado del precio", "url"]].rename(columns={
+                             "match_status", "Uso en comparación", "captured_at", "Estado del precio", "url"]].rename(columns={
             "competitor_name": "Competidor", "price": "Precio", "promotional_price": "Promoción",
             "currency": "Moneda", "availability": "Disponibilidad", "match_status": "Coincidencia",
             "captured_at": "Último cambio", "url": "URL"}), width="stretch", hide_index=True)

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from price_comparator import PriceComparatorStore
+from price_comparator import PriceComparatorStore, comparable_offers
 
 WINDOWS = {"7 días": 7, "30 días": 30, "90 días": 90, "12 meses": 365}
 POSITION_BEST = "Vytria con el mejor precio"
@@ -109,11 +109,7 @@ def comparable_pairs(summary: pd.DataFrame, offers: pd.DataFrame) -> pd.DataFram
     if summary.empty or offers.empty:
         return pd.DataFrame(columns=columns)
     own = summary[summary["own_price_eur"].notna() & (summary["own_price_eur"] > 0)][["ean", "market", "own_price_eur"]]
-    valid = offers[
-        (offers["match_status"] == "exact_match") & (offers["availability"] == "available")
-        & (offers["price_includes_tax"].isna() | (offers["price_includes_tax"] == 1))
-        & offers["fx_to_eur"].notna()
-    ]
+    valid = comparable_offers(offers)
     joined = valid.merge(own, on=["ean", "market"], how="inner")
     if joined.empty:
         return pd.DataFrame(columns=columns)
@@ -159,7 +155,7 @@ def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.Data
                o.fx_to_eur,o.availability,o.match_status,o.captured_at,k.last_ok_at,k.last_offer_id
         FROM offers o JOIN competitors c ON c.id=o.competitor_id
         LEFT JOIN offer_checks k ON k.last_offer_id=o.id
-        WHERE o.match_status='exact_match' AND COALESCE(o.price_includes_tax,1)=1"""
+        WHERE o.match_status='exact_match' AND o.price_includes_tax=1"""
     params: tuple = ()
     if ean:
         query += " AND o.ean=?"
@@ -240,7 +236,6 @@ def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime
     end = now or _utc()
     vytria = _vytria_frame(store)
     offers = _offer_frame(store)
-    offers = offers[offers["availability"] == "available"]
     if vytria.empty or offers.empty:
         return pd.DataFrame(columns=["day", "best_price_pct", "compared"])
     rows = []
@@ -250,6 +245,8 @@ def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime
         own = vytria[vytria["recorded_at"] <= cutoff].groupby("ean")["price"].last()
         latest = offers[offers["captured_at"] <= cutoff].sort_values(["captured_at", "id"]) \
             .groupby(["ean", "competitor_id", "market"]).tail(1)
+        # Availability is checked on the latest observation: an out-of-stock update must not revive an older price.
+        latest = latest[latest["availability"] == "available"]
         minimum = latest.groupby("ean")["eur"].min()
         joined = pd.concat([own.rename("own"), minimum.rename("min")], axis=1, join="inner")
         if len(joined):

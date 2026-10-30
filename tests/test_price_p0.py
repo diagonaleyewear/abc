@@ -20,7 +20,7 @@ def test_seed_registers_14_competitors_with_safe_defaults(tmp_path):
 
     assert added["competitors"] == 14 and added["schedules"] == 14
     competitors = store.competitors()
-    assert set(competitors["market"]) == {"ES"} and set(competitors["currency"]) == {"EUR"}
+    assert set(competitors["market"]) == {""} and set(competitors["currency"]) == {""}
     assert sorted(competitors["name"]) == sorted(name for name, _ in COMPETITORS)
     with store._connect() as connection:
         rows = connection.execute("SELECT enabled,interval_hours,max_requests_per_run,pause_seconds,max_attempts,"
@@ -53,13 +53,13 @@ def test_seed_is_idempotent_and_never_overwrites_existing_values(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM competitors").fetchone()[0] == 14
 
 
-def test_seed_fills_blank_market_and_keeps_existing_competitor_ids(tmp_path):
+def test_seed_keeps_blank_market_and_existing_competitor_ids(tmp_path):
     store = PriceComparatorStore(tmp_path / "legacy.sqlite3")
     with store._connect() as connection, connection:
         connection.execute("INSERT INTO competitors(id,name,url,domain) VALUES('blickers-com','Blickers','https://www.blickers.com/','blickers.com')")
     store.seed_defaults()
     legacy = store.competitors().set_index("id").loc["blickers-com"]
-    assert (legacy["market"], legacy["currency"], legacy["url"]) == ("ES", "EUR", "https://www.blickers.com/")
+    assert (legacy["market"], legacy["currency"], legacy["url"]) == ("", "", "https://www.blickers.com/")
     assert len(store.competitors()) == 14
 
 
@@ -106,6 +106,7 @@ def test_positioning_averages_same_references_and_flags_threshold():
     ("A", "X", 50.0, "available", "rejected", "ES", 1),
     ("A", "X", 50.0, "available", "exact_match", "FR", 1),
     ("A", "X", 50.0, "available", "exact_match", "ES", 0),
+    ("A", "X", 50.0, "available", "exact_match", "ES", None),
 ])
 def test_positioning_excludes_offers_that_are_not_comparable(row):
     summary, offers = _frames([row])

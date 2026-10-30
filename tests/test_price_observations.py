@@ -115,6 +115,7 @@ def test_price_and_availability_changes_keep_history(db, tmp_path):
 def test_reference_only_observation_resolves_through_normalised_reference(db, tmp_path):
     obs = {"referencia": "BOTTEGA VENETA BV1274S 005", "competidor": "Visio Factory", "marca": "Bottega Veneta",
            "modelo": "BV1274S", "color": "005", "calibre": "63-13", "precio_venta": 300, "iva_incluido": True,
+           "moneda": "EUR", "mercado": "ES",
            "url": "https://www.visiofactory.es/bv1274s-005.html", "disponibilidad": "available",
            "coincidencia": "exact_match", "evidencia": "Modelo, color y calibre", "metodo": "Ficha pública",
            "fecha_observacion": "2026-11-01T10:00:00+01:00"}
@@ -165,16 +166,25 @@ def test_unknown_schema_and_competitor_are_reported(db, tmp_path):
     assert po.import_observations(_write(tmp_path, _data(competidor="Inventada")), db)["errors"]
 
 
-def test_competitor_defaults_and_backfill(tmp_path):
+def test_competitor_market_and_currency_are_not_assumed(tmp_path):
     store = PriceComparatorStore(tmp_path / "p.sqlite3")
     store.import_competitors(COMPETITORS)
-    assert set(store.competitors()["market"]) == {"ES"} and set(store.competitors()["currency"]) == {"EUR"}
-    with closing(sqlite3.connect(store.database_path)) as connection, connection:
-        connection.execute("UPDATE competitors SET market='',currency=''")
+    assert set(store.competitors()["market"]) == {""} and set(store.competitors()["currency"]) == {""}
     assert len(store.fill_competitor_defaults()) == 2
     assert set(store.competitors()["market"]) == {""}
-    store.fill_competitor_defaults(apply=True)
-    assert set(store.competitors()["market"]) == {"ES"}
+    with pytest.raises(ValueError, match="verificados"):
+        store.fill_competitor_defaults(apply=True)
+    store.fill_competitor_defaults(apply=True, market="ES", currency="eur")
+    assert set(store.competitors()["market"]) == {"ES"} and set(store.competitors()["currency"]) == {"EUR"}
+
+
+def test_observation_without_verified_market_or_currency_is_not_imported(db, tmp_path):
+    for missing in ("mercado", "moneda"):
+        data = _data()
+        data["observaciones"][0].pop(missing, None)
+        report = po.import_observations(_write(tmp_path, data), db)
+        assert report["errors"] and "no se asumen" in report["errors"][0]
+        assert report["inserted"] == 0 and _count(db, "offers") == 0
 
 
 def test_coverage_requires_proof_for_operational(db):

@@ -20,7 +20,8 @@ from filelock import FileLock, Timeout
 GTIN_ERROR = "EAN/UPC debe ser GTIN-12 o GTIN-13 válido"
 MATCH_STATES = {"exact_match", "probable_match", "manual_review", "not_found", "error", "rejected"}
 MATCH_BASES = {"", "ean", "reference"}
-DEFAULT_MARKET, DEFAULT_CURRENCY = "ES", "EUR"
+DEFAULT_MARKET, DEFAULT_CURRENCY = "ES", "EUR"  # target market of the comparison (Vytria), NOT competitor data
+TARGET_MARKET, TARGET_CURRENCY = DEFAULT_MARKET, DEFAULT_CURRENCY
 COVERAGE_STATUSES = {"not_checked", "no_authorized_connector", "pending_authorization", "blocked",
                      "manual_verified", "operational"}
 # Columns added after the first release; CREATE TABLE IF NOT EXISTS cannot add them to existing databases.
@@ -369,8 +370,9 @@ class PriceComparatorStore:
     def seed_defaults(self) -> dict[str, int]:
         """Persist the initial configuration. Idempotent: existing values are never overwritten.
 
-        Registers the 14 reference competitors (ES/EUR), the general settings and one disabled
+        Registers the 14 reference competitors, the general settings and one disabled
         schedule row per competitor with the default limits. Nothing is enabled or queried.
+        Competitor market/currency stay empty until verified: ES/EUR is only the comparison target.
         """
         from competitor_requirements import CHECKED_ON, COMPETITORS, METHOD_STATUS, requirement_for
 
@@ -382,16 +384,14 @@ class PriceComparatorStore:
                     competitor_id = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
                     added["competitors"] += connection.execute(
                         """INSERT OR IGNORE INTO competitors(id,name,url,domain,market,currency)
-                           VALUES(?,?,?,?,?,?)""",
-                        (competitor_id, name, url, domain, DEFAULT_MARKET, DEFAULT_CURRENCY)).rowcount
+                           VALUES(?,?,?,?,'','')""",
+                        (competitor_id, name, url, domain)).rowcount
                     method, status = METHOD_STATUS[name]
                     added["coverage"] += connection.execute(
                         """INSERT OR IGNORE INTO competitor_coverage(competitor_id,method,integration_status,
                                restrictions,allowed_frequency,notes,last_checked_at) VALUES(?,?,?,?,?,?,?)""",
                         (competitor_id, method, status, requirement_for(name)[0],
                          "Ninguna hasta obtener autorización", "", CHECKED_ON)).rowcount
-                connection.execute("UPDATE competitors SET market=? WHERE market=''", (DEFAULT_MARKET,))
-                connection.execute("UPDATE competitors SET currency=? WHERE currency=''", (DEFAULT_CURRENCY,))
                 for key, value in SETTING_DEFAULTS.items():
                     added["settings"] += connection.execute(
                         "INSERT OR IGNORE INTO comparator_settings(key,value) VALUES(?,?)", (key, value)).rowcount
@@ -513,11 +513,9 @@ class PriceComparatorStore:
                     competitor_id = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
                     old = connection.execute("SELECT 1 FROM competitors WHERE id=?", (competitor_id,)).fetchone()
                     connection.execute("""
-                        INSERT INTO competitors(id,name,url,domain,market,currency) VALUES(?,?,?,?,?,?)
-                        ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,domain=excluded.domain,
-                            market=CASE WHEN competitors.market='' THEN excluded.market ELSE competitors.market END,
-                            currency=CASE WHEN competitors.currency='' THEN excluded.currency ELSE competitors.currency END
-                    """, (competitor_id, name, url, domain, DEFAULT_MARKET, DEFAULT_CURRENCY))
+                        INSERT INTO competitors(id,name,url,domain,market,currency) VALUES(?,?,?,?,'','')
+                        ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,domain=excluded.domain
+                    """, (competitor_id, name, url, domain))
                     if old:
                         updated += 1
                     else:
@@ -526,14 +524,21 @@ class PriceComparatorStore:
                     rejected.append(f"Fila {index + 2}: {exc}")
         return ImportReport(imported, updated, tuple(rejected))
 
-    def fill_competitor_defaults(self, *, apply: bool = False) -> list[str]:
-        """Fill the empty market/currency of existing competitors (ES/EUR). Only reports unless ``apply``."""
+    def fill_competitor_defaults(self, *, apply: bool = False, market: str = "", currency: str = "") -> list[str]:
+        """List competitors whose real market/currency is not verified yet.
+
+        Nothing is assumed: with ``apply`` the empty fields are filled only with the ``market`` and ``currency``
+        explicitly confirmed by the caller (ES/EUR is the comparison target, not a competitor fact).
+        """
+        market, currency = market.strip(), currency.strip().upper()
+        if apply and not (market and re.fullmatch(r"[A-Z]{3}", currency)):
+            raise ValueError("Indique mercado y moneda ISO verificados para aplicar")
         with self._connect() as connection, connection:
             pending = connection.execute(
                 "SELECT id,market,currency FROM competitors WHERE market='' OR currency=''").fetchall()
             if apply:
-                connection.execute("UPDATE competitors SET market=? WHERE market=''", (DEFAULT_MARKET,))
-                connection.execute("UPDATE competitors SET currency=? WHERE currency=''", (DEFAULT_CURRENCY,))
+                connection.execute("UPDATE competitors SET market=? WHERE market=''", (market,))
+                connection.execute("UPDATE competitors SET currency=? WHERE currency=''", (currency,))
         return [row["id"] for row in pending]
 
     def save_competitors(self, frame: pd.DataFrame) -> None:
@@ -976,31 +981,17 @@ class PriceComparatorStore:
         for product in products.to_dict("records"):
             own_rows = own[own["ean"] == product["ean"]]
             own_record = own_rows.sort_values("captured_at").iloc[-1].to_dict() if not own_rows.empty else None
-            tax_ok = offers["price_includes_tax"].isna() | (offers["price_includes_tax"] == 1)
-            valid_product_offers = offers[
-                (offers["ean"] == product["ean"])
-                & (offers["match_status"] == "exact_match")
-                & (offers["availability"] == "available")
-                & tax_ok
-            ]
+            valid_product_offers = product_offers = comparable_offers(
+                offers[offers["ean"] == product["ean"]])
             comparable = []
             if own_record:
-                matched = offers[
-                    (offers["ean"] == product["ean"])
-                    & (offers["market"] == own_record["market"])
-                    & (offers["match_status"] == "exact_match")
-                    & (offers["availability"] == "available")
-                    & tax_ok
-                ]
+                matched = product_offers[product_offers["market"] == own_record["market"]]
                 for competitor_id, group in matched.groupby("competitor_id"):
-                    offer = group.sort_values("captured_at").iloc[-1].to_dict()
-                    rate = offer["fx_to_eur"]
-                    if rate is None or pd.isna(rate):
-                        continue
+                    offer = group.iloc[-1].to_dict()
                     effective = offer["promotional_price"]
                     if effective is None or pd.isna(effective):
                         effective = offer["price"]
-                    effective_eur = float(effective) * float(rate)
+                    effective_eur = float(effective) * float(offer["fx_to_eur"])
                     comparable.append((effective_eur, offer))
             own_eur = None
             minimum = mean = maximum = diff = diff_pct = diff_vs_competitor_pct = None
@@ -1063,3 +1054,37 @@ class PriceComparatorStore:
 
 def _fingerprint(values: tuple[Any, ...]) -> str:
     return hashlib.sha256(repr(values).encode("utf-8")).hexdigest()
+
+
+def comparable_offers(offers: pd.DataFrame) -> pd.DataFrame:
+    """Offers that may enter a price comparison, oldest to newest.
+
+    Only the latest exact observation of each (EAN, competitor, market) counts, and it is then required to be
+    available, with tax-inclusive price explicitly confirmed (``price_includes_tax = 1``) and an EUR rate.
+    Filtering after taking the latest prevents an out-of-stock or unknown-VAT update from silently falling back
+    to an older price. Older observations stay stored for consultation and history.
+    """
+    if offers.empty:
+        return offers
+    exact = offers[offers["match_status"] == "exact_match"]
+    latest = exact.sort_values(["captured_at", "id"]).groupby(["ean", "competitor_id", "market"]).tail(1)
+    return latest[(latest["availability"] == "available") & (latest["price_includes_tax"] == 1)
+                  & latest["fx_to_eur"].notna()].sort_values(["captured_at", "id"])
+
+
+def exclusion_reason(offer: dict[str, Any], latest: bool = True) -> str:
+    """Why a stored offer is not used in comparisons ('' when it is)."""
+    if offer["match_status"] != "exact_match":
+        return "Coincidencia no exacta"
+    if not latest:
+        return "Sustituida por una observación posterior"
+    if offer["availability"] != "available":
+        return "Sin stock" if offer["availability"] == "unavailable" else "Disponibilidad desconocida"
+    tax = offer.get("price_includes_tax")
+    if tax is None or pd.isna(tax):
+        return "IVA no confirmado"
+    if tax != 1:
+        return "Precio sin IVA"
+    if offer.get("fx_to_eur") is None or pd.isna(offer.get("fx_to_eur")):
+        return "Sin tipo de cambio a EUR"
+    return ""

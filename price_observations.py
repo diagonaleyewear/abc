@@ -25,7 +25,7 @@ from typing import Any, Callable, Iterable
 import pandas as pd
 
 from price_comparator import (
-    DEFAULT_MARKET, ImportReport, PriceComparatorStore, normalize_gtin, resolve_database_path,
+    ImportReport, PriceComparatorStore, normalize_gtin, resolve_database_path,
 )
 from price_references import ReferenceIndex, search_plan
 
@@ -72,6 +72,11 @@ def observations_to_frame(data: dict, index: ReferenceIndex) -> tuple[pd.DataFra
         if not ean:
             errors.append(f"{label}: falta ean_consultado o referencia")
             continue
+        market, currency = _clean(obs.get("mercado")), _clean(obs.get("moneda"))
+        if not market or (obs.get("precio_venta") is not None and not currency):
+            # The target market (ES/EUR) is never assumed for what a competitor actually published.
+            errors.append(f"{label}: mercado y moneda observados son obligatorios; no se asumen valores por defecto")
+            continue
         state = _clean(obs.get("estado")) or "observada"
         price = obs.get("precio_venta")
         match = _clean(obs.get("coincidencia")) or "manual_review"
@@ -88,7 +93,7 @@ def observations_to_frame(data: dict, index: ReferenceIndex) -> tuple[pd.DataFra
             "Precio promocional": obs.get("precio_promocional") or "",
             "Precio anterior": obs.get("precio_anterior") or "",
             "Coste envío": obs.get("coste_envio") or "",
-            "Moneda": obs.get("moneda", "EUR"), "Mercado": obs.get("mercado") or DEFAULT_MARKET,
+            "Moneda": currency, "Mercado": market,
             "URL": obs.get("url", ""), "Disponibilidad": obs.get("disponibilidad") or "unknown",
             "Estado coincidencia": match, "Evidencia": note or state,
             "Método": obs.get("metodo") or "Importación JSON",

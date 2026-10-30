@@ -30,7 +30,8 @@ datos almacenados; nunca consulta ninguna fuente al abrirse. Si un indicador no 
   competidor e importación de catálogo, precios Vytria y ofertas.
 
 Al abrir la página por primera vez se guarda la configuración inicial (`seed_defaults`, idempotente, nunca
-sobrescribe): los 14 competidores (ES/EUR), retención 12 meses, caducidad 7 días, umbral 5 % y, por
+sobrescribe): los 14 competidores (mercado y moneda vacíos hasta verificarlos; ES/EUR es solo el mercado
+objetivo de la comparación), retención 12 meses, caducidad 7 días, umbral 5 % y, por
 competidor, 24 h, 20 peticiones, pausa 2 s y 3 reintentos, todos deshabilitados.
 
 Botones superiores: **Actualizar precios Vytria** (Odoo, en hilo) y **Actualizar competencia** (solo
@@ -39,7 +40,11 @@ competidores habilitados, en hilo). Ninguno bloquea Streamlit.
 ## Reglas de datos
 
 - Solo precios Vytria `validated` entran en la comparación. Competencia: ofertas `exact_match`, `available`,
-  mismo mercado y comprobadas dentro del plazo de caducidad (7 días por defecto, configurable 1–90).
+  con **IVA incluido confirmado** (`price_includes_tax = 1`; NULL o 0 quedan fuera), mismo mercado que el
+  precio Vytria, tipo de cambio a EUR y comprobadas dentro del plazo de caducidad (7 días por defecto,
+  configurable 1–90). Solo cuenta la última observación de cada EAN/competidor/mercado: una posterior sin
+  stock o con IVA no confirmado no rescata un precio antiguo. Las ofertas excluidas se conservan (tabla de la
+  pestaña Histórico, columna «Uso en comparación»).
 - Estados del precio: **vigente** (≤ caducidad), **último conocido** (≤ 2 × caducidad, visible, no
   comparable), **caducado** (más antiguo).
 - Cada cambio de precio crea una oferta nueva (histórico). Una comprobación sin cambio solo actualiza
