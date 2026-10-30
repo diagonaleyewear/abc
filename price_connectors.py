@@ -52,6 +52,16 @@ class Observation:
     previous_price: str = ""
     shipping_cost: str = ""
     market: str = ""
+    # Filled by web connectors; the feed connector leaves the defaults (exact by EAN, VAT unknown).
+    match_status: str = "exact_match"
+    method: str = ""
+    evidence: str = ""
+    tax_included: bool | None = None
+    ean_published: str = ""
+    caliber: str = ""
+    color: str = ""
+    brand: str = ""
+    title: str = ""
 
 
 class Connector(Protocol):
