@@ -366,6 +366,40 @@ class PriceComparatorStore:
                         if name not in existing:
                             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
+    def seed_defaults(self) -> dict[str, int]:
+        """Persist the initial configuration. Idempotent: existing values are never overwritten.
+
+        Registers the 14 reference competitors (ES/EUR), the general settings and one disabled
+        schedule row per competitor with the default limits. Nothing is enabled or queried.
+        """
+        from competitor_requirements import CHECKED_ON, COMPETITORS, METHOD_STATUS, requirement_for
+
+        added = {"competitors": 0, "settings": 0, "schedules": 0, "coverage": 0}
+        with FileLock(str(self.database_path) + ".schema.lock", timeout=10):
+            with self._connect() as connection, connection:
+                for name, url in COMPETITORS:
+                    domain = (urlparse(url).hostname or "").lower().removeprefix("www.")
+                    competitor_id = re.sub(r"[^a-z0-9]+", "-", domain).strip("-")
+                    added["competitors"] += connection.execute(
+                        """INSERT OR IGNORE INTO competitors(id,name,url,domain,market,currency)
+                           VALUES(?,?,?,?,?,?)""",
+                        (competitor_id, name, url, domain, DEFAULT_MARKET, DEFAULT_CURRENCY)).rowcount
+                    method, status = METHOD_STATUS[name]
+                    added["coverage"] += connection.execute(
+                        """INSERT OR IGNORE INTO competitor_coverage(competitor_id,method,integration_status,
+                               restrictions,allowed_frequency,notes,last_checked_at) VALUES(?,?,?,?,?,?,?)""",
+                        (competitor_id, method, status, requirement_for(name)[0],
+                         "Ninguna hasta obtener autorización", "", CHECKED_ON)).rowcount
+                connection.execute("UPDATE competitors SET market=? WHERE market=''", (DEFAULT_MARKET,))
+                connection.execute("UPDATE competitors SET currency=? WHERE currency=''", (DEFAULT_CURRENCY,))
+                for key, value in SETTING_DEFAULTS.items():
+                    added["settings"] += connection.execute(
+                        "INSERT OR IGNORE INTO comparator_settings(key,value) VALUES(?,?)", (key, value)).rowcount
+                added["schedules"] = connection.execute(
+                    """INSERT OR IGNORE INTO competitor_schedule(competitor_id)
+                       SELECT id FROM competitors""").rowcount
+        return added
+
     def get_setting(self, key: str) -> str:
         if key not in SETTING_DEFAULTS:
             raise ValueError(f"Ajuste desconocido: {key}")

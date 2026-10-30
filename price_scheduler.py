@@ -544,7 +544,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--with-odoo", action="store_true",
                         help="Incluye la sincronización de Odoo si está activada y toca por su frecuencia")
     args = parser.parse_args(argv)
-    scheduler = CompetitorScheduler(PriceComparatorStore())
+    store = PriceComparatorStore()
+    store.seed_defaults()
+    scheduler = CompetitorScheduler(store)
     try:
         for name in ("verify", "enable", "disable", "pause", "resume"):
             target = getattr(args, name)

@@ -6,16 +6,32 @@ ahora configurable.
 
 ## Pantalla única
 
-`Comparador de precios` tiene tres pestañas:
+`Comparador de precios` muestra un encabezado fijo de indicadores y cinco pestañas. Todo se calcula con
+datos almacenados; nunca consulta ninguna fuente al abrirse. Si un indicador no puede calcularse muestra
+«Sin datos» (nunca 0 %).
 
-- **Comparación**: indicadores (Vytria confirmado, competencia comparable, % con el mejor precio, cambios
-  importantes en 7 días), tabla con filtros (marca, competidor, disponibilidad, posición), exportación
-  Excel, ficha por referencia con gráfico interactivo (7, 30, 90 días y 12 meses), evolución global de
-  competitividad y mayores diferencias. Solo lee datos almacenados; se ejecuta sin consultar ninguna fuente.
-  Si no hay ofertas muestra «No hay datos de competencia suficientes» y remite a la importación.
-- **Datos y fuentes**: catálogo, bloque Odoo (sin cambios), importación de ofertas por Excel y competidores.
-- **Configuración**: retención (3/6/12/24 meses), caducidad, umbral de cambio importante, frecuencia de Odoo
-  y configuración individual de cada competidor.
+- **Encabezado**: referencias con precio Vytria, con competencia comparable, competidores con datos
+  (x/14), diferencia media del mercado frente a Vytria y referencias donde Vytria es más caro / más barato.
+- **Resumen**: gráfico de barras con la diferencia media de cada competidor frente a Vytria
+  (`(competidor − Vytria) / Vytria`; negativo = competidor más barato), solo con las mismas referencias
+  exactas, disponibles, vigentes, con IVA y del mismo mercado; tabla con precio medio, referencias
+  comparadas, % más barato, última actualización y señal (umbral configurable); mayores diferencias y
+  evolución global.
+- **Comparativa**: tabla con filtros (marca, competidor, disponibilidad, posición), exportación Excel y
+  referencias que requieren atención.
+- **Histórico**: selector de referencia, periodo y competidores; línea escalonada con puntos de cambio y
+  comprobación, Vytria en verde corporativo (#417B7B) y paleta apta para daltonismo; una sola observación
+  se dibuja como punto, sin línea.
+- **Competidores**: los 14 con enlace a su web, estado, método, restricciones, referencias localizadas,
+  ofertas confirmadas y comparables, última comprobación y, por competidor, **qué necesitamos de Vytria**
+  (datos en `competitor_requirements.py`). Ninguno figura como operativo sin conector verificado y una
+  oferta confirmada.
+- **Configuración**: retención, caducidad, umbral, frecuencia de Odoo, configuración individual de cada
+  competidor e importación de catálogo, precios Vytria y ofertas.
+
+Al abrir la página por primera vez se guarda la configuración inicial (`seed_defaults`, idempotente, nunca
+sobrescribe): los 14 competidores (ES/EUR), retención 12 meses, caducidad 7 días, umbral 5 % y, por
+competidor, 24 h, 20 peticiones, pausa 2 s y 3 reintentos, todos deshabilitados.
 
 Botones superiores: **Actualizar precios Vytria** (Odoo, en hilo) y **Actualizar competencia** (solo
 competidores habilitados, en hilo). Ninguno bloquea Streamlit.

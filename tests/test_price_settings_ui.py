@@ -44,7 +44,7 @@ def test_page_settings_tab_lists_competitors_as_pending_and_saves_general_config
                               "render_price_comparator_page()").run(timeout=30)
     assert not app.exception
     labels = [e.label for e in app.expander]
-    assert sum("Pendiente de configurar" in label for label in labels) == 2
+    assert sum("Pendiente de configurar" in label for label in labels) == 16  # 14 reference + 2 test competitors
     app.selectbox(key="cfg_retention").set_value(6)
     app.number_input(key="cfg_expiry").set_value(10)
     app.number_input(key="cfg_odoo_hours").set_value(6.0)
