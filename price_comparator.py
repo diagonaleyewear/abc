@@ -360,6 +360,47 @@ class PriceComparatorStore:
                         notes TEXT NOT NULL DEFAULT '',
                         last_checked_at TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS competitor_web_config (
+                        competitor_id TEXT PRIMARY KEY REFERENCES competitors(id),
+                        locate_strategy TEXT NOT NULL DEFAULT 'index,sitemap,site_search',
+                        search_url_template TEXT NOT NULL DEFAULT '',
+                        price_selector TEXT NOT NULL DEFAULT '',
+                        availability_selector TEXT NOT NULL DEFAULT '',
+                        structured_type TEXT NOT NULL DEFAULT '',
+                        tax_policy TEXT NOT NULL DEFAULT 'unknown',
+                        pause_seconds REAL NOT NULL DEFAULT 3,
+                        max_requests INTEGER NOT NULL DEFAULT 10,
+                        concurrency INTEGER NOT NULL DEFAULT 1,
+                        timeout_seconds REAL NOT NULL DEFAULT 15,
+                        retries INTEGER NOT NULL DEFAULT 1,
+                        access_status TEXT NOT NULL DEFAULT 'unknown',
+                        terms_reviewed INTEGER NOT NULL DEFAULT 0,
+                        terms_note TEXT NOT NULL DEFAULT '',
+                        robots_checked_at TEXT,
+                        robots_summary TEXT NOT NULL DEFAULT '',
+                        last_query_at TEXT,
+                        last_ok_at TEXT,
+                        error_count INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        blocked_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS competitor_product_urls (
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        url TEXT NOT NULL,
+                        model_code TEXT NOT NULL DEFAULT '',
+                        color_code TEXT NOT NULL DEFAULT '',
+                        caliber TEXT NOT NULL DEFAULT '',
+                        ean_published TEXT NOT NULL DEFAULT '',
+                        match_status TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'verified',
+                        verified_at TEXT NOT NULL,
+                        last_price REAL,
+                        last_availability TEXT NOT NULL DEFAULT '',
+                        last_ok_at TEXT,
+                        failures INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (competitor_id, ean, url)
+                    );
                 """)
                 for table, columns in _ADDED_COLUMNS.items():
                     existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}

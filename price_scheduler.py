@@ -26,6 +26,7 @@ from filelock import FileLock, Timeout
 
 from price_comparator import PriceComparatorStore, _number
 from price_connectors import CONNECTORS, Connector, ConnectorBlocked, ConnectorError, Observation, validate_source
+from price_web import web_connectors
 
 STATUS_LABELS = {
     "pending_config": "Pendiente de configurar",
@@ -71,7 +72,7 @@ class CompetitorScheduler:
     def __init__(self, store: PriceComparatorStore, connectors: dict[str, Connector] | None = None, *,
                  clock: Callable[[], datetime] = _utc, sleep: Callable[[float], None] = time.sleep) -> None:
         self.store = store
-        self.connectors = connectors if connectors is not None else CONNECTORS
+        self.connectors = connectors if connectors is not None else {**CONNECTORS, **web_connectors(store)}
         self._now = clock
         self._sleep = sleep
         self.stop_requested = False  # set by SIGINT/SIGTERM: finish the current request, keep the queue
@@ -257,8 +258,10 @@ class CompetitorScheduler:
             due = config["next_run_at"] is None or config["next_run_at"] <= _iso(now)
             if open_jobs == 0 and (due or force):
                 self._start_cycle(connection, config, plan, now)
-            if connection.execute("""SELECT COUNT(*) FROM scheduler_jobs WHERE competitor_id=? AND status='pending'
-                AND not_before<=?""", (competitor_id, _iso(now))).fetchone()[0] == 0:
+            pending_now = connection.execute(
+                "SELECT COUNT(*) FROM scheduler_jobs WHERE competitor_id=? AND status='pending' AND not_before<=?",
+                (competitor_id, _iso(now))).fetchone()[0]
+            if pending_now == 0:
                 return summary
             run_id = connection.execute("""INSERT INTO scheduler_runs(competitor_id,trigger,started_at,status)
                 VALUES(?,?,?,'running')""", (competitor_id, trigger, _iso(now))).lastrowid
@@ -348,8 +351,11 @@ class CompetitorScheduler:
             "Precio promocional": item.promotional_price, "Precio anterior": item.previous_price,
             "Coste envío": item.shipping_cost, "Moneda": item.currency, "Tipo cambio EUR": "",
             "Mercado": market, "URL": item.url, "Disponibilidad": item.availability,
-            "Estado coincidencia": "exact_match", "Método": f"feed:{connector.name}",
-            "Evidencia": "Feed autorizado, identificación por EAN", "Fecha consulta": stamp,
+            "Estado coincidencia": item.match_status, "Método": item.method or f"feed:{connector.name}",
+            "Evidencia": item.evidence or "Feed autorizado, identificación por EAN", "Fecha consulta": stamp,
+            "Marca": item.brand, "Color": item.color, "Calibre": item.caliber, "EAN publicado": item.ean_published,
+            "Título": item.title,
+            "IVA incluido": "" if item.tax_included is None else ("sí" if item.tax_included else "no"),
         }])
         report = self.store.import_offers(frame)
         if report.rejected:
@@ -379,7 +385,8 @@ class CompetitorScheduler:
         current = (offer["price"], offer["promotional_price"], offer["previous_price"], offer["shipping_cost"])
         return (offer["match_status"] == "exact_match" and fields == current
                 and item.currency == offer["currency"] and item.availability == offer["availability"]
-                and item.url == offer["url"])
+                and item.url == offer["url"]
+                and (None if item.tax_included is None else int(item.tax_included)) == offer["price_includes_tax"])
 
     def _touch_check(self, ean: str, competitor_id: str, market: str, offer_id: int, stamp: str) -> None:
         with self.store._connect() as connection, connection:
@@ -583,6 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     stop = {"now": False}
+
     def request_stop(*_: object) -> None:
         stop["now"] = True
         scheduler.stop_requested = True
@@ -611,4 +619,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -16,6 +16,7 @@ from price_comparator import (
 )
 from price_connectors import CONNECTORS, ConnectorError
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
+from price_web import WebPriceSearch, WebSearchError
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
 
 
@@ -41,6 +42,27 @@ PAGE_STYLE = """<style>
 [data-testid="stMetricValue"] { font-size: 1.5rem; line-height: 1.2; }
 [data-testid="stMetricLabel"] p, [data-testid="stMetricValue"] div { white-space: normal; overflow-wrap: anywhere; line-height: 1.25; }
 </style>"""
+WEB_MAX_COMPETITORS = 3
+WEB_MAX_PRODUCTS = 5
+WEB_STATE_TEXT = {
+    "exact": "Coincidencia exacta", "probable": "Probable: requiere revisión", "rejected": "Descartada",
+    "not_found": "Sin ficha localizada", "blocked": "Bloqueado por el sitio", "not_allowed": "No consultable",
+    "error": "Error de consulta",
+}
+WEB_LEVEL_TEXT = {"ean": "EAN exacto", "brand_model_color": "marca + modelo + color", "model_color": "modelo + color",
+                  "normalized_variants": "variante normalizada de la referencia"}
+WEB_STATUS_TEXT = {
+    "implemented": "Implementado, sin verificar", "verified": "Verificado con oferta real",
+    "operational": "Operativo", "blocked": "Bloqueado por el sitio", "not_allowed": "robots.txt no lo permite",
+    "pending_authorization": "Pendiente de autorización",
+}
+WEB_ACCESS_TEXT = {
+    "unknown": "Sin comprobar", "robots_allowed": "robots.txt lo permite", "robots_restricted": "robots.txt lo restringe",
+    "blocked": "Bloqueado (403/429/CAPTCHA)", "pending_authorization": "Pendiente de autorización",
+}
+WEB_STRATEGY_TEXT = {"index": "Fichas conocidas", "sitemap": "Sitemap público", "site_search": "Buscador interno",
+                     "external": "Buscador externo (no disponible)"}
+WEB_TAX_TEXT = {"unknown": "Sin comprobar (según cada ficha)", "included": "IVA incluido", "excluded": "IVA excluido"}
 TABLE_LABELS = {
     "brand": "Marca", "model": "Modelo", "ean": "EAN", "own_price_eur": "Precio Vytria",
     "best_competitor": "Mejor competidor", "competitor_min_eur": "Precio competidor",
@@ -325,7 +347,67 @@ def _render_summary(store: PriceComparatorStore, data: dict) -> None:
         st.plotly_chart(analytics.competitiveness_figure(series), width="stretch")
 
 
+def _render_web_finder(store: PriceComparatorStore) -> None:
+    st.subheader("Buscar precios en la competencia")
+    st.caption("Busque por EAN, marca + modelo + color, modelo + color o referencia (por ejemplo «BOTTEGA VENETA "
+               "BV1274S 005» o «BV1274S 005»). «Almacenados» no consulta ninguna web. «Consultar webs» lee fichas "
+               "públicas conocidas o localizadas con métodos permitidos, con pausas y límites; se detiene ante "
+               "cualquier 403/429 o CAPTCHA.")
+    search = _make_web_search(store)
+    configs = search.configs()
+    c1, c2 = st.columns([2, 2])
+    text = c1.text_input("EAN o referencia", key="web_text", placeholder="8056597875349 · PR 27ZS 16K08Z")
+    names = c2.multiselect("Competidores", list(configs["name"]), key="web_competitors",
+                           help="Vacío = todos para la búsqueda almacenada. La consulta web exige elegir 1 a "
+                                f"{WEB_MAX_COMPETITORS}.")
+    f1, f2, f3 = st.columns(3)
+    only_stock = f1.checkbox("Solo en stock", key="web_only_stock")
+    show_all = f2.checkbox("Mostrar no comparables", value=True, key="web_show_all")
+    mode = f3.radio("Modo", ["Almacenados", "Consultar webs"], horizontal=True, key="web_mode")
+    ids = [r["competitor_id"] for r in configs.to_dict("records") if r["name"] in names]
+    if not st.button("Buscar", key="web_search_button", type="primary", disabled=not text.strip()):
+        return
+    try:
+        level, products = search.resolve(text)
+        if not products:
+            st.warning("Sin coincidencias en el catálogo. Pruebe con el EAN o con modelo + color.")
+            return
+        if mode == "Consultar webs":
+            if not 1 <= len(ids) <= WEB_MAX_COMPETITORS:
+                st.error(f"Elija entre 1 y {WEB_MAX_COMPETITORS} competidores para consultar sus webs.")
+                return
+            if len(products) > WEB_MAX_PRODUCTS:
+                st.error(f"La referencia coincide con {len(products)} productos; concrete (máximo {WEB_MAX_PRODUCTS}).")
+                return
+            with st.spinner("Consultando fichas con pausas entre peticiones…"):
+                outcomes = search.run([p["ean"] for p in products], ids)
+            st.dataframe(pd.DataFrame([{
+                "EAN": o.ean, "Competidor": o.competitor, "Resultado": WEB_STATE_TEXT.get(o.state, o.state),
+                "Precio": o.page.price if o.priced else None, "Stock": o.page.availability if o.page else "",
+                "IVA incluido": {True: "Sí", False: "No", None: "Sin confirmar"}[o.page.includes_tax] if o.page else "",
+                "Ficha": o.url, "Detalle": o.detail} for o in outcomes]), width="stretch", hide_index=True,
+                column_config={"Ficha": st.column_config.LinkColumn("Ficha")})
+        _, frame = search.stored_results(text, only_in_stock=only_stock, include_non_comparable=show_all,
+                                         competitor_ids=ids)
+    except (WebSearchError, ValueError) as exc:
+        st.error(str(exc))
+        return
+    st.caption(f"Identificación: {WEB_LEVEL_TEXT.get(level, level)} · {len(products)} producto(s).")
+    if frame.empty:
+        st.info("No hay resultados que mostrar con estos filtros.")
+        return
+    st.dataframe(frame, width="stretch", hide_index=True, column_config={
+        "Precio": st.column_config.NumberColumn("Precio", format="%.2f €"),
+        "Diferencia €": st.column_config.NumberColumn("Diferencia €", format="%.2f"),
+        "Diferencia %": st.column_config.NumberColumn("Diferencia %", format="%.1f %%"),
+        "Ficha": st.column_config.LinkColumn("Ficha")})
+    st.caption("La diferencia se calcula sobre el precio de Vytria; solo «Precio almacenado» entra en las "
+               "comparativas, indicadores y gráficos.")
+
+
 def _render_comparison(store: PriceComparatorStore, data: dict) -> None:
+    _render_web_finder(store)
+    st.divider()
     summary, offers, changes = data["summary"], data["offers"], data["changes"]
     if summary.empty:
         st.info("Importe primero el catálogo piloto en la pestaña «Configuración».")
@@ -364,7 +446,79 @@ def _render_history(store: PriceComparatorStore, data: dict) -> None:
     _render_detail(store, data["summary"], data["expiry"])
 
 
+def _make_web_search(store: PriceComparatorStore) -> WebPriceSearch:
+    return WebPriceSearch(store)
+
+
+def _render_web_config(search: WebPriceSearch) -> None:
+    st.subheader("Consulta web de fichas públicas")
+    st.caption("Configuración individual por competidor. Ninguno se considera operativo hasta tener una oferta real "
+               "confirmada, el acceso comprobado y las condiciones de uso revisadas por una persona. La "
+               "comprobación de robots.txt hace una sola petición.")
+    for row in search.configs().to_dict("records"):
+        cid, key = row["competitor_id"], f"web_{row['competitor_id']}"
+        status = WEB_STATUS_TEXT.get(row["connector_status"], row["connector_status"])
+        with st.expander(f"{row['name']} · {status}"):
+            st.markdown(f"**Web:** [{row['site_url']}]({row['site_url']}) · **Acceso:** "
+                        f"{WEB_ACCESS_TEXT.get(row['access_status'], row['access_status'])}")
+            st.caption(f"{row['robots_summary'] or 'robots.txt sin comprobar'} · Fichas localizadas: "
+                       f"{int(row['located'])} · Ofertas web confirmadas: {int(row['confirmed'])} · "
+                       f"Última consulta: {row['last_query_at'] or '—'} · Errores: {int(row['error_count'])}"
+                       + (f" · Último error: {row['last_error']}" if row["last_error"] else ""))
+            try:
+                if st.button("Comprobar robots.txt", key=f"{key}_robots", disabled=row["access_status"] == "blocked"):
+                    result = search.check_access(cid)
+                    st.session_state[f"{key}_flash"] = f"{result['access_status']}: {result['summary']}"
+                    st.rerun()
+                if flash := st.session_state.pop(f"{key}_flash", ""):
+                    st.info(flash)
+                c1, c2 = st.columns(2)
+                strategies = c1.multiselect("Métodos de localización", list(WEB_STRATEGY_TEXT),
+                                            default=[s for s in row["locate_strategy"].split(",") if s in WEB_STRATEGY_TEXT],
+                                            format_func=WEB_STRATEGY_TEXT.get, key=f"{key}_strategy")
+                template = c2.text_input("Plantilla de búsqueda interna (HTTPS, con {query})",
+                                         value=row["search_url_template"], key=f"{key}_template")
+                s1, s2, s3 = st.columns(3)
+                price_selector = s1.text_input("Selector de precio (opcional)", value=row["price_selector"],
+                                               key=f"{key}_price_sel")
+                stock_selector = s2.text_input("Selector de disponibilidad (opcional)",
+                                               value=row["availability_selector"], key=f"{key}_stock_sel")
+                policies = ["unknown", "included", "excluded"]
+                tax = s3.selectbox("IVA de los precios publicados", policies, index=policies.index(row["tax_policy"]),
+                                   format_func=WEB_TAX_TEXT.get, key=f"{key}_tax",
+                                   help="Solo «incluido» si se ha comprobado en la web. Sin comprobar, el IVA se "
+                                        "toma de cada ficha y, si no consta, la oferta no es comparable.")
+                n1, n2, n3, n4 = st.columns(4)
+                pause = n1.number_input("Pausa (s)", 1.0, 3600.0, float(row["pause_seconds"]), 1.0, key=f"{key}_pause")
+                budget = n2.number_input("Peticiones máx.", 1, 200, int(row["max_requests"]), key=f"{key}_budget")
+                timeout = n3.number_input("Timeout (s)", 1.0, 120.0, float(row["timeout_seconds"]), 1.0,
+                                          key=f"{key}_timeout")
+                retries = n4.number_input("Reintentos", 0, 3, int(row["retries"]), key=f"{key}_retries")
+                reviewed = st.checkbox("Condiciones de uso revisadas por una persona", value=bool(row["terms_reviewed"]),
+                                       key=f"{key}_terms")
+                note = st.text_input("Quién y cuándo las revisó", value=row["terms_note"], key=f"{key}_terms_note")
+                if st.button("Guardar configuración web", key=f"{key}_save"):
+                    search.update_config(cid, locate_strategy=",".join(strategies) or "index",
+                                         search_url_template=template.strip(), price_selector=price_selector.strip(),
+                                         availability_selector=stock_selector.strip(), tax_policy=tax,
+                                         pause_seconds=pause, max_requests=int(budget), timeout_seconds=timeout,
+                                         retries=int(retries), terms_reviewed=reviewed, terms_note=note.strip())
+                    st.success("Configuración web guardada.")
+                    st.rerun()
+                with st.form(f"{key}_url_form", clear_on_submit=True):
+                    u1, u2 = st.columns([1, 3])
+                    ean = u1.text_input("EAN", key=f"{key}_url_ean")
+                    url = u2.text_input("URL de ficha conocida", key=f"{key}_url_value")
+                    if st.form_submit_button("Añadir ficha conocida"):
+                        search.add_known_url(cid, ean, url.strip())
+                        st.success("Ficha añadida al índice; se verificará en la próxima consulta.")
+            except (WebSearchError, ValueError) as exc:
+                st.error(str(exc))
+
+
 def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
+    _render_web_config(_make_web_search(store))
+    st.divider()
     coverage = store.coverage_table()
     competitors = store.competitors().set_index("name")
     scheduler = _make_scheduler(store)
