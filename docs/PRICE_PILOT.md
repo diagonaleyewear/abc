@@ -47,7 +47,10 @@ Robots.txt es una comprobacion adicional, nunca autorizacion suficiente.
 
 1. Sin ejecutar descargas generales, comprobar en Configuracion las
    condiciones y permisos de cada tienda, moneda y mercado. Verificar su
-   acceso antes de guardar el piloto. No activar programaciones.
+   acceso desde Configuracion web, incluso con el piloto ya guardado o
+   desactivado. La comprobacion explicita solo lee robots.txt del competidor
+   registrado; no desbloquea consultas comerciales. No activar programaciones.
+   Ver [aislamiento y comprobacion](PRICE_ROBOTS_CONFIGURATION.md).
 2. En **Competidores > Piloto de comparacion**, revisar el catalogo y precios
    vigentes. Proponer la muestra o seleccionar los 20 EAN, incluyendo las
    tres Prada. Si falta un dato requerido, Cloud rechaza el guardado indicando

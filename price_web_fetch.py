@@ -197,6 +197,41 @@ class WebFetcher:
         parsed = urlparse(url)
         return self._robots_state.get(f"{parsed.scheme}://{parsed.netloc}", "")
 
+    def inspect_robots(self, site_url: str) -> RobotsRules:
+        """Configuration-only read: one HTTPS /robots.txt, no retries, redirects or product requests."""
+        parsed = urlparse(site_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None \
+                or parsed.password is not None or parsed.port not in (None, 443):
+            raise ConnectorError("La comprobación de robots.txt requiere un origen HTTPS sin credenciales")
+        origin = f"https://{parsed.netloc}"
+        probe = WebFetcher(transport=self._transport, pause_seconds=self.pause_seconds,
+                           max_requests=min(1, max(0, self.max_requests - self.requests)),
+                           timeout=self.timeout, retries=0, sleep=self._sleep, clock=self._clock)
+        probe._last_request = self._last_request
+        probe.blocked = dict(self.blocked)
+        try:
+            status, headers, body = probe._request(origin + "/robots.txt", max_bytes=MAX_PAGE_BYTES)
+            text = body.decode("utf-8", errors="replace")
+            content_type = headers.get("Content-Type") or headers.get("content-type") or ""
+            html = bool("text/html" in content_type.lower() or
+                        re.search(r"<(?:!doctype\s+html|html|head|body|script)\b", text[:1000], re.I))
+            if _CAPTCHA.search(text[:20000]) and (html or not re.search(r"^user-agent\s*:", text, re.I | re.M)):
+                probe.blocked[_host(origin)] = "CAPTCHA o control antibot"
+                raise ConnectorBlocked("robots.txt presenta un control antibot/CAPTCHA; no se intenta superarlo")
+            if status != 200:
+                raise ConnectorError(f"robots.txt no disponible (HTTP {status}); no se siguen redirecciones")
+            if html:
+                raise ConnectorError("robots.txt no disponible: el servidor devolvió HTML en lugar de reglas")
+            rules = RobotsRules.parse(text)
+            self._robots[origin] = rules
+            self._robots_state[origin] = "robots.txt leído"
+            return rules
+        finally:
+            # Preserve the caller's budget/block memory when a manual URL verification shares a fetcher.
+            self.requests += probe.requests
+            self._last_request = probe._last_request
+            self.blocked.update(probe.blocked)
+
     def get(self, url: str, *, max_bytes: int = MAX_PAGE_BYTES) -> Fetched:
         if urlparse(url).scheme != "https":
             raise ConnectorError("Solo se consultan páginas HTTPS")

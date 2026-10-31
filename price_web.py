@@ -371,7 +371,7 @@ class WebPriceSearch:
         config = self.config(competitor_id)
         fetcher = fetcher or self._factory(config)
         if config["access_status"] == "unknown":
-            self.check_access(competitor_id, fetcher=fetcher)
+            self._check_access_locked(competitor_id, fetcher=fetcher)
             config = self.config(competitor_id)
         reason = self._gate(config)
         if reason:
@@ -452,14 +452,26 @@ class WebPriceSearch:
 
     # access -----------------------------------------------------------------------------------
     def check_access(self, competitor_id: str, fetcher: WebFetcher | None = None) -> dict[str, Any]:
-        """Read robots.txt once and record whether public product pages may be consulted by an agent."""
-        self._pilot_guard(None, competitor_id)
+        """Check a registered competitor's robots.txt, independently of commercial pilot permissions."""
+        self.config(competitor_id)
+        try:
+            with self._lock(competitor_id):
+                return self._check_access_locked(competitor_id, fetcher=fetcher)
+        except Timeout as exc:
+            raise WebSearchError("Otra ejecución está consultando a este competidor; espere para comprobar robots.txt") from exc
+
+    def _check_access_locked(self, competitor_id: str, fetcher: WebFetcher | None = None) -> dict[str, Any]:
         config = self.config(competitor_id)
-        base = config["site_url"]
+        base = validate_competitor_url(config["site_url"], config["domain"])
+        parsed = urlparse(base)
+        base = f"https://{parsed.netloc}/"
         fetcher = fetcher or self._factory(config)
+        before = fetcher.requests
         stamp = _iso(self._now())
         try:
-            rules = fetcher.rules(base)
+            if config["access_status"] == "blocked":
+                raise ConnectorBlocked("Sitio con bloqueo previo (403/429/CAPTCHA): no se insiste")
+            rules = fetcher.inspect_robots(base)
             state = fetcher.robots_state(base)
             root_ok = rules.allowed(base)
             sitemaps = ", ".join(rules.sitemaps[:3]) or "ninguno"
@@ -475,11 +487,11 @@ class WebPriceSearch:
             status, summary = "unknown", f"No se pudo comprobar: {exc}"
         with self.store._connect() as connection, connection:
             connection.execute("""UPDATE competitor_web_config SET access_status=?,robots_checked_at=?,robots_summary=?,
-                blocked_at=CASE WHEN ?='blocked' THEN ? ELSE blocked_at END,
-                last_error=CASE WHEN ? IN ('blocked','unknown') THEN ? ELSE last_error END WHERE competitor_id=?""",
+                blocked_at=CASE WHEN ?='blocked' THEN COALESCE(blocked_at,?) ELSE blocked_at END,
+                last_error=CASE WHEN ? IN ('blocked','unknown') THEN ? ELSE '' END WHERE competitor_id=?""",
                                (status, stamp, summary[:500], status, stamp, status, summary[:300], competitor_id))
         return {"competitor": config["name"], "access_status": status, "summary": summary,
-                "requests": fetcher.requests}
+                "requests": fetcher.requests - before}
 
     @staticmethod
     def _gate(config: dict) -> str:
