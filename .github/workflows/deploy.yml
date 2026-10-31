@@ -271,6 +271,7 @@ jobs:
           flake8 graph_mail_downloader.py tests/test_graph_mail_downloader.py abcd_snapshots.py tests/test_abcd_snapshots.py tests/test_abcd_snapshots_postgres.py luxoptica_auto_upload.py poll_luxoptica_mail.py save_abcd_weekly_snapshot.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 image_naming.py image_exports.py image_repository.py migrate_image_repository.py kering_media.py tests/test_kering_image_sections.py --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 market_publication.py tests/test_market_publication.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 price_discovery.py price_pilot.py price_web.py price_web_extract.py tests/test_price_discovery.py --count --select=E9,F63,F7,F82,F401,F841 --show-source --statistics
           flake8 market_publication.py tests/test_market_publication.py --count --max-complexity=10 --max-line-length=127 --statistics
           flake8 image_library.py cloud_design.py app_pages/image_library_page.py tests/test_image_library.py --count --select=E9,F63,F7,F82,F401,F841 --show-source --statistics
           flake8 kering_images.py kering_images_ui.py kering_portal.py kering_jobs.py scripts/dependency_locks.py scripts/validate_kering_portal.py tests/test_kering_images.py --count --select=E9,F63,F7,F82 --show-source --statistics

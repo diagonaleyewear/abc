@@ -138,7 +138,7 @@ def test_price_verification_dedup_and_history_survives_error(pilot):
 @pytest.mark.parametrize("override,reason", [
     ({"stock": False}, "stock"),
     ({"pretax": None}, "IVA"),
-    ({"lang": None}, "Mercado"),
+    ({"market": None}, "Mercado"),
     ({"currency": "USD"}, "Moneda"),
     ({"name": "Prada PR 27ZS WRONG 54-21"}, "Color"),
     ({"brand": "Gucci"}, "Marca"),

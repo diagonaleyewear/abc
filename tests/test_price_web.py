@@ -53,9 +53,10 @@ def test_vat_stays_unknown_without_evidence():
 
 
 def test_market_comes_from_the_page_never_from_the_domain():
-    html = page(name="Prada PR 27ZS 16K08Z 54-21", price=239, lang=None)
+    html = page(name="Prada PR 27ZS 16K08Z 54-21", price=239, lang=None, market=None)
     assert extract_product(html, "https://www.visiofactory.es/x.html").market == ""
-    assert extract_product(page(name="n", price=1, lang="fr-BE"), "https://x.es/a").market == "BE"
+    assert extract_product(page(name="n", price=1, lang="fr-BE", market=None), "https://x.es/a").market == ""
+    assert extract_product(page(name="n", price=1, lang="fr", market="BE"), "https://x.es/a").market == "BE"
 
 
 def test_strikethrough_price_is_not_the_selling_price():
@@ -134,18 +135,19 @@ def test_unknown_vat_is_stored_but_not_comparable(tmp_path):
     assert "IVA sin confirmar (no comparable)" in set(frame["Estado"])
 
 
-def test_market_not_verified_on_page_means_not_recorded(tmp_path):
+def test_market_not_verified_on_page_means_stored_noncomparable(tmp_path):
     site = FakeSite()
     store, search = make_search(tmp_path, site)
     cid = competitor_id(store)
     ean = "8056597875349"
-    site.add(url_of(PRADA[ean]["slug"]), prada_page(ean, lang=None))
+    site.add(url_of(PRADA[ean]["slug"]), prada_page(ean, market=None))
     index_url(store, cid, ean, url_of(PRADA[ean]["slug"]))
     _open_access(search, cid)
     outcome = search.run([ean], [cid])[0]
-    assert "Mercado y moneda no verificados" in outcome.detail
+    assert "Mercado sin evidencia comercial verificada" in outcome.detail
     with store._connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
+    assert store.dashboard()[0].set_index("ean").loc[ean, "competitor_count"] == 0
 
 
 def test_incompatible_market_is_rejected_by_the_importer(tmp_path):
@@ -235,7 +237,8 @@ def test_internal_search_is_used_only_when_configured_and_allowed(tmp_path):
     url = url_of(PRADA[ean]["slug"])
     site.add(f"{BASE}/buscar?q=8056597875349", f'<a href="{url}">Prada PR 27ZS 16K08Z</a>')
     site.add(url, prada_page(ean))
-    search.update_config(cid, locate_strategy="site_search", search_url_template=f"{BASE}/buscar?q={{query}}")
+    search.update_config(cid, locate_strategy="site_search", search_url_template=f"{BASE}/buscar?q={{query}}",
+                         search_verified=True, search_evidence="GET público autorizado offline")
     _open_access(search, cid)
     assert search.locate(ean, cid).state == "exact"
     site.add(f"{BASE}/robots.txt", "User-agent: *\nDisallow: /buscar\n")

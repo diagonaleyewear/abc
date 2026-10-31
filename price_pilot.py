@@ -207,8 +207,12 @@ class PricePilot:
                              "plan": state, "known_urls": len(urls), **limits})
         return pd.DataFrame(rows)
 
-    def run(self, *, resume: bool = False, search=None) -> int:
+    def run(self, *, resume: bool = False, search=None, operation: str = "prices") -> int:
         from price_web import WebPriceSearch
+        from price_discovery import PilotDiscovery
+
+        if operation not in ("prices", "discovery"):
+            raise PilotError("Operación del piloto no válida")
 
         try:
             with self.lock():
@@ -226,6 +230,8 @@ class PricePilot:
                     if resume and last is None:
                         raise PilotError("No hay una ejecución pendiente para reanudar")
                     if last:
+                        if last["operation"] != operation:
+                            raise PilotError("Reanude primero la operación interrumpida del piloto")
                         if last["scope"] != json.dumps(scope["eans"]) or last["competitors"] != json.dumps(scope["competitors"]):
                             raise PilotError("El alcance cambió; la cola anterior no se puede reanudar")
                         run_id = last["id"]
@@ -233,13 +239,16 @@ class PricePilot:
                                            (run_id,))
                         connection.execute("UPDATE pilot_runs SET status='running' WHERE id=?", (run_id,))
                     else:
-                        run_id = connection.execute("""INSERT INTO pilot_runs(started_at,status,scope,competitors)
-                            VALUES(?,'running',?,?)""",
+                        run_id = connection.execute("""INSERT INTO pilot_runs(started_at,status,scope,competitors,operation)
+                            VALUES(?,'running',?,?,?)""",
                                                     (stamp(), json.dumps(scope["eans"]),
-                                                     json.dumps(scope["competitors"]))).lastrowid
+                                                     json.dumps(scope["competitors"]), operation)).lastrowid
+                        pending = PilotDiscovery(self.store).pending() if operation == "discovery" else None
                         for cid in scope["competitors"]:
                             connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)", (run_id, cid))
                             for ean in scope["eans"]:
+                                if pending is not None and (cid, ean) not in pending:
+                                    continue
                                 connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
                                                    (run_id, cid, ean))
                     ean_placeholders = ",".join("?" for _ in scope["eans"])
@@ -250,7 +259,7 @@ class PricePilot:
                                        (run_id, *scope["eans"], *scope["competitors"]))
                 token = _execution.set((str(self.store.database_path), run_id))
                 try:
-                    self._execute(run_id, scope, search or WebPriceSearch(self.store))
+                    self._execute(run_id, scope, search or WebPriceSearch(self.store), operation=operation)
                 except BaseException as exc:
                     # Persist interruption even on cancellation; never hide or downgrade the exception.
                     with self.store._connect() as connection, connection:
@@ -265,21 +274,24 @@ class PricePilot:
         except Timeout as exc:
             raise PilotError("Ya hay otra ejecución del piloto") from exc
 
-    def _execute(self, run_id: int, scope: dict, search) -> None:
+    def _execute(self, run_id: int, scope: dict, search, *, operation: str = "prices") -> None:
         from price_web_fetch import WebFetcher
+        from price_discovery import PilotDiscovery
 
         pilot = self
 
         class BudgetFetcher(WebFetcher):
             def _request(self, url: str, *, max_bytes: int):
-                require_pilot_access(pilot.store, None, cid)
+                require_pilot_access(pilot.store, job["ean"], cid)
                 with pilot.store._connect() as connection:
                     previous = connection.execute("""SELECT last_http_at FROM pilot_budgets
                         WHERE run_id=? AND competitor_id=?""", (run_id, cid)).fetchone()[0]
                 if previous:
                     self._sleep(max(0, limits["pause_seconds"] - (time.time() - previous)))
-                require_pilot_access(pilot.store, None, cid)
+                require_pilot_access(pilot.store, job["ean"], cid)
                 current = search.config(cid)
+                from price_web import validate_competitor_url
+                validate_competitor_url(url, current["domain"])
                 if not current["terms_reviewed"] or not current["terms_note"].strip() \
                         or current["access_status"] != "robots_allowed":
                     raise PilotError("Autorización o comprobación de acceso retirada durante el piloto")
@@ -291,13 +303,20 @@ class PricePilot:
                 if not changed:
                     raise ConnectorError("Presupuesto HTTP del competidor agotado")
                 try:
-                    return super()._request(url, max_bytes=max_bytes)
-                except ConnectorError:
+                    result = super()._request(url, max_bytes=max_bytes)
+                except ConnectorError as exc:
+                    with pilot.store._connect() as connection, connection:
+                        connection.execute("""INSERT INTO pilot_http_log(run_id,competitor_id,ean,url,result,requested_at)
+                            VALUES(?,?,?,?,?,?)""", (run_id, cid, job["ean"], url, str(exc)[:500], stamp()))
                     if self.blocked:
                         with pilot.store._connect() as connection, connection:
                             connection.execute("UPDATE pilot_budgets SET blocked=1 WHERE run_id=? AND competitor_id=?",
                                                (run_id, cid))
                     raise
+                with pilot.store._connect() as connection, connection:
+                    connection.execute("""INSERT INTO pilot_http_log(run_id,competitor_id,ean,url,result,requested_at)
+                        VALUES(?,?,?,?,?,?)""", (run_id, cid, job["ean"], url, f"HTTP {result[0]}", stamp()))
+                return result
 
         for cid, limits in scope["competitors"].items():
             config = search.config(cid)
@@ -325,14 +344,25 @@ class PricePilot:
                             or config["access_status"] != "robots_allowed":
                         self._finish(job, "not_allowed", "Sin autorización y comprobación de acceso")
                         continue
-                    if not search._indexed(cid, job["ean"]):
+                    if operation == "prices" and not search._indexed(cid, job["ean"]):
                         self._finish(job, "not_found", "Ficha no localizada")
                         continue
                     with self.store._connect() as connection, connection:
                         connection.execute("UPDATE pilot_jobs SET status='running' WHERE id=?", (job["id"],))
+                    if operation == "discovery":
+                        discovery = PilotDiscovery(self.store)
+                        state, detail, evidence = discovery.locate(job["ean"], cid, run_id, search, fetcher)
+                        self._finish(job, state, detail, observation=evidence)
+                        if state == "blocked":
+                            with self.store._connect() as connection, connection:
+                                connection.execute("UPDATE pilot_budgets SET blocked=1 WHERE run_id=? AND competitor_id=?",
+                                                   (run_id, cid))
+                                budget = connection.execute("SELECT * FROM pilot_budgets WHERE run_id=? AND competitor_id=?",
+                                                            (run_id, cid)).fetchone()
+                        continue
                     outcome = search.locate(job["ean"], cid, fetcher=fetcher)
                     validation: dict = {}
-                    reasons = self._record(search, config, outcome, validation=validation)
+                    reasons = self._record(search, search.config(cid), outcome, validation=validation)
                     observation = asdict(outcome)
                     observation["validation"] = validation
                     self._finish(job, outcome.state, "; ".join(reasons) or outcome.detail,
@@ -362,7 +392,9 @@ class PricePilot:
             reasons.append("Sin stock" if page.availability == "unavailable" else "Stock desconocido")
         if page.includes_tax is not True:
             reasons.append("IVA sin confirmar" if page.includes_tax is None else "Precio sin IVA")
-        market_valid = page.market == "ES" and config["market"] in ("", "ES")
+        from price_web_extract import resolve_market
+        market, market_note, conflict = resolve_market(page, config)
+        market_valid = market == "ES" and not conflict
         currency_valid = page.currency == "EUR" and config["currency"] in ("", "EUR")
         if not market_valid:
             reasons.append("Mercado sin confirmar o no comparable")
@@ -378,7 +410,6 @@ class PricePilot:
             # Unknown/incorrect identity must never enter the global comparable set.
             if not identity_valid or not market_valid or not currency_valid or page.price <= 0:
                 frame["Estado coincidencia"] = "manual_review"
-            frame["Mercado"] = page.market or "UNKNOWN"
             report = self.store.import_offers(pd.DataFrame([frame]))
             reasons.extend(report.rejected)
         elif not reasons:
@@ -386,12 +417,21 @@ class PricePilot:
         if validation is not None:
             validation.update(normalized)
             validation.update({"accepted": not reasons and outcome.priced, "observations": match.observations,
+                               "market": market, "market_evidence": market_note, "market_conflict": conflict,
                                "reasons": reasons or [*match.reasons, "Precio EUR, IVA incluido, stock y mercado ES verificados"]})
         return reasons
 
     def _finish(self, job, outcome: str, detail: str, *, observation: dict | None = None,
                 comparable: bool = False, priced: bool = False) -> None:
         with self.store._connect() as connection, connection:
+            operation = connection.execute("SELECT operation FROM pilot_runs WHERE id=?", (job["run_id"],)).fetchone()[0]
+            if operation == "discovery":
+                methods = [attempt["method"] for attempt in (observation or {}).get("attempts", [])]
+                connection.execute("""INSERT INTO pilot_discovery(competitor_id,ean,run_id,state,method,detail,updated_at)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(competitor_id,ean) DO UPDATE SET run_id=excluded.run_id,
+                    state=excluded.state,method=excluded.method,detail=excluded.detail,updated_at=excluded.updated_at""",
+                                   (job["competitor_id"], job["ean"], job["run_id"], outcome,
+                                    ",".join(methods), detail, stamp()))
             connection.execute("""UPDATE pilot_jobs SET status='done',outcome=?,detail=?,observation=?,
                 comparable=?,priced=?,checked_at=? WHERE id=?""",
                                (outcome, detail, json.dumps(observation or {}, ensure_ascii=False),
@@ -400,7 +440,7 @@ class PricePilot:
     def results(self, run_id: int | None = None) -> tuple[pd.DataFrame, dict]:
         with self.store._connect() as connection:
             if run_id is None:
-                row = connection.execute("SELECT MAX(id) FROM pilot_runs").fetchone()
+                row = connection.execute("SELECT MAX(id) FROM pilot_runs WHERE operation='prices'").fetchone()
                 run_id = row[0]
             frame = pd.read_sql_query("SELECT * FROM pilot_jobs WHERE run_id=? ORDER BY competitor_id,ean",
                                       connection, params=(run_id,))
