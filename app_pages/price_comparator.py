@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import logging
 import sqlite3
 import threading
 from zipfile import BadZipFile
@@ -16,6 +17,7 @@ from price_comparator import (
 )
 from price_connectors import CONNECTORS, ConnectorError
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
+from price_pilot import MAX_PRODUCTS, SAMPLE_EANS, PilotError, PricePilot, pilot_scope
 from price_web import (
     EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError,
 )
@@ -124,6 +126,22 @@ def _launch(target, *args) -> None:
     threading.Thread(target=target, args=args, name="price-comparator-task", daemon=True).start()
 
 
+def _run_pilot(pilot: PricePilot, resume: bool) -> None:
+    try:
+        pilot.run(resume=resume)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Prueba manual del piloto interrumpida")
+        pilot.report_error(exc)
+
+
+@st.fragment(run_every=2)
+def _watch_running_pilot(pilot: PricePilot) -> None:
+    if pilot.is_running():
+        st.info("Piloto supervisado en curso. Puede desactivarlo; no se inicia otra ejecución en paralelo.")
+    else:
+        st.rerun()
+
+
 @st.fragment(run_every=2)
 def _watch_running_sync(sync: VytriaPriceSync) -> None:
     if sync.is_running():
@@ -221,11 +239,14 @@ def _render_actions(store: PriceComparatorStore) -> None:
             st.rerun()
     with right:
         busy = scheduler.is_running()
-        if st.button("Actualizar competencia", key="update_competitors", disabled=busy or ready.empty,
+        scoped = pilot_scope(store) is not None
+        if st.button("Actualizar competencia", key="update_competitors", disabled=busy or ready.empty or scoped,
                      help="Consulta solo los competidores habilitados con acceso autorizado."):
             _launch(_run_competitors, scheduler)
             st.rerun()
-        if ready.empty:
+        if scoped:
+            st.caption("Piloto configurado: ejecute la prueba supervisada en Competidores → Piloto de comparación.")
+        elif ready.empty:
             st.caption("Ningún competidor está habilitado todavía. Se activan en la pestaña Configuración.")
     if running:
         _watch_running_sync(sync)
@@ -678,7 +699,97 @@ def _render_web_settings(search: WebPriceSearch, row: dict) -> None:
             _show_submission(st, search.submit_url(v_ean.strip(), cid, v_url.strip(), replace=replace))
 
 
+def _render_pilot(store: PriceComparatorStore) -> None:
+    st.subheader("Piloto de comparación")
+    pilot = PricePilot(store)
+    try:
+        scope = pilot_scope(store)
+        candidates = pilot.candidates()
+        if candidates.empty:
+            st.info("Importe primero el catálogo y sincronice precios Vytria válidos.")
+            return
+        st.caption("Solo 20 productos y seis tiendas. Guardar no activa el planificador ni realiza consultas. "
+                   "Sin búsquedas masivas: solo fichas conocidas. Prepare y revise las condiciones de acceso "
+                   "de cada tienda antes de guardar; robots.txt no es autorización suficiente.")
+        st.dataframe(candidates[["ean", "brand", "model", "color", "caliber", "own_price_eur",
+                                 "own_price_status", "eligible"]], hide_index=True, width="stretch")
+        eligible = candidates.loc[candidates["eligible"]].set_index("ean")
+        if st.button("Proponer muestra diversificada de 20", key="pilot_sample"):
+            missing = sorted(set(SAMPLE_EANS) - set(eligible.index))
+            if missing:
+                st.error("La propuesta contiene referencias sin datos/precio válido: " + ", ".join(missing))
+            else:
+                st.session_state["pilot_eans"] = list(SAMPLE_EANS)
+                st.rerun()
+        defaults = scope["eans"] if scope else []
+        selected = st.multiselect("Productos del piloto (exactamente 20)", list(eligible.index),
+                                  default=[ean for ean in defaults if ean in eligible.index],
+                                  max_selections=MAX_PRODUCTS, key="pilot_eans",
+                                  format_func=lambda ean: f"{ean} · {eligible.loc[ean, 'brand']} · "
+                                  f"{eligible.loc[ean, 'model']} · {eligible.loc[ean, 'color']}")
+        st.code("\n".join(selected) or "Sin EAN seleccionados")
+        st.caption(f"{len(candidates) - len(selected)} productos excluidos de esta selección. "
+                   "Al guardar, las colas y actualizaciones generales quedan bloqueadas, incluso al desactivar "
+                   "el piloto. Las ocho tiendas restantes no se activan ni se eliminan.")
+        if selected and eligible.loc[selected, "caliber"].str.strip().eq("").any():
+            st.warning("Hay productos sin calibre en el catálogo. Se pueden consultar sus fichas, pero sus "
+                       "ofertas no serán comparables hasta verificar ese dato del catálogo.")
+        competitors = {row["id"]: row["name"] for row in pilot.competitors()}
+        cids = st.multiselect("Seis competidores", list(competitors), default=list(competitors),
+                              max_selections=6, format_func=competitors.get, key="pilot_competitors")
+        limits = {}
+        for cid in cids:
+            current = scope["competitors"].get(cid, {}) if scope else {}
+            with st.expander(competitors[cid]):
+                c1, c2 = st.columns(2)
+                pause = c1.number_input("Pausa entre consultas (s)", 1.0, 3600.0,
+                                        float(current.get("pause_seconds", 3)), key=f"pilot_pause_{cid}")
+                budget = c2.number_input("Máximo HTTP según condiciones de acceso", 1, 200,
+                                         int(current.get("max_http_requests", 10)), key=f"pilot_budget_{cid}")
+                st.caption("Incluye robots.txt y redirecciones. Concurrencia 1; sin reintentos de 403/429/CAPTCHA.")
+                limits[cid] = {"pause_seconds": pause, "max_http_requests": budget}
+        if st.button("Guardar configuración del piloto", key="pilot_save"):
+            pilot.save(selected, limits)
+            st.success("Alcance guardado. Piloto desactivado y planificador automático bloqueado.")
+            st.rerun()
+        if scope:
+            if scope["last_error"]:
+                st.error("Último error del piloto: " + scope["last_error"])
+            st.write("EAN persistidos:", ", ".join(scope["eans"]))
+            plan = pilot.plan()
+            st.dataframe(plan, width="stretch", hide_index=True)
+            st.caption(f"Plan: {len(plan)} combinaciones, no consultas garantizadas. "
+                       "«Ficha no localizada» no provoca búsquedas. La autorización se comprueba de nuevo al ejecutar.")
+            confirmed = st.checkbox("He revisado el plan, límites y autorizaciones; iniciar una prueba manual supervisada",
+                                     key="pilot_confirm")
+            run_col, resume_col, stop_col = st.columns(3)
+            busy = pilot.is_running()
+            run = run_col.button("Ejecutar prueba manual", type="primary",
+                                 disabled=not confirmed or busy, key="pilot_run")
+            resume = resume_col.button("Reanudar prueba interrumpida",
+                                       disabled=not confirmed or busy, key="pilot_resume")
+            if stop_col.button("Desactivar piloto", key="pilot_disable"):
+                pilot.disable()
+                st.success("Piloto desactivado. Se conservan el alcance y el histórico.")
+                st.rerun()
+            if run or resume:
+                pilot.enable()
+                _launch(_run_pilot, pilot, resume)
+                st.rerun()
+            if busy:
+                _watch_running_pilot(pilot)
+            results, metrics = pilot.results()
+            if metrics:
+                st.write(metrics)
+                st.dataframe(results.drop(columns=["observation"]), width="stretch", hide_index=True)
+                st.download_button("Exportar resultados del piloto", results.to_csv(index=False).encode("utf-8"),
+                                   file_name="piloto-precios.csv", mime="text/csv", key="pilot_results_export")
+    except (PilotError, ValueError, sqlite3.Error) as exc:
+        st.error(f"Piloto: {exc}")
+
+
 def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
+    _render_pilot(store)
     coverage = store.coverage_table()
     competitors = store.competitors().set_index("name")
     scheduler = _make_scheduler(store)
@@ -856,6 +967,9 @@ def _render_competitor_config(scheduler: CompetitorScheduler, row: dict) -> None
                                 key=f"{key}_pause")
         attempts = c4.number_input("Reintentos", 1, 10, int(row["max_attempts"]), key=f"{key}_attempts")
         plan = scheduler.plan(cid)
+        if plan.get("manual_only"):
+            st.info("Excluido del piloto; sin consultas." if plan.get("excluded") else
+                    "Piloto configurado: solo ejecuciones manuales supervisadas desde su sección.")
         st.caption(f"Cola: {row['queued']} pendientes · {plan['products']} productos en {plan['batches']} lotes · "
                    f"próxima ejecución {row['next_run_at'] or '—'} · última correcta {row['last_ok_at'] or '—'}")
         if not plan["fits_interval"]:
@@ -867,7 +981,8 @@ def _render_competitor_config(scheduler: CompetitorScheduler, row: dict) -> None
                                     interval_hours=hours, max_requests_per_run=int(requests_per_run),
                                     pause_seconds=pause, max_attempts=int(attempts))
                 st.rerun()
-            if b2.button("Verificar y habilitar", key=f"{key}_enable", disabled=not row["connector"]):
+            if b2.button("Verificar y habilitar", key=f"{key}_enable",
+                         disabled=not row["connector"] or plan.get("manual_only", False)):
                 scheduler.verify(cid)
                 scheduler.enable(cid)
                 st.rerun()
@@ -927,7 +1042,8 @@ def render_price_comparator_page() -> None:
     try:
         store = PriceComparatorStore()
         store.seed_defaults()
-    except PriceComparatorStorageError as exc:
+        pilot_scope(store)
+    except (PriceComparatorStorageError, PilotError) as exc:
         st.error(str(exc))
         return
     st.markdown(PAGE_STYLE, unsafe_allow_html=True)

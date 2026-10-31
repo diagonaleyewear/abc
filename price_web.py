@@ -343,6 +343,7 @@ class WebPriceSearch:
                    fetcher: WebFetcher | None = None) -> Submission:
         """A person supplies the exact product page. It is validated, checked against the access rules, read once and
         verified against the requested product; being supplied by a person never makes it verified."""
+        self._pilot_guard(ean, competitor_id)
         product, config = self._product(ean), self.config(competitor_id)
         try:
             clean = validate_competitor_url(url, config["domain"])
@@ -452,6 +453,7 @@ class WebPriceSearch:
     # access -----------------------------------------------------------------------------------
     def check_access(self, competitor_id: str, fetcher: WebFetcher | None = None) -> dict[str, Any]:
         """Read robots.txt once and record whether public product pages may be consulted by an agent."""
+        self._pilot_guard(None, competitor_id)
         config = self.config(competitor_id)
         base = config["site_url"]
         fetcher = fetcher or self._factory(config)
@@ -512,6 +514,7 @@ class WebPriceSearch:
     def locate(self, ean: str, competitor_id: str, *, fetcher: WebFetcher | None = None,
                persist_index: bool = True) -> Outcome:
         """Find and verify the competitor's page for one EAN. Does not record the offer."""
+        self._pilot_guard(ean, competitor_id)
         product, config = self._product(ean), self.config(competitor_id)
         outcome = Outcome(product["ean"], competitor_id, config["name"], "not_found")
         reason = self._gate(config)
@@ -519,7 +522,9 @@ class WebPriceSearch:
             outcome.state, outcome.detail, outcome.reason = "not_allowed", reason, self._gate_reason(config)
             return outcome
         fetcher = fetcher or self._factory(config)
-        strategies = config["locate_strategy"].split(",")
+        from price_pilot import pilot_scope
+
+        strategies = ["index"] if pilot_scope(self.store) is not None else config["locate_strategy"].split(",")
         tried: set[str] = set()
         best: Outcome | None = None
         try:
@@ -621,6 +626,7 @@ class WebPriceSearch:
     def _visit(self, product: dict, config: dict, fetcher: WebFetcher, url: str, origin: str,
                persist_index: bool) -> Outcome:
         competitor_id = config["competitor_id"]
+        self._pilot_guard(product["ean"], competitor_id)
         outcome = Outcome(product["ean"], competitor_id, config["name"], "error", url=url, method=f"web:{origin}")
         try:
             fetched = fetcher.get(url)
@@ -738,6 +744,14 @@ class WebPriceSearch:
         return ""
 
     # runs -------------------------------------------------------------------------------------
+    def _pilot_guard(self, ean: str | None, competitor_id: str) -> None:
+        from price_pilot import PilotError, require_pilot_access
+
+        try:
+            require_pilot_access(self.store, ean, competitor_id)
+        except PilotError as exc:
+            raise WebSearchError(str(exc)) from exc
+
     def run(self, eans: Iterable[str], competitor_ids: Iterable[str] | None = None, *, record: bool = True
             ) -> list[Outcome]:
         """Manual, bounded search. Competitors are processed one after another; each holds the shared lock."""
@@ -745,6 +759,10 @@ class WebPriceSearch:
         with self.store._connect() as connection:
             ids = list(competitor_ids or [r[0] for r in connection.execute(
                 "SELECT id FROM competitors WHERE active=1 ORDER BY name")])
+        eans = list(eans)
+        for cid in ids:
+            for ean in eans:
+                self._pilot_guard(ean, cid)
         outcomes: list[Outcome] = []
         for competitor_id in ids:
             config = self.config(competitor_id)
