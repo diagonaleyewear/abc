@@ -112,6 +112,7 @@ jobs:
           import app_exports, app_navigation, app_pages.alerts, app_pages.luxoptica
           import provider_images, provider_images_ui, provider_odoo_orders, repository_catalog_readonly, marcolin_images, safilo_images, nuorder_images
           import cloud_dashboard, kering_images_ui, kering_portal, kering_jobs, graph_mail_downloader, abcd_snapshots, image_exports, luxoptica_auto_upload, repository_storage, market_publication
+          import price_pilot, price_scheduler, price_web, app_pages.price_comparator
           from build_info import load_build_info
           info = load_build_info()
           assert info['commit'] == os.environ['EXPECTED_COMMIT']

@@ -29,6 +29,8 @@ _ADDED_COLUMNS = {
     "competitor_product_urls": {"source": "TEXT NOT NULL DEFAULT 'auto'", "note": "TEXT NOT NULL DEFAULT ''",
                                 "submitted_at": "TEXT"},
     "products": {"caliber": "TEXT NOT NULL DEFAULT ''"},
+    "pilot_budgets": {"last_http_at": "REAL"},
+    "price_pilot": {"last_error": "TEXT NOT NULL DEFAULT ''"},
     "offers": {"ean_published": "TEXT NOT NULL DEFAULT ''", "model_code": "TEXT NOT NULL DEFAULT ''",
                "color_code": "TEXT NOT NULL DEFAULT ''", "caliber": "TEXT NOT NULL DEFAULT ''",
                "match_basis": "TEXT NOT NULL DEFAULT ''", "price_includes_tax": "INTEGER",
@@ -345,6 +347,45 @@ class PriceComparatorStore:
                         detail TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
                         finished_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS price_pilot (
+                        id INTEGER PRIMARY KEY CHECK(id=1),
+                        eans TEXT NOT NULL,
+                        competitors TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS pilot_runs (
+                        id INTEGER PRIMARY KEY,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        status TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        competitors TEXT NOT NULL,
+                        error TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE IF NOT EXISTS pilot_budgets (
+                        run_id INTEGER NOT NULL REFERENCES pilot_runs(id),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        requests INTEGER NOT NULL DEFAULT 0,
+                        blocked INTEGER NOT NULL DEFAULT 0,
+                        last_http_at REAL,
+                        PRIMARY KEY(run_id,competitor_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS pilot_jobs (
+                        id INTEGER PRIMARY KEY,
+                        run_id INTEGER NOT NULL REFERENCES pilot_runs(id),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        outcome TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        observation TEXT NOT NULL DEFAULT '{}',
+                        comparable INTEGER NOT NULL DEFAULT 0,
+                        priced INTEGER NOT NULL DEFAULT 0,
+                        checked_at TEXT,
+                        UNIQUE(run_id,competitor_id,ean)
                     );
                     CREATE UNIQUE INDEX IF NOT EXISTS scheduler_jobs_open_idx
                         ON scheduler_jobs(competitor_id, ean) WHERE status IN ('pending', 'running');

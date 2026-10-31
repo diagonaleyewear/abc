@@ -64,6 +64,7 @@ COPY scripts/cloud_image_entrypoint.sh ./scripts/cloud_image_entrypoint.sh
 COPY cloud_dashboard.py process_activity.py build_info.py .
 COPY price_comparator.py vytria_price_sync.py price_connectors.py price_scheduler.py price_analytics.py price_web.py price_web_extract.py price_web_fetch.py .
 COPY price_references.py price_observations.py competitor_requirements.py price_known_urls.py .
+COPY price_pilot.py .
 COPY assets ./assets
 COPY static ./static
 COPY .streamlit/config.toml ./.streamlit/config.toml

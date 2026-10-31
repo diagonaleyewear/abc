@@ -146,6 +146,10 @@ class CompetitorScheduler:
 
     def verify(self, competitor_id: str) -> None:
         """Prove the authorised access works. Automatic queries stay impossible until this succeeds."""
+        from price_pilot import pilot_scope
+
+        if pilot_scope(self.store) is not None:
+            raise SchedulerConfigError("Verifique el acceso antes de guardar el piloto; no se descargan feeds generales")
         config = self.config(competitor_id)
         if not config["connector"]:
             raise SchedulerConfigError("Pendiente de configurar: no hay conector ni fuente autorizada")
@@ -186,6 +190,18 @@ class CompetitorScheduler:
 
     # planning ---------------------------------------------------------------------------------
     def plan(self, competitor_id: str) -> dict:
+        from price_pilot import PricePilot, pilot_scope
+
+        if pilot_scope(self.store) is not None:
+            plan = PricePilot(self.store).plan()
+            rows = plan[plan["competitor_id"] == competitor_id]
+            if rows.empty:
+                self.config(competitor_id)  # Validate the destination without planning any jobs.
+                return {"products": 0, "batches": 0, "spacing_seconds": 0, "min_duration_hours": 0,
+                        "fits_interval": True, "manual_only": True, "excluded": True}
+            return {"products": len(rows), "batches": len(rows), "spacing_seconds": rows.iloc[0]["pause_seconds"],
+                    "min_duration_hours": (len(rows) - 1) * rows.iloc[0]["pause_seconds"] / 3600,
+                    "fits_interval": True, "manual_only": True}
         config = self.config(competitor_id)
         with self.store._connect() as connection:
             products = connection.execute("SELECT COUNT(*) FROM products").fetchone()[0]
@@ -198,6 +214,10 @@ class CompetitorScheduler:
                 "min_duration_hours": minimum / 3600, "fits_interval": minimum <= window}
 
     def _start_cycle(self, connection, config: dict, plan: dict, now: datetime) -> int:
+        from price_pilot import pilot_scope
+
+        if pilot_scope(self.store) is not None:
+            raise SchedulerConfigError("La cola general está bloqueada por el piloto")
         eans = [row[0] for row in connection.execute("SELECT ean FROM products ORDER BY ean")]
         batch = self.connectors[config["connector"]].batch_size
         stamp = _iso(now)
@@ -214,6 +234,25 @@ class CompetitorScheduler:
     # execution --------------------------------------------------------------------------------
     def run_once(self, *, competitor_ids: list[str] | None = None, workers: int = 1, force: bool = False,
                  trigger: str = "scheduler") -> list[RunSummary]:
+        from price_pilot import PilotError, PricePilot, pilot_scope
+
+        scope = pilot_scope(self.store)
+        if scope is not None:
+            if competitor_ids is not None and set(competitor_ids) != set(scope["competitors"]):
+                raise SchedulerConfigError("La ejecución manual debe usar los seis competidores del piloto")
+            if workers != 1:
+                raise SchedulerConfigError("Concurrencia del piloto: exactamente 1")
+            if trigger not in {"manual", "pilot_manual", "cli"}:
+                return []
+            try:
+                pilot = PricePilot(self.store)
+                with self.store._connect() as connection:
+                    unfinished = connection.execute("SELECT 1 FROM pilot_runs WHERE status IN ('running','interrupted')").fetchone()
+                run_id = pilot.run(resume=bool(unfinished))
+                _, metrics = pilot.results(run_id)
+                return [RunSummary("pilot", status="ok", message=str(metrics))]
+            except PilotError as exc:
+                raise SchedulerConfigError(str(exc)) from exc
         self._ensure_rows()
         with self.store._connect() as connection:
             rows = connection.execute("""
@@ -242,6 +281,10 @@ class CompetitorScheduler:
             lock.release()
 
     def _process(self, competitor_id: str, force: bool, trigger: str, summary: RunSummary) -> RunSummary:
+        from price_pilot import pilot_scope
+
+        if pilot_scope(self.store) is not None:
+            raise SchedulerConfigError("La cola general no puede ejecutarse mientras exista el alcance del piloto")
         now = self._now()
         config = self.config(competitor_id)
         connector = self.connectors[config["connector"]]
@@ -274,8 +317,12 @@ class CompetitorScheduler:
         return summary
 
     def _drain(self, config: dict, connector: Connector, summary: RunSummary) -> None:
+        from price_pilot import pilot_scope
+
         competitor_id = config["competitor_id"]
         for request in range(config["max_requests_per_run"]):
+            if pilot_scope(self.store) is not None:
+                raise SchedulerConfigError("El alcance del piloto bloquea la cola general")
             if self.stop_requested:
                 summary.message = "Detenida por señal; la cola continúa en la próxima pasada"
                 return
@@ -554,6 +601,11 @@ def main(argv: list[str] | None = None) -> int:
     store = PriceComparatorStore()
     store.seed_defaults()
     scheduler = CompetitorScheduler(store)
+    from price_pilot import pilot_scope
+
+    if args.loop and pilot_scope(store) is not None:
+        print("Error: el piloto solo admite una ejecución manual; --loop está bloqueado", file=sys.stderr)
+        return 1
     try:
         for name in ("verify", "enable", "disable", "pause", "resume"):
             target = getattr(args, name)
