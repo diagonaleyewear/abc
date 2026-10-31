@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 from db_loader import load_odoo_dataframe
 from engine import load_input_file, run_abcd_engine
 from db_config import load_db_config
+from cloud_design import inject_styles, palette
 
 # Configurar página
 st.set_page_config(
@@ -19,20 +20,22 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+inject_styles()
+colours = palette("auto")
 
 # Estilos personalizados
-st.markdown("""
+st.markdown(f"""
     <style>
-    .metric-card {
-        background-color: #f0f2f6;
+    .metric-card {{
+        background-color: {colours['neutral']};
         padding: 20px;
         border-radius: 10px;
         margin: 10px 0;
-    }
-    .status-a { color: #31a049; font-weight: bold; }
-    .status-b { color: #ff9900; font-weight: bold; }
-    .status-c { color: #0099ff; font-weight: bold; }
-    .status-d { color: #ff0000; font-weight: bold; }
+    }}
+    .status-a {{ color: {colours['success']}; font-weight: bold; }}
+    .status-b {{ color: {colours['warning']}; font-weight: bold; }}
+    .status-c {{ color: {colours['accent']}; font-weight: bold; }}
+    .status-d {{ color: {colours['danger']}; font-weight: bold; }}
     </style>
 """, unsafe_allow_html=True)
 

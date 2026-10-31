@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from cloud_design import BRAND_GREEN
 from price_comparator import PriceComparatorStore, comparable_offers
 
 WINDOWS = {"7 días": 7, "30 días": 30, "90 días": 90, "12 meses": 365}
@@ -261,7 +262,6 @@ def top_differences(summary: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     return table.reindex(table["difference_eur"].abs().sort_values(ascending=False).index).head(n)
 
 
-BRAND_GREEN = "#417B7B"
 # Okabe-Ito colour-blind-safe palette; Vytria keeps the corporate green.
 SERIES_COLOURS = ("#E69F00", "#0072B2", "#D55E00", "#CC79A7", "#56B4E9", "#7A5C00", "#000000", "#F0E442",
                   "#8C564B", "#6A3D9A", "#B15928", "#1F78B4", "#E31A1C")

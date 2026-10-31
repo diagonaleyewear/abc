@@ -17,7 +17,7 @@ MIGRATED = (
 # `st.title` sigue permitido en el login y en la barra lateral (no son cabeceras de página).
 ALLOWED_TITLE_LINES = {
     'st.title(APP_TITLE)',
-    'st.title("⚙️ Configuración")',
+    'st.title("Configuración")',
 }
 
 

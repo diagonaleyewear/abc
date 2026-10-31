@@ -72,6 +72,7 @@ from app_exports import (
     split_report_warnings,
 )
 from app_navigation import build_navigation
+from cloud_design import NAV_ICONS, inject_styles
 from app_pages.alerts import render_alerts_page
 from app_pages.luxoptica import render_images_page, render_pending_page
 from app_pages.price_comparator import render_price_comparator_page
@@ -155,6 +156,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+inject_styles()
 
 # ==============================================================================
 # FUNCIONES AUXILIARES
@@ -759,7 +761,7 @@ def get_product_stockout_periods(product_id: int, engine) -> list:
 
 def render_sidebar_shell(section_name: str) -> None:
     with st.sidebar:
-        st.title("⚙️ Configuración")
+        st.title("Configuración")
         st.caption(f"Sesión: {st.session_state.get('auth_user', 'usuario')}")
         st.caption(f"Área: {section_name}")
         if st.button("Cerrar sesión"):
@@ -2003,12 +2005,14 @@ def render_kering_images_page() -> None:
 KERING_IMAGES_PAGE = st.Page(
     render_kering_images_page,
     title="Imágenes Kering",
+    icon=NAV_ICONS["kering_images"],
     url_path="imagenes-kering",
     visibility="hidden",
 )
 MASTERDATA_KERING_IMAGES_PAGE = st.Page(
     render_kering_images_page,
     title="Imágenes Kering",
+    icon=NAV_ICONS["masterdata_kering_images"],
     url_path="imagenes-kering",
 )
 
@@ -2044,16 +2048,16 @@ def render_provider_images_page() -> None:
 
 
 PROVIDER_IMAGES_PAGE = st.Page(render_provider_images_page, title="Proveedores de imágenes",
-                               url_path="proveedores-imagenes")
-HOME_PAGE = st.Page(render_home_page, title="Inicio", icon="🏠", url_path="", default=True)
-ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon="📊", url_path="abc")
-ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon="🔍", url_path="abc-buscar")
-ABC_REPORTS_PAGE = st.Page(render_abc_reports_page, title="Reportes ABCD", icon="📈", url_path="abc-reportes")
-ABC_HISTORY_PAGE = st.Page(render_abc_history_page, title="Histórico Semanal", icon="📅", url_path="abc-historico")
-ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", icon="📉", url_path="abc-analisis")
-MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon="📥", url_path="master")
-MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon="🧪", url_path="master-dry-run")
-MASTER_DICTIONARY_PAGE = st.Page(render_master_dictionary_page_route, title="Diccionario", icon="📖", url_path="master-diccionario")
+                               icon=NAV_ICONS["provider_images"], url_path="proveedores-imagenes")
+HOME_PAGE = st.Page(render_home_page, title="Inicio", icon=NAV_ICONS["home"], url_path="", default=True)
+ABC_HOME_PAGE = st.Page(render_abc_home_page, title="Inicio", icon=NAV_ICONS["abc_home"], url_path="abc")
+ABC_SEARCH_PAGE = st.Page(render_abc_search_page, title="Buscar Producto", icon=NAV_ICONS["abc_search"], url_path="abc-buscar")
+ABC_REPORTS_PAGE = st.Page(render_abc_reports_page, title="Reportes ABCD", icon=NAV_ICONS["abc_reports"], url_path="abc-reportes")
+ABC_HISTORY_PAGE = st.Page(render_abc_history_page, title="Histórico Semanal", icon=NAV_ICONS["abc_history"], url_path="abc-historico")
+ABC_DETAIL_PAGE = st.Page(render_abc_detail_page, title="Análisis Detallado", icon=NAV_ICONS["abc_detail"], url_path="abc-analisis")
+MASTER_IMPORT_PAGE = st.Page(render_master_import_page, title="Importador Masterdata", icon=NAV_ICONS["master_import"], url_path="master")
+MASTER_DRYRUN_PAGE = st.Page(render_master_dryrun_page, title="Dry-run Odoo", icon=NAV_ICONS["master_dryrun"], url_path="master-dry-run")
+MASTER_DICTIONARY_PAGE = st.Page(render_master_dictionary_page_route, title="Diccionario", icon=NAV_ICONS["master_dictionary"], url_path="master-diccionario")
 LUXOPTICA_IMAGES_PAGE = st.Page(
     partial(
         render_images_page,
@@ -2062,7 +2066,7 @@ LUXOPTICA_IMAGES_PAGE = st.Page(
         render_footer=render_footer,
     ),
     title="Biblioteca de imágenes",
-    icon="🖼️",
+    icon=NAV_ICONS["luxoptica_images"],
     url_path="repositorio-imagenes",
 )
 LUXOPTICA_PENDING_PAGE = st.Page(
@@ -2074,7 +2078,7 @@ LUXOPTICA_PENDING_PAGE = st.Page(
         render_pending_panel=render_luxoptica_pending_panel,
     ),
     title="Pendiente Luxoptica",
-    icon="⏳",
+    icon=NAV_ICONS["luxoptica_pending"],
     url_path="pendiente-luxoptica",
     visibility="hidden",
 )
@@ -2086,15 +2090,15 @@ ALERTA_PEDIDOS_PAGE = st.Page(
         render_footer=render_footer,
     ),
     title="Alerta Pedidos",
-    icon="🔔",
+    icon=NAV_ICONS["alerts"],
     url_path="alerta-pedidos",
 )
-SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon="⚙️", url_path="config")
-ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", url_path="conciliacion-odoo")
+SETTINGS_PAGE = st.Page(render_settings_page, title="Configuración", icon=NAV_ICONS["settings"], url_path="config")
+ODOO_RECONCILIATION_PAGE = st.Page(render_odoo_reconciliation_page, title="Conciliación Odoo", icon=NAV_ICONS["reconciliation"], url_path="conciliacion-odoo")
 PRICE_COMPARATOR_PAGE = st.Page(
     render_price_comparator_page,
     title="Comparador de precios",
-    icon="💶",
+    icon=NAV_ICONS["price_comparator"],
     url_path="comparador-precios",
 )
 

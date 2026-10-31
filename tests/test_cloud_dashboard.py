@@ -245,8 +245,11 @@ def test_supplied_logo_bytes_and_proportions():
     with Image.open(logo) as image:
         assert image.size == (1200, 384)
     source = Path(dashboard.__file__).read_text(encoding="utf-8")
-    assert "width:240px;max-width:100%;height:auto;border:0" in source
-    assert 'alt="Óptica Diagonal"' in source
+    import cloud_design as design
+    assert "home_header_html(LOGO.read_bytes()" in source
+    logo_style = design.STYLES.split(".cd-home__logo {")[1].split("}")[0]
+    assert "height: auto" in logo_style and "max-width:" in logo_style
+    assert 'alt="Óptica Diagonal"' in design.home_header_html(logo.read_bytes())
     assert "height=" not in source
 
 
