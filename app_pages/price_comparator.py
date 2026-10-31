@@ -646,10 +646,15 @@ def _render_web_settings(search: WebPriceSearch, row: dict) -> None:
     cid, key = row["competitor_id"], f"web_{row['competitor_id']}"
     if st.button("Comprobar robots.txt", key=f"{key}_robots", disabled=row["access_status"] == "blocked"):
         result = search.check_access(cid)
-        st.session_state[f"{key}_flash"] = f"{result['access_status']}: {result['summary']}"
+        label = {"robots_allowed": "permitido", "robots_restricted": "restringido", "unknown": "no disponible",
+                 "blocked": "bloqueado"}[result["access_status"]]
+        st.session_state[f"{key}_flash"] = f"Comprobación de acceso realizada. Resultado: {label}. {result['summary']}"
         st.rerun()
     if flash := st.session_state.pop(f"{key}_flash", ""):
         st.info(flash)
+    st.caption("La comprobación solo lee robots.txt; no consulta productos ni autoriza automatizaciones.")
+    if not row["terms_reviewed"] or not row["terms_note"].strip() or row["access_status"] != "robots_allowed":
+        st.info("Falta registrar la revisión de condiciones de uso o completar la comprobación de acceso.")
     c1, c2 = st.columns(2)
     strategies = c1.multiselect("Métodos de localización", list(WEB_STRATEGY_TEXT),
                                 default=[s for s in row["locate_strategy"].split(",") if s in WEB_STRATEGY_TEXT],

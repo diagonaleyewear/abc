@@ -93,7 +93,8 @@ def require_pilot_access(store: PriceComparatorStore, ean: str | None, competito
         raise PilotError("Producto o competidor fuera del piloto")
     context = _execution.get()
     if context is None or context[0] != str(store.database_path):
-        raise PilotError("Use la prueba manual del piloto; las consultas generales están bloqueadas")
+        raise PilotError("Hay un piloto configurado. Las consultas de productos deben realizarse "
+                         "desde la prueba manual supervisada")
 
 
 class PricePilot:

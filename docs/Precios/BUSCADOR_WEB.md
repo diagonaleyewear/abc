@@ -36,6 +36,14 @@ Solo `operativo` puede asociarse al planificador (`WebFichaConnector.verify`).
 
 ## Uso
 
+**Comprobar robots.txt** es una operacion de configuracion independiente del
+piloto: admite cualquier competidor registrado aun con piloto guardado o
+activo. Solo lee `/robots.txt` del origen HTTPS validado de esa tienda, una
+peticion sin reintentos/redirecciones. No descarga fichas, no autoriza
+consultas comerciales ni levanta bloqueos anteriores. Resultado y fecha
+quedan guardados. Las consultas de productos mantienen su barrera del
+piloto. [Detalles, riesgos y pruebas](../PRICE_ROBOTS_CONFIGURATION.md).
+
 Interfaz: **Comparador de precios → Comparativa → «Buscar precios en la competencia»** (EAN, marca+modelo+color,
 modelo+color o referencia; «Almacenados» no consulta webs; «Consultar webs» exige 1–3 competidores y ≤5 productos) y
 **Competidores → «Consulta web de fichas públicas»** (robots.txt, métodos, plantilla de búsqueda, selectores, IVA,
@@ -53,8 +61,9 @@ python price_web.py search --ean 8056597875349 --competitor "Visio Factory" [--d
 Límites del comando: 5 EAN y 3 competidores por ejecución. Código de salida 0 = correcto, 1 = bloqueo o error, 2 = uso.
 Para probar sin tocar producción: `PRICE_COMPARATOR_DB_PATH=/tmp/prueba.sqlite3`.
 
-Detener / recuperar: no hay proceso residente. Si un sitio queda `blocked`, revise la causa y solo entonces ejecute
-`check-access` de nuevo. Una consulta manual y el planificador comparten el bloqueo por competidor
+Detener / recuperar: no hay proceso residente. Si un sitio queda `blocked`, no se reintenta con
+`check-access`: revise la causa y siga el procedimiento autorizado de configuracion antes de
+comprobar de nuevo. Una consulta manual y el planificador comparten el bloqueo por competidor
 (`<db>.competitor-<id>.lock`); si hay otra ejecución, la nueva se rechaza.
 
 ## Integración con el planificador

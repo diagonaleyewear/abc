@@ -82,8 +82,9 @@ def test_direct_manual_forced_and_scheduler_boundaries(pilot):
             search.run([ean], [competitor])
         with pytest.raises(WebSearchError):
             search.submit_url(ean, competitor, BASE + "/product")
-    with pytest.raises(WebSearchError):
-        search.check_access(cid)
+    assert search.check_access(cid)["access_status"] == "robots_allowed"
+    assert site.calls == [BASE + "/robots.txt"]
+    site.calls.clear()
     scheduler = CompetitorScheduler(store)
     assert scheduler.run_once(force=True) == []
     with pytest.raises(SchedulerConfigError):
