@@ -43,6 +43,12 @@ a interrupciones. Concurrencia 1 y cero reintentos en el transporte;
 403/429/CAPTCHA bloquean el resto de consultas de esa tienda.
 Robots.txt es una comprobacion adicional, nunca autorizacion suficiente.
 
+La localizacion supervisada es una operacion manual separada del piloto
+comercial: cola/bloqueos/presupuestos comunes, solo combinaciones pendientes,
+candidatos con revision humana, nunca ofertas ni ampliacion del alcance.
+Ver [mercado y localizador](PRICE_PILOT_DISCOVERY.md). La consulta comercial
+de precios sigue reutilizando exclusivamente URLs guardadas.
+
 ## Activacion manual
 
 1. Sin ejecutar descargas generales, comprobar en Configuracion las

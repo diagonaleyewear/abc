@@ -113,7 +113,7 @@ def test_unconfirmed_vat_is_stored_but_never_comparable(tmp_path):
     assert _comparable(store, search) == {}
 
 
-@pytest.mark.parametrize("overrides", [{"lang": None}, {"currency": "USD"}])
+@pytest.mark.parametrize("overrides", [{"market": None}, {"currency": "USD"}])
 def test_unverified_market_or_foreign_currency_is_not_comparable(tmp_path, overrides):
     site, store, search, cid = _setup(tmp_path)
     site.add(GOOD, prada_page(EAN, **overrides))

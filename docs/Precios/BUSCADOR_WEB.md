@@ -22,8 +22,12 @@ precio con el sistema existente (`import_offers`, histórico, gráficos). Códig
   [Regla y trazabilidad](../PRICE_IDENTITY.md).
 - **IVA**: solo «incluido» si la ficha lo declara, si publica el precio sin IVA y la proporción es un tipo español
   (1,21 / 1,10 / 1,04), o si el competidor tiene «IVA incluido» verificado. Si no, la oferta se guarda pero no compara.
-- **Mercado y moneda**: se toman de cada ficha (`<html lang="es-ES">`, `priceCurrency`) o del competidor si una persona
-  los confirmó; nunca del dominio. Sin ellos la oferta no se registra.
+- **Mercado y moneda**: mercado comercial explicito (`eligibleRegion`, destino
+  de entrega o `product:market`) o configuracion de mercado verificada con URL,
+  nota y fecha. Nunca dominio, ruta ni idioma/locale. Contradicciones requieren
+  revision. La moneda se toma de `priceCurrency` o configuracion existente.
+  Mercado desconocido no entra en comparativas.
+  [Mercado y localizacion supervisada](../PRICE_PILOT_DISCOVERY.md).
 - **Precio**: el precio de venta efectivo; el tachado/anterior se guarda aparte.
 - **Sin stock** o precio caducado: se muestran, no comparan, y no se recupera un precio antiguo.
 - **Bloqueo** (401/403/407/429/CAPTCHA): se detiene la ejecución, el competidor queda `blocked` y no se vuelve a consultar.
@@ -163,6 +167,9 @@ Estados independientes: ficha localizada / extracción verificada / operativo. N
 | Óptica Bassol, Visual-Click, Optical H, Céline | URL guardada | HTTP 429, acceso bloqueado, sin reintento | no; pendiente |
 
 Céline puede mostrar varias variantes: no se usa ninguna hasta verificar color, calibre y EAN.
-El IVA y el mercado se confirman por oferta (JSON-LD, precio sin IVA publicado, o `tax_policy`/`confirm_market`
-decididos por una persona); nunca por el dominio. Tests: `tests/test_price_web_competitor_pages.py` con fixtures en
+El IVA se confirma por oferta/politica verificada; el mercado requiere
+evidencia comercial explicita o la nueva configuracion verificada, no idioma
+ni el valor antiguo de `confirm_market` sin evidencia. Los mercados antes
+derivados de locale (Optica Optima/Domanci en estas fixtures) ahora quedan
+pendientes; Mia Burton declara ES comercialmente. Tests: `tests/test_price_web_competitor_pages.py` con fixtures en
 `tests/fixtures/web_pages/`.

@@ -27,6 +27,19 @@ COVERAGE_STATUSES = {"not_checked", "no_authorized_connector", "pending_authoriz
                      "manual_verified", "operational"}
 # Columns added after the first release; CREATE TABLE IF NOT EXISTS cannot add them to existing databases.
 _ADDED_COLUMNS = {
+    "pilot_runs": {"operation": "TEXT NOT NULL DEFAULT 'prices'"},
+    "competitor_web_config": {
+        "sales_market": "TEXT NOT NULL DEFAULT ''",
+        "market_verified": "INTEGER NOT NULL DEFAULT 0",
+        "market_evidence_url": "TEXT NOT NULL DEFAULT ''",
+        "market_note": "TEXT NOT NULL DEFAULT ''",
+        "market_verified_at": "TEXT",
+        "search_mode": "TEXT NOT NULL DEFAULT 'auto'",
+        "search_preferred": "TEXT NOT NULL DEFAULT 'ean'",
+        "search_alternatives": "TEXT NOT NULL DEFAULT ''",
+        "search_verified": "INTEGER NOT NULL DEFAULT 0",
+        "search_evidence": "TEXT NOT NULL DEFAULT ''",
+    },
     "competitor_product_urls": {"source": "TEXT NOT NULL DEFAULT 'auto'", "note": "TEXT NOT NULL DEFAULT ''",
                                 "submitted_at": "TEXT"},
     "products": {"caliber": "TEXT NOT NULL DEFAULT ''"},
@@ -388,6 +401,40 @@ class PriceComparatorStore:
                         checked_at TEXT,
                         UNIQUE(run_id,competitor_id,ean)
                     );
+                    CREATE TABLE IF NOT EXISTS pilot_discovery (
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        run_id INTEGER REFERENCES pilot_runs(id),
+                        state TEXT NOT NULL DEFAULT 'pending',
+                        method TEXT NOT NULL DEFAULT '',
+                        detail TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(competitor_id,ean)
+                    );
+                    CREATE TABLE IF NOT EXISTS pilot_http_log (
+                        id INTEGER PRIMARY KEY,
+                        run_id INTEGER NOT NULL REFERENCES pilot_runs(id),
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        url TEXT NOT NULL,
+                        result TEXT NOT NULL,
+                        requested_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS pilot_url_candidates (
+                        id INTEGER PRIMARY KEY,
+                        competitor_id TEXT NOT NULL REFERENCES competitors(id),
+                        ean TEXT NOT NULL REFERENCES products(ean),
+                        url TEXT NOT NULL,
+                        run_id INTEGER NOT NULL REFERENCES pilot_runs(id),
+                        state TEXT NOT NULL DEFAULT 'pending_validation',
+                        method TEXT NOT NULL,
+                        evidence TEXT NOT NULL,
+                        identity TEXT NOT NULL,
+                        checked_at TEXT NOT NULL,
+                        reviewed_at TEXT,
+                        review_note TEXT NOT NULL DEFAULT '',
+                        UNIQUE(run_id,competitor_id,ean,url)
+                    );
                     CREATE UNIQUE INDEX IF NOT EXISTS scheduler_jobs_open_idx
                         ON scheduler_jobs(competitor_id, ean) WHERE status IN ('pending', 'running');
                     CREATE INDEX IF NOT EXISTS scheduler_jobs_due_idx ON scheduler_jobs(competitor_id, status, not_before);
@@ -697,7 +744,16 @@ class PriceComparatorStore:
                     market = _text(row["Mercado"])
                     if not market:
                         raise ValueError("El mercado es obligatorio")
-                    if competitor["market"] and competitor["market"] != market:
+                    configured_market = competitor["market"]
+                    web_record = _text(row["Método"]).startswith("web")
+                    if web_record:
+                        commercial = connection.execute("""SELECT * FROM competitor_web_config
+                            WHERE competitor_id=?""", (competitor["id"],)).fetchone()
+                        if commercial and commercial["market_verified"] and commercial["market_evidence_url"] \
+                                and commercial["market_note"]:
+                            configured_market = commercial["sales_market"]
+                    if configured_market and configured_market != market \
+                            and (not web_record or _text(row["Estado coincidencia"]) != "manual_review"):
                         raise ValueError("El mercado no coincide con la configuración del competidor")
                     match_status = _text(row["Estado coincidencia"]).lower()
                     if match_status not in MATCH_STATES:

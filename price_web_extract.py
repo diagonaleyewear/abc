@@ -21,7 +21,6 @@ _EAN_LABELLED = re.compile(r"(?:\bEAN(?:/GTIN)?\b|\bGTIN(?:-?13)?\b|c[oó]digo\s
                            r"(?:<[^>]{0,200}>\s*){0,4}:?\s*(\d{13})(?!\d)", re.I)
 _EAN_DATA_ATTR = re.compile(r"\bdata-ean=[\"'](\d{13})[\"']", re.I)
 _PRESTASHOP_CURRENCY = re.compile(r"var prestashop\s*=\s*\{\"currency\":\{[^{}]*?\"iso_code\":\"([A-Z]{3})\"")
-_PRESTASHOP_LOCALE = re.compile(r"var prestashop\s*=.{0,2000}?\"locale\":\"[a-z]{2}-([A-Z]{2})\"", re.S)
 _AVAILABLE = {"instock", "limitedavailability", "onlineonly", "instoreonly"}
 _UNAVAILABLE = {"outofstock", "soldout", "discontinued"}
 _VOID = {"meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"}
@@ -45,6 +44,8 @@ class ProductPage:
     includes_tax: bool | None = None
     vat_rate: float | None = None
     market: str = ""
+    market_source: str = ""
+    market_conflict: bool = False
     ambiguous: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -139,8 +140,19 @@ def _offer_facts(node: dict) -> dict[str, Any]:
             inner = [o for o in _as_list(offer.get("offers")) if isinstance(o, dict)]
             offers.extend(inner or [offer])
     facts: dict[str, Any] = {"ambiguous": False, "notes": []}
+    markets: set[str] = set()
     seen = []
     for offer in offers:
+        for region in _as_list(offer.get("eligibleRegion")):
+            country = _name(region.get("addressCountry")) if isinstance(region, dict) else _name(region)
+            if re.fullmatch(r"[A-Za-z]{2}", country):
+                markets.add(country.upper())
+        for shipping in _as_list(offer.get("shippingDetails")):
+            if isinstance(shipping, dict):
+                for destination in _as_list(shipping.get("shippingDestination")):
+                    country = _name(destination.get("addressCountry")) if isinstance(destination, dict) else ""
+                    if re.fullmatch(r"[A-Za-z]{2}", country):
+                        markets.add(country.upper())
         price, previous, tax = None, None, _truthy(offer.get("valueAddedTaxIncluded"))
         for item in _as_list(offer.get("priceSpecification")):
             if not isinstance(item, dict):
@@ -169,6 +181,11 @@ def _offer_facts(node: dict) -> dict[str, Any]:
                      previous_price=chosen[4])
     elif seen:
         facts["availability"] = seen[0][2]
+    if len(markets) == 1:
+        facts["market"] = next(iter(markets))
+    elif markets:
+        facts["notes"].append("Varios mercados comerciales publicados: requieren revisión")
+        facts["market_conflict"] = True
     return facts
 
 
@@ -213,6 +230,9 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.previous_price = facts.get("previous_price")
     page.availability = facts.get("availability", "unknown")
     page.includes_tax = facts.get("includes_tax")
+    page.market = facts.get("market", "")
+    page.market_source = "ficha:JSON-LD eligibleRegion/shippingDestination" if page.market else ""
+    page.market_conflict = facts.get("market_conflict", False)
     return page
 
 
@@ -348,13 +368,29 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
         page.notes.append(f"IVA según la política verificada del competidor ({tax_policy})")
     _infer_tax_from_pretax(page, meta)
     _enrich(page, html, url)
-    region = re.fullmatch(r"[a-z]{2}[-_]([A-Za-z]{2})", parsed.lang.strip())
-    if region:  # the page declares its own locale, e.g. <html lang="es-ES">; the domain is never used
-        page.market = region.group(1).upper()
-    elif (locale := _PRESTASHOP_LOCALE.search(html)):
-        page.market = locale.group(1)
-        page.notes.append("Mercado según el idioma/región publicado por la tienda (PrestaShop)")
+    explicit = (meta.get("product:market") or "").upper()
+    if re.fullmatch(r"[A-Z]{2}", explicit):
+        if page.market and page.market != explicit:
+            page.market_conflict = True
+        else:
+            page.market, page.market_source = explicit, "ficha:product:market"
     return page
+
+
+def resolve_market(page: ProductPage, config: dict) -> tuple[str, str, bool]:
+    """Commercial country evidence, never locale/domain. Keep contradictions out of comparable offers."""
+    configured = config.get("sales_market", "") if config.get("market_verified") \
+        and config.get("market_evidence_url") and config.get("market_note") else ""
+    conflict = page.market_conflict or bool(page.market and configured and page.market != configured)
+    if conflict:
+        return page.market or configured, "Mercado contradictorio entre ficha y configuración; revisión obligatoria", True
+    if page.market:
+        return page.market, f"Mercado {page.market} según {page.market_source or 'ficha explícita'}", False
+    if configured:
+        return configured, (f"Mercado {configured} según configuración verificada; "
+                            f"{config['market_evidence_url']}; {config['market_note']}; "
+                            f"{config.get('market_verified_at') or ''}"), False
+    return "", "Mercado sin evidencia comercial verificada", False
 
 
 def _enrich(page: ProductPage, html: str, url: str) -> None:

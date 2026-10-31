@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import logging
+import json
 import sqlite3
 import threading
 from zipfile import BadZipFile
@@ -18,6 +19,7 @@ from price_comparator import (
 from price_connectors import CONNECTORS, ConnectorError
 from price_scheduler import CompetitorScheduler, SchedulerConfigError
 from price_pilot import MAX_PRODUCTS, SAMPLE_EANS, PilotError, PricePilot, pilot_scope
+from price_discovery import PilotDiscovery
 from price_web import (
     EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError,
 )
@@ -131,6 +133,14 @@ def _run_pilot(pilot: PricePilot, resume: bool) -> None:
         pilot.run(resume=resume)
     except Exception as exc:
         logging.getLogger(__name__).exception("Prueba manual del piloto interrumpida")
+        pilot.report_error(exc)
+
+
+def _run_discovery(pilot: PricePilot, resume: bool) -> None:
+    try:
+        PilotDiscovery(pilot.store).run(resume=resume)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Localización supervisada del piloto interrumpida")
         pilot.report_error(exc)
 
 
@@ -644,6 +654,7 @@ def _render_web_section(search: WebPriceSearch, row: dict) -> None:
 
 def _render_web_settings(search: WebPriceSearch, row: dict) -> None:
     cid, key = row["competitor_id"], f"web_{row['competitor_id']}"
+    st.markdown("**Control de acceso**")
     if st.button("Comprobar robots.txt", key=f"{key}_robots", disabled=row["access_status"] == "blocked"):
         result = search.check_access(cid)
         label = {"robots_allowed": "permitido", "robots_restricted": "restringido", "unknown": "no disponible",
@@ -655,22 +666,60 @@ def _render_web_settings(search: WebPriceSearch, row: dict) -> None:
     st.caption("La comprobación solo lee robots.txt; no consulta productos ni autoriza automatizaciones.")
     if not row["terms_reviewed"] or not row["terms_note"].strip() or row["access_status"] != "robots_allowed":
         st.info("Falta registrar la revisión de condiciones de uso o completar la comprobación de acceso.")
+    st.markdown("**Localización de productos**")
+    modes = {"auto": "Automático", "ean": "Buscar por EAN", "model_color": "Buscar por modelo + código de color",
+             "known": "Solo URLs conocidas"}
+    mode = st.selectbox("Método de localización de productos", list(modes), index=list(modes).index(row["search_mode"]),
+                        format_func=modes.get, key=f"{key}_search_mode")
+    preferred = st.selectbox("Método preferente (automático)", ["ean", "model_color"],
+                             index=["ean", "model_color"].index(row["search_preferred"]),
+                             format_func=modes.get, key=f"{key}_search_preferred")
+    alternatives = st.multiselect("Métodos alternativos autorizados (automático)", ["ean", "model_color", "sitemap"],
+                                   default=[v for v in row["search_alternatives"].split(",") if v],
+                                   format_func=lambda v: modes.get(v, "Sitemap público"), key=f"{key}_alternatives")
     c1, c2 = st.columns(2)
     strategies = c1.multiselect("Métodos de localización", list(WEB_STRATEGY_TEXT),
                                 default=[s for s in row["locate_strategy"].split(",") if s in WEB_STRATEGY_TEXT],
                                 format_func=WEB_STRATEGY_TEXT.get, key=f"{key}_strategy")
-    template = c2.text_input("Plantilla de búsqueda interna (HTTPS, con {query})",
+    template = c2.text_input("Plantilla HTTPS ({ean}, {model}, {color} o {query})",
                              value=row["search_url_template"], key=f"{key}_template")
-    s1, s2, s3 = st.columns(3)
+    search_verified = st.checkbox("Mecanismo público de búsqueda GET verificado y autorizado",
+                                   value=bool(row["search_verified"]), key=f"{key}_search_verified")
+    search_evidence = st.text_input("Evidencia del mecanismo: URL, quién/cuándo y autorización",
+                                    value=row["search_evidence"], key=f"{key}_search_evidence")
+    st.caption("No se implementan AJAX, endpoints internos ni navegador automático. Una sugerencia no confirma "
+               "el EAN: la ficha debe publicarlo. Use {query} si permite ambos métodos.")
+    s1, s2 = st.columns(2)
     price_selector = s1.text_input("Selector de precio (opcional)", value=row["price_selector"],
                                    key=f"{key}_price_sel")
     stock_selector = s2.text_input("Selector de disponibilidad (opcional)",
                                    value=row["availability_selector"], key=f"{key}_stock_sel")
+    st.markdown("**Condiciones comerciales**")
+    m1, m2 = st.columns(2)
+    markets = ["", "ES", "other"]
+    selected_market = m1.selectbox("Mercado de venta", markets,
+                                   index=0 if not row["sales_market"] else 1 if row["sales_market"] == "ES" else 2,
+                                   format_func=lambda v: {"": "Sin comprobar", "ES": "España (ES)",
+                                                          "other": "Otro mercado"}.get(v, v), key=f"{key}_market")
+    other_market = m2.text_input("Otro mercado (ISO-2)", value=row["sales_market"] if row["sales_market"] != "ES" else "",
+                                 key=f"{key}_other_market")
+    market_verified = st.selectbox("Estado de verificación del mercado", [False, True],
+                                    index=int(bool(row["market_verified"])),
+                                    format_func=lambda v: "Confirmado manualmente" if v else "Pendiente",
+                                    key=f"{key}_market_verified")
+    market_url = st.text_input("URL de condiciones comerciales o entrega", value=row["market_evidence_url"],
+                               key=f"{key}_market_url")
+    market_note = st.text_input("Quién y cuándo verificó el mercado", value=row["market_note"],
+                                key=f"{key}_market_note")
+    st.caption("No se infiere el mercado del dominio, ruta o idioma. La configuración verificada solo se usa "
+               "si falta el mercado comercial explícito de la ficha; contradicciones requieren revisión. "
+               f"Última confirmación: {row['market_verified_at'] or 'pendiente'}.")
     policies = ["unknown", "included", "excluded"]
-    tax = s3.selectbox("IVA de los precios publicados", policies, index=policies.index(row["tax_policy"]),
+    tax = st.selectbox("IVA de los precios publicados", policies, index=policies.index(row["tax_policy"]),
                        format_func=WEB_TAX_TEXT.get, key=f"{key}_tax",
                        help="Solo «incluido» si se ha comprobado en la web. Sin comprobar, el IVA se "
                             "toma de cada ficha y, si no consta, la oferta no es comparable.")
+    st.markdown("**Límites HTTP**")
     n1, n2, n3, n4 = st.columns(4)
     pause = n1.number_input("Pausa (s)", 1.0, 3600.0, float(row["pause_seconds"]), 1.0, key=f"{key}_pause")
     budget = n2.number_input("Peticiones máx.", 1, 200, int(row["max_requests"]), key=f"{key}_budget")
@@ -684,7 +733,13 @@ def _render_web_settings(search: WebPriceSearch, row: dict) -> None:
                              search_url_template=template.strip(), price_selector=price_selector.strip(),
                              availability_selector=stock_selector.strip(), tax_policy=tax,
                              pause_seconds=pause, max_requests=int(budget), timeout_seconds=timeout,
-                             retries=int(retries), terms_reviewed=reviewed, terms_note=note.strip())
+                             retries=int(retries), terms_reviewed=reviewed, terms_note=note.strip(),
+                             search_mode=mode, search_preferred=preferred,
+                             search_alternatives=",".join(alternatives), search_verified=search_verified,
+                             search_evidence=search_evidence.strip(), sales_market=(
+                                 other_market.strip().upper() if selected_market == "other" else selected_market),
+                             market_verified=market_verified, market_evidence_url=market_url.strip(),
+                             market_note=market_note.strip())
         st.success("Configuración web guardada.")
         st.rerun()
     with st.form(f"{key}_url_form", clear_on_submit=True):
@@ -714,7 +769,8 @@ def _render_pilot(store: PriceComparatorStore) -> None:
             st.info("Importe primero el catálogo y sincronice precios Vytria válidos.")
             return
         st.caption("Solo 20 productos y seis tiendas. Guardar no activa el planificador ni realiza consultas. "
-                   "Sin búsquedas masivas: solo fichas conocidas. Prepare y revise las condiciones de acceso "
+                   "Las consultas de precios reutilizan fichas conocidas; la localización es una operación "
+                   "supervisada separada. Prepare y revise las condiciones de acceso "
                    "de cada tienda antes de guardar; robots.txt no es autorización suficiente.")
         st.dataframe(candidates[["ean", "brand", "model", "color", "caliber", "own_price_eur",
                                  "own_price_status", "eligible"]], hide_index=True, width="stretch")
@@ -790,8 +846,81 @@ def _render_pilot(store: PriceComparatorStore) -> None:
                 st.dataframe(results.drop(columns=["observation"]), width="stretch", hide_index=True)
                 st.download_button("Exportar resultados del piloto", results.to_csv(index=False).encode("utf-8"),
                                    file_name="piloto-precios.csv", mime="text/csv", key="pilot_results_export")
+            _render_discovery(pilot, busy)
     except (PilotError, ValueError, sqlite3.Error) as exc:
         st.error(f"Piloto: {exc}")
+
+
+def _render_discovery(pilot: PricePilot, busy: bool) -> None:
+    st.subheader("Localización de fichas del piloto")
+    discovery = PilotDiscovery(pilot.store)
+    coverage = discovery.coverage()
+    if coverage.empty:
+        return
+    counts = coverage["state"].value_counts()
+    st.write({"Fichas conocidas": int(counts.get("known", 0)),
+              "Confirmadas": int(counts.get("confirmed", 0)),
+              "Candidatas": int(counts.get("candidate_found", 0) + counts.get("pending_validation", 0)),
+              "Pendientes": int(counts.get("pending", 0)), "Combinaciones": len(coverage)})
+    st.dataframe(coverage.pivot(index="ean", columns="competitor", values="Estado"),
+                 width="stretch")
+    st.caption("Solo se localizan combinaciones pendientes. No se repiten fichas conocidas ni candidatos "
+               "pendientes; no se crean ofertas. Los presupuestos incluyen robots, búsquedas y fichas. "
+               "Los errores o «no encontrado» necesitan un nuevo intento aprobado explícitamente.")
+    approval = st.checkbox("He revisado los métodos autorizados, el alcance y los límites; localizar pendientes",
+                            key="discovery_approval")
+    a, b = st.columns(2)
+    start = a.button("Localizar fichas pendientes", disabled=not approval or busy or not discovery.pending(),
+                      key="discovery_start", type="primary")
+    resume = b.button("Reanudar localización interrumpida", disabled=not approval or busy, key="discovery_resume")
+    if start or resume:
+        pilot.enable()
+        _launch(_run_discovery, pilot, resume)
+        st.rerun()
+    f1, f2, f3, f4 = st.columns(4)
+    ean_filter = f1.multiselect("Filtrar EAN", list(coverage.ean.unique()), key="discovery_ean_filter")
+    cid_filter = f2.multiselect("Filtrar competidor", list(coverage.competitor.unique()), key="discovery_cid_filter")
+    method_filter = f3.multiselect("Filtrar método", list(coverage.method.unique()), key="discovery_method_filter")
+    state_filter = f4.multiselect("Filtrar estado", list(coverage.Estado.unique()), key="discovery_state_filter")
+    filtered = coverage
+    for column, selected in (("ean", ean_filter), ("competitor", cid_filter), ("method", method_filter), ("Estado", state_filter)):
+        if selected:
+            filtered = filtered[filtered[column].isin(selected)]
+    st.dataframe(filtered, hide_index=True, width="stretch",
+                 column_config={"url": st.column_config.LinkColumn("URL confirmada o pendiente")})
+    candidates = discovery.candidates()
+    if not candidates.empty:
+        st.dataframe(candidates, hide_index=True, width="stretch")
+        pending = candidates[candidates.state.isin(["candidate_found", "pending_validation"])]
+        if not pending.empty:
+            selected_id = st.selectbox("Candidato a revisar", list(pending.id), key="discovery_candidate",
+                                       format_func=lambda i: f"{pending.set_index('id').loc[i, 'ean']} · "
+                                       f"{pending.set_index('id').loc[i, 'url']}")
+            row = pending.set_index("id").loc[selected_id]
+            st.json(json.loads(row["evidence"]))
+            with st.form("discovery_review"):
+                note = st.text_input("Revisor y motivo", key="discovery_review_note")
+                confirm = st.form_submit_button("Confirmar ficha", disabled=busy or row["state"] != "candidate_found")
+                discard = st.form_submit_button("Descartar candidato", disabled=busy)
+                if confirm or discard:
+                    discovery.review(int(selected_id), accept=confirm, note=note)
+                    st.rerun()
+    retryable = coverage[coverage.state.isin(["not_found", "not_allowed", "error", "blocked"])]
+    if not retryable.empty:
+        with st.form("discovery_retry"):
+            cell = st.selectbox("Combinación para un nuevo intento", list(retryable.index),
+                                format_func=lambda i: f"{retryable.loc[i, 'ean']} · {retryable.loc[i, 'competitor']}")
+            note = st.text_input("Motivo y autorización del nuevo intento")
+            if st.form_submit_button("Preparar nuevo intento (sin HTTP)", disabled=busy):
+                row = retryable.loc[cell]
+                discovery.reset(row["ean"], row["competitor_id"], note=note)
+                st.rerun()
+    with pilot.store._connect() as connection:
+        audit = pd.read_sql_query("""SELECT * FROM pilot_http_log WHERE run_id IN
+            (SELECT id FROM pilot_runs WHERE operation='discovery') ORDER BY id DESC LIMIT 500""", connection)
+    if not audit.empty:
+        with st.expander("Registro de consultas de localización"):
+            st.dataframe(audit, hide_index=True, width="stretch")
 
 
 def _render_competitors(store: PriceComparatorStore, data: dict) -> None:

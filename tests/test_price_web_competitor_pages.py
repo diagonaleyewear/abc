@@ -12,14 +12,14 @@ PR26 = {"ean": "8056597875226", "brand": "Prada", "model": "PR 26ZS", "color": "
 
 # nombre, URL, producto buscado, precio, IVA incluido, mercado, calibre extraído
 CASES = [
-    ("optica_optima", "https://optica-optima.com/gafas-de-sol/prada-pr-27zs-16k08z.html", PR27, 273.0, True, "ES", "54-21"),
+    ("optica_optima", "https://optica-optima.com/gafas-de-sol/prada-pr-27zs-16k08z.html", PR27, 273.0, True, "", "54-21"),
     ("amevista", "https://www.amevista.com/es/prada-0pr-27zs-16k08z", PR27, 273.0, None, "", None),
     ("edel_optics", "https://www.edel-optics.es/PR-27ZS-16K08Z-de-Prada.html?selectedSize=1907958", PR27, 243.5, None, "", None),
     ("otticait", "https://www.otticait.com/en/prada-pr-27zs-16k08z", PR27, 241.8, None, "", None),
-    ("mia_burton", "https://miaburton.com/es/gafas-de-sol/prada/pr-26zs-16k08z", PR26, 247.0, None, "", None),
+    ("mia_burton", "https://miaburton.com/es/gafas-de-sol/prada/pr-26zs-16k08z", PR26, 247.0, None, "ES", None),
     ("congafasdesol", "https://www.congafasdesol.com/prada-pr-27zs-16k08z.html", PR27, 253.5, None, "", None),
     ("blickers", "https://www.blickers.com/en-es/glasses/prada-pr-27zs-c54/5649966192263168/", PR27, 273.0, None, "", "54"),
-    ("domanci", "https://domanci.com/es/gafas-de-sol/prada-pr-27zs-16k08z-54.html", PR27, 240.5, True, "ES", "54-21"),
+    ("domanci", "https://domanci.com/es/gafas-de-sol/prada-pr-27zs-16k08z-54.html", PR27, 240.5, True, "", "54-21"),
 ]
 
 

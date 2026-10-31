@@ -29,9 +29,11 @@ def url_of(slug: str) -> str:
 
 def page(*, name: str, price: float | str | None, gtin: str | None = None, stock: bool = True, lang: str | None = "es-ES",
          currency: str = "EUR", pretax: float | None = None, brand: str = "Prada", previous: float | None = None,
-         extra_offer: dict | None = None) -> str:
+         extra_offer: dict | None = None, market: str | None = "ES") -> str:
     offer: dict = {"@type": "Offer", "priceCurrency": currency, "price": str(price),
                    "availability": "https://schema.org/" + ("InStock" if stock else "OutOfStock")}
+    if market:
+        offer["eligibleRegion"] = market
     if previous:
         offer["priceSpecification"] = {"@type": "UnitPriceSpecification", "priceType": "https://schema.org/ListPrice",
                                        "price": str(previous), "priceCurrency": currency}

@@ -10,6 +10,7 @@ import argparse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import re
+from string import Formatter
 from typing import Any, Callable, Iterable
 from urllib.parse import quote, urljoin, urlparse
 
@@ -18,13 +19,14 @@ import pandas as pd
 
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_connectors import Connector, ConnectorBlocked, ConnectorError, Observation
-from price_references import EXACT, PROBABLE, REJECTED, ReferenceIndex, classify, key, search_plan
-from price_web_extract import ProductPage, extract_product, parse_html
+from price_references import EXACT, PROBABLE, REJECTED, ReferenceIndex, classify, key, search_plan, tokens
+from price_web_extract import ProductPage, extract_product, parse_html, resolve_market
 from price_web_fetch import MAX_SITEMAP_BYTES, PageGone, RobotsDenied, WebFetcher
 
 ACCESS_STATES = ("unknown", "robots_allowed", "robots_restricted", "blocked", "pending_authorization")
 TAX_POLICIES = ("unknown", "included", "excluded")
 STRATEGIES = ("index", "sitemap", "site_search", "external")
+SEARCH_MODES = ("auto", "ean", "model_color", "known")
 MAX_CANDIDATES = 3
 MAX_SITEMAPS = 4
 MAX_CLI_EANS = 5
@@ -135,8 +137,9 @@ def comparability_gap(page: ProductPage, config: dict) -> str:
     """First reason why an exact page does not yield a comparable offer (empty when it does)."""
     if not page.has_price:
         return "no_price"
-    currency, market = page.currency or config["currency"], page.market or config["market"]
-    if currency != "EUR" or market != "ES":
+    market, _, conflict = resolve_market(page, config)
+    currency = page.currency or config["currency"]
+    if currency != "EUR" or market != "ES" or conflict:
         return "market_currency"
     return "vat_unconfirmed" if page.includes_tax is None else ""
 
@@ -246,28 +249,50 @@ class WebPriceSearch:
     def update_config(self, competitor_id: str, **values: Any) -> None:
         allowed = {"locate_strategy", "search_url_template", "price_selector", "availability_selector",
                    "structured_type", "tax_policy", "pause_seconds", "max_requests", "concurrency",
-                   "timeout_seconds", "retries", "terms_reviewed", "terms_note", "access_status"}
+                   "timeout_seconds", "retries", "terms_reviewed", "terms_note", "access_status",
+                   "sales_market", "market_verified", "market_evidence_url", "market_note",
+                   "search_mode", "search_preferred", "search_alternatives", "search_verified", "search_evidence"}
         unknown = set(values) - allowed
         if unknown:
             raise WebSearchError(f"Campos no configurables: {', '.join(sorted(unknown))}")
-        self.config(competitor_id)
+        config = self.config(competitor_id)
         checks = {
             "tax_policy": lambda v: v in TAX_POLICIES, "access_status": lambda v: v in ACCESS_STATES,
             "pause_seconds": lambda v: 1 <= float(v) <= 3600, "max_requests": lambda v: 1 <= int(v) <= 200,
             "concurrency": lambda v: int(v) == 1, "timeout_seconds": lambda v: 1 <= float(v) <= 120,
             "retries": lambda v: 0 <= int(v) <= 3,
             "locate_strategy": lambda v: v and set(str(v).split(",")) <= set(STRATEGIES),
-            "search_url_template": lambda v: not v or (str(v).startswith("https://") and "{query}" in str(v)),
+            "sales_market": lambda v: not v or bool(re.fullmatch(r"[A-Z]{2}", str(v))),
+            "market_verified": lambda v: v in (True, False, 0, 1),
+            "search_mode": lambda v: v in SEARCH_MODES,
+            "search_preferred": lambda v: v in ("ean", "model_color"),
+            "search_alternatives": lambda v: not v or set(str(v).split(",")) <= {"ean", "model_color", "sitemap"},
+            "search_verified": lambda v: v in (True, False, 0, 1),
         }
         for name, value in values.items():
             if name in checks and not checks[name](value):
                 raise WebSearchError(f"Valor no válido para {name}")
         if values.get("terms_reviewed") and not str(values.get("terms_note", "")).strip():
             raise WebSearchError("Indique quién revisó las condiciones de uso y cuándo (nota)")
+        merged = {**config, **values}
+        if merged["search_url_template"]:
+            validate_search_template(merged["search_url_template"], config["domain"])
+        if merged["search_verified"] and (not merged["search_url_template"] or not merged["search_evidence"].strip()):
+            raise WebSearchError("La búsqueda GET necesita plantilla validada y evidencia de revisión/autorización")
+        if merged["market_verified"]:
+            if not merged["sales_market"] or not merged["market_note"].strip() or not merged["market_evidence_url"]:
+                raise WebSearchError("Confirme mercado con URL de evidencia y nota de quién/cuándo lo verificó")
+            validate_competitor_url(merged["market_evidence_url"], config["domain"])
+        market_changed = any(name in values and values[name] != config[name] for name in (
+            "sales_market", "market_verified", "market_evidence_url", "market_note"))
         with self.store._connect() as connection, connection:
             for name, value in values.items():
                 connection.execute(f"UPDATE competitor_web_config SET {name}=? WHERE competitor_id=?",
-                                   (int(value) if name == "terms_reviewed" else value, competitor_id))
+                                   (int(value) if name in {"terms_reviewed", "market_verified", "search_verified"}
+                                    else value, competitor_id))
+            if market_changed:
+                connection.execute("UPDATE competitor_web_config SET market_verified_at=? WHERE competitor_id=?",
+                                   (_iso(self._now()) if merged["market_verified"] else None, competitor_id))
 
     def confirm_market(self, competitor_id: str, market: str, currency: str) -> None:
         """Record the market/currency the competitor really sells in (verified by a person, never assumed)."""
@@ -536,7 +561,13 @@ class WebPriceSearch:
         fetcher = fetcher or self._factory(config)
         from price_pilot import pilot_scope
 
-        strategies = ["index"] if pilot_scope(self.store) is not None else config["locate_strategy"].split(",")
+        strategies = ["index"]
+        if pilot_scope(self.store) is None and config["search_mode"] != "known":
+            allowed = config["locate_strategy"].split(",")
+            if "site_search" in allowed and config["search_verified"]:
+                strategies.append("site_search")
+            if config["search_mode"] == "auto":
+                strategies.extend(method for method in ("sitemap", "external") if method in allowed)
         tried: set[str] = set()
         best: Outcome | None = None
         try:
@@ -574,23 +605,24 @@ class WebPriceSearch:
 
     def _candidate_stream(self, product: dict, config: dict, fetcher: WebFetcher, strategies: list[str]):
         competitor_id = config["competitor_id"]
-        if "index" in strategies:
-            for row in self._indexed(competitor_id, product["ean"]):
-                yield "index", row["url"]
         known = self._known_urls(competitor_id, product["ean"])
-        if "sitemap" in strategies:
-            for url in self._sitemap_candidates(product, config, fetcher):
-                if url not in known:
-                    yield "sitemap", url
-        if "site_search" in strategies and config["search_url_template"]:
-            for url in self._site_search_candidates(product, config, fetcher):
-                if url not in known:
-                    yield "site_search", url
-        if "external" in strategies and self.external_search is not None:
-            for level, query in search_plan(product)[:2]:
-                for url in self.external_search(query, config["domain"])[:MAX_CANDIDATES]:
-                    if _same_site(url, config["domain"]) and url not in known:
-                        yield "external", url
+        for method in strategies:
+            if method == "index":
+                for row in self._indexed(competitor_id, product["ean"]):
+                    yield method, row["url"]
+            elif method == "sitemap":
+                for url in self._sitemap_candidates(product, config, fetcher):
+                    if url not in known:
+                        yield method, url
+            elif method == "site_search" and config["search_url_template"]:
+                for url in self._site_search_candidates(product, config, fetcher):
+                    if url not in known:
+                        yield method, url
+            elif method == "external" and self.external_search is not None:
+                for level, query in search_plan(product)[:2]:
+                    for url in self.external_search(query, config["domain"])[:MAX_CANDIDATES]:
+                        if _same_site(url, config["domain"]) and url not in known:
+                            yield method, url
 
     def _sitemap_candidates(self, product: dict, config: dict, fetcher: WebFetcher) -> list[str]:
         base = config["site_url"]
@@ -622,17 +654,23 @@ class WebPriceSearch:
     def _site_search_candidates(self, product: dict, config: dict, fetcher: WebFetcher) -> list[str]:
         model = key(product["model"])
         found: list[str] = []
-        for level, query in search_plan(product)[:3]:
-            url = config["search_url_template"].replace("{query}", quote(query))
+        for mode, url in product_search_urls(product, config):
             if not fetcher.rules(url).allowed(url):
                 raise RobotsDenied("robots.txt no permite la búsqueda interna del sitio")
-            for href, text in parse_html(fetcher.get(url).text).links:
+            result = fetcher.get(url).text
+            links = parse_html(result).links
+            for href, text in links:
                 target = urljoin(url, href)
-                if model and model in key(urlparse(target).path + " " + text) and _same_site(target, config["domain"]) \
-                        and target not in found:
-                    found.append(target)
+                evidence = key(urlparse(target).path + " " + text)
+                if (product["ean"] in evidence or (model and model in evidence)) and _same_site(target, config["domain"]):
+                    target = validate_competitor_url(target, config["domain"])
+                    if target not in found:
+                        found.append(target)
             if found:
                 break
+            if not links and re.search(r"fetch\s*\(|XMLHttpRequest|__NEXT_DATA__", result):
+                raise ConnectorError("Búsqueda dependiente de AJAX/JavaScript: revisar mecanismo público y "
+                                     "autorización; no se consultan endpoints ni se automatiza navegador")
         return found[:MAX_CANDIDATES]
 
     def _visit(self, product: dict, config: dict, fetcher: WebFetcher, url: str, origin: str,
@@ -663,6 +701,8 @@ class WebPriceSearch:
             outcome.reason = "redirect"
             return outcome
         outcome.notes = [*match.reasons, *match.observations, *page.notes]
+        _, market_note, _ = resolve_market(page, config)
+        outcome.notes.append(market_note)
         outcome.method = f"web:{page.method}"
         outcome.state = {EXACT: "exact", PROBABLE: "probable", REJECTED: "rejected"}.get(status, "probable")
         outcome.detail = "; ".join(outcome.notes)
@@ -723,16 +763,19 @@ class WebPriceSearch:
             outcome.state, outcome.match_status or "manual_review")
         if outcome.match_status == "manual_review":
             status = "manual_review"
+        market, market_note, conflict = resolve_market(page, config) if page else ("", "", False)
+        if conflict:
+            status = "manual_review"
         priced = page is not None and page.has_price and status != "rejected"
         tax = "" if page is None or page.includes_tax is None else ("sí" if page.includes_tax else "no")
         return {
             "EAN": product["ean"], "Competidor": config["name"], "Precio": page.price if priced else "",
             "Precio anterior": page.previous_price if priced and page.previous_price else "",
             "Moneda": page.currency if page and page.currency else config["currency"],
-            "Mercado": config["market"] or (page.market if page else ""),
+            "Mercado": market or "UNKNOWN",
             "URL": outcome.url, "Disponibilidad": page.availability if page else "unknown",
             "Estado coincidencia": status, "Método": outcome.method or "web",
-            "Evidencia": outcome.detail or "Ficha pública verificada", "Fecha consulta": stamp,
+            "Evidencia": (outcome.detail or "Ficha pública verificada") + " | " + market_note, "Fecha consulta": stamp,
             "Marca": page.brand if page else "", "Modelo": product["model"] if outcome.state == "exact" else "",
             "Color": page.color if page else "", "Calibre": page.caliber if page else "",
             "EAN publicado": page.ean_published if page else "", "Título": page.title if page else "",
@@ -745,9 +788,6 @@ class WebPriceSearch:
         if outcome.page is None or outcome.state not in {"exact", "probable", "rejected"}:
             return "Nada que registrar"
         config, product = self.config(outcome.competitor_id), self._product(outcome.ean)
-        if not (config["market"] or outcome.page.market) or (outcome.page.has_price and not (
-                config["currency"] or outcome.page.currency)):
-            return "Mercado y moneda no verificados en la ficha ni por el competidor: oferta no registrada"
         frame = pd.DataFrame([self.frame_row(product, config, outcome, _iso(self._now()))])
         report = self.store.import_offers(frame)
         if report.rejected:
@@ -916,6 +956,50 @@ def validate_competitor_url(url: str, domain: str) -> str:
 
 
 MAX_URL_LENGTH = 500
+
+
+def validate_search_template(template: str, domain: str) -> None:
+    try:
+        fields = []
+        for _, name, spec, conversion in Formatter().parse(template):
+            if name is not None:
+                if name not in {"ean", "model", "color", "query"} or spec or conversion:
+                    raise WebSearchError("Variables permitidas: {ean}, {model}, {color}, {query}")
+                fields.append(name)
+        if not fields or "{" in urlparse(template).netloc or "}" in urlparse(template).netloc:
+            raise WebSearchError("La plantilla necesita variables solo en la ruta o consulta, no en el dominio")
+        validate_competitor_url(template.format(ean="8056597875349", model="PR27ZS", color="16K08Z", query="x"), domain)
+    except ValueError as exc:
+        raise WebSearchError(f"Plantilla de búsqueda no válida: {exc}") from exc
+
+
+def product_search_urls(product: dict, config: dict, modes: list[str] | None = None) -> list[tuple[str, str]]:
+    mode = config.get("search_mode", "auto")
+    if mode == "known":
+        return []
+    if not config.get("search_verified"):
+        return []
+    template = config["search_url_template"]
+    validate_search_template(template, config["domain"])
+    preferred = config.get("search_preferred", "ean")
+    methods = modes if modes is not None else (
+        [mode] if mode != "auto" else [preferred, *config.get("search_alternatives", "").split(",")])
+    model = " ".join(tokens(product["model"]))
+    color = key(product["color"])
+    values = {"ean": normalize_gtin(product["ean"]), "model": model, "color": color}
+    urls = []
+    for method in dict.fromkeys(methods):
+        if method not in ("ean", "model_color"):
+            continue
+        # EAN-only / model-only templates cannot silently change the requested search strategy.
+        fields = {name for _, name, _, _ in Formatter().parse(template) if name}
+        if method == "ean" and fields - {"ean", "query"} or method == "model_color" and "ean" in fields:
+            raise WebSearchError("La plantilla no es compatible con el método seleccionado; utilice {query}")
+        query = values["ean"] if method == "ean" else " ".join(
+            (" ".join(tokens(product["brand"])), model, color))
+        expanded = template.format(**{k: quote(v, safe="") for k, v in {**values, "query": query}.items()})
+        urls.append((method, validate_competitor_url(expanded, config["domain"])))
+    return urls
 LOCATION_TEXT = {"none": "Sin ficha", "candidate": "URL candidata", "verified": "Ficha verificada"}
 EXTRACTION_TEXT = {"untested": "Sin probar", "verified": "Verificada con datos reales", "incomplete": "Incompleta",
                    "failed": "Fallida"}
@@ -985,7 +1069,7 @@ class WebFichaConnector:
 
     def fetch(self, source: str, eans: list[str]) -> list[Observation]:
         competitor_id = self._competitor(source)
-        config_market = self.search.config(competitor_id)["market"]
+        config = self.search.config(competitor_id)
         found: list[Observation] = []
         for ean in eans:
             outcome = self.search.locate(ean, competitor_id)
@@ -995,12 +1079,14 @@ class WebFichaConnector:
                 raise ConnectorError(outcome.detail)
             if outcome.state == "exact" and outcome.priced:
                 page = outcome.page
+                market, market_note, conflict = resolve_market(page, config)
                 found.append(Observation(
                     ean=outcome.ean, price=str(page.price), currency=page.currency, availability=page.availability,
                     url=outcome.url, previous_price="" if page.previous_price is None else str(page.previous_price),
-                    match_status="exact_match", method=outcome.method, evidence=outcome.detail,
+                    match_status="manual_review" if conflict else "exact_match", method=outcome.method,
+                    evidence=outcome.detail + " | " + market_note,
                     tax_included=page.includes_tax, ean_published=page.ean_published, caliber=page.caliber,
-                    color=page.color, brand=page.brand, title=page.title, market=config_market or page.market,
+                    color=page.color, brand=page.brand, title=page.title, market=market or "UNKNOWN",
                     identifiers=tuple(page.identifiers), ambiguous=page.ambiguous))
         return found
 
