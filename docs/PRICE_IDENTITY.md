@@ -108,8 +108,18 @@ auditan pero ya no descalifican un EAN verificado.
 
 Validacion local del comparador: **333 tests correctos, 1 omitido**, ejecutando
 todos los archivos `tests/test_price*.py`. Lint de errores Python/imports y
-`git diff --check` correctos. La suite completa y el CI se registran al
-finalizar; Docker no esta disponible localmente y debe comprobarse en la PR.
+`git diff --check` correctos.
+
+Suite completa final: **1214 correctos, 15 omitidos y 1 fallo** en
+`test_local_library_search_and_download_permissions` (fotografias de Kering,
+ya observado antes de esta correccion). No se modifica ese modulo ni se
+oculta el fallo: la suite local completa no se presenta como verde.
+
+**CI/Docker pendientes**: la rama esta publicada, pero la PR aun no se ha
+creado, segun confirmacion del usuario. GitKraken no tiene autorizacion para
+crearla y GitHub no devuelve runs de esta rama. Docker no esta disponible
+localmente; debe construirse en el workflow de la PR, sin publicar ni
+desplegar la imagen. No se ha hecho merge ni despliegue.
 
 ## Despliegue y reversion
 
