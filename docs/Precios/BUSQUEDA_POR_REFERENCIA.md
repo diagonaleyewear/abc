@@ -4,7 +4,7 @@ Ampliación del comparador (sin conectores nuevos, sin planificador activo, sin 
 
 ## Identidad de un producto
 
-Un producto es **marca + modelo + código de color + calibre** (y EAN cuando existe). El mismo modelo en otro color o calibre es otro producto y **nunca se mezcla**.
+La identidad exige **marca + modelo + código de color**. Con EAN publicado idéntico y verificado, el calibre es informativo, aunque falte o difiera: se registra la observación, no bloquea. Sin EAN verificado, el calibre sigue siendo obligatorio para una coincidencia por referencia. Un EAN distinto nunca se equipara automáticamente.
 
 `BOTTEGA VENETA BV1274S 005` = `BV1274S 005` = `bv1274s-005` = `BV1274S/005` = `BV1274S005`. Se ignoran mayúsculas, acentos, espacios, guiones y barras; los ceros del color se conservan (`005` ≠ `5`). El calibre `54□21`, `54-21`, `54/21` y `54 21` se normaliza a `54-21`. Módulo: [price_references.py](../../price_references.py).
 
@@ -21,12 +21,14 @@ Un producto es **marca + modelo + código de color + calibre** (y EAN cuando exi
 
 | Estado | Condición | ¿Entra en comparación? |
 |---|---|---|
-| `exact_match` (base `ean`) | EAN publicado idéntico, sin contradicciones | Sí |
+| `exact_match` (base `ean`) | EAN publicado idéntico, marca/modelo/código de color confirmados, sin ambigüedad; calibre informativo | Sí |
 | `exact_match` (base `reference`) | Marca, modelo, color y calibre confirmados en ambos lados, sin EAN | Sí |
-| `probable_match` | Falta calibre o marca, o EAN idéntico con datos contradictorios | No (revisión) |
-| `rejected` | Otro EAN, color, calibre, modelo o marca | No (se guarda en `search_results`) |
+| `probable_match` | Falta marca/modelo/color, falta calibre sin EAN verificado, o EAN idéntico con identidad contradictoria | No (revisión) |
+| `rejected` | Otro EAN; color/modelo/marca incorrectos sin EAN idéntico; calibre distinto sin EAN verificado | No (se guarda en `search_results`) |
 
 Un `exact_match` declarado en un JSON que no se verifica contra el catálogo **se rechaza** al importar.
+
+Las colecciones comerciales como «Symbole» no sustituyen el modelo conocido. El código `16K08Z` se recupera del título o identificadores publicados; «Negro» es descriptivo. Los campos opcionales `identificadores` y `ambigua` conservan esa evidencia al importar JSON. La validación normalizada y las observaciones dimensionales quedan en la evidencia; no se modifica el catálogo ni se reclasifica el histórico. Véase [regla y regresiones](../PRICE_IDENTITY.md).
 
 ## Datos estructurados
 

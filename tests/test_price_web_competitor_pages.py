@@ -39,7 +39,13 @@ def test_real_structures_are_extracted(name, url, product, price, tax, market, c
     assert page.market == market
     if caliber:
         assert page.caliber == caliber
-    assert classify(product, page.candidate()).status == "exact_match"
+    match = classify(product, page.candidate())
+    if name == "mia_burton":
+        # EAN alone does not confirm a colour code that the fixture never publishes.
+        assert match.status == "probable_match"
+        assert any("Color no confirmado" in reason for reason in match.reasons)
+    else:
+        assert match.status == "exact_match"
 
 
 def test_url_slug_alone_proves_nothing():

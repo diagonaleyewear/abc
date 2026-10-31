@@ -52,10 +52,11 @@ class ProductPage:
     def has_price(self) -> bool:
         return self.price is not None and bool(self.currency)
 
-    def candidate(self) -> dict[str, str]:
+    def candidate(self) -> dict[str, Any]:
         """The listing as seen by ``price_references.classify``."""
         return {"brand": self.brand, "color": self.color, "caliber": self.caliber,
-                "ean_published": self.ean_published, "title": " ".join([self.title, *self.identifiers]).strip()}
+                "ean_published": self.ean_published, "title": self.title,
+                "identifiers": self.identifiers, "ambiguous": self.ambiguous}
 
 
 def parse_price(value: Any) -> float | None:

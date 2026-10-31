@@ -140,7 +140,6 @@ def test_price_verification_dedup_and_history_survives_error(pilot):
     ({"lang": None}, "Mercado"),
     ({"currency": "USD"}, "Moneda"),
     ({"name": "Prada PR 27ZS WRONG 54-21"}, "Color"),
-    ({"name": "Prada PR 27ZS 16K08Z 55-21"}, "Calibre"),
     ({"brand": "Gucci"}, "Marca"),
     ({"gtin": None}, "EAN"),
 ])
@@ -297,7 +296,7 @@ def test_all_six_competitors_with_authorized_known_pages(pilot, monkeypatch):
         assert c.execute("SELECT COUNT(*) FROM scheduler_jobs").fetchone()[0] == 0
 
 
-def test_missing_catalog_caliber_stays_noncomparable(pilot):
+def test_missing_catalog_caliber_is_informational_for_verified_ean(pilot):
     service, store, search, site, cid, extras = pilot
     known(pilot)
     with store._connect() as c, c:
@@ -306,9 +305,10 @@ def test_missing_catalog_caliber_stays_noncomparable(pilot):
     service.run(search=search)
     frame, metrics = service.results()
     row = frame.loc[(frame.ean == REQUIRED_EANS[0]) & (frame.competitor_id == cid)].iloc[0]
-    assert row.comparable == 0 and "Calibre" in row.detail
-    assert metrics["Ofertas comparables"] == 0
-    assert store.dashboard()[1]["confirmed"] == 0
+    assert row.comparable == 1
+    assert json.loads(row.observation)["validation"]["caliber_informational"]
+    assert metrics["Ofertas comparables"] == 1
+    assert store.dashboard()[1]["confirmed"] == 1
 
 
 def test_limits_revalidated_on_loading_persistent_scope(pilot):

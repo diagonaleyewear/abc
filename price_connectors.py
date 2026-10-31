@@ -62,6 +62,8 @@ class Observation:
     color: str = ""
     brand: str = ""
     title: str = ""
+    identifiers: tuple[str, ...] = ()
+    ambiguous: bool = False
 
 
 class Connector(Protocol):

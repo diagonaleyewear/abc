@@ -3,9 +3,8 @@
 Pure functions, no network and no database: they only decide *what* to look for and *whether* a candidate
 page/feed row is the catalogue product. Fetching stays in the authorised connectors.
 
-Identity of a frame is (brand, model, colour code, calibre): the same model in another colour or calibre is a
-different product, so offers are never mixed. An exact match needs the published EAN, or model + colour +
-calibre confirmed on both sides. Anything weaker is ``probable_match`` and stays out of price comparisons.
+An exact published EAN makes calibre informational, never model or colour. Without verified EAN,
+brand + model + colour + calibre must be confirmed. Ambiguous evidence stays out of comparisons.
 """
 from __future__ import annotations
 
@@ -94,6 +93,7 @@ class Reference:
     color: str = ""
     caliber: str = ""
     ean: str = ""
+    ambiguous: bool = False
 
     @property
     def model_key(self) -> str:
@@ -122,22 +122,41 @@ def strip_brand(text: str, brands: Iterable[str]) -> tuple[str, str]:
 def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[str] = ()) -> Reference:
     """Split a free reference into brand, model, colour and calibre.
 
-    With known ``models`` (the catalogue) the split is exact, so models with spaces ('PR 27ZS',
-    'SL 596 DUNE') and colours with separators work. Without them the last token is the colour.
+    Known models may follow a commercial collection name. Only complete token sequences match;
+    a trailing descriptive colour never replaces the manufacturer code. Without known models,
+    the last token is the colour (catalogue-reference lookup, not free page prose).
     """
     brand_list = list(brands)
-    brand, rest = strip_brand(str(text or ""), brand_list)
-    caliber = extract_caliber(rest)
+    raw = str(text or "")
+    caliber = extract_caliber(raw) or extract_lens(raw)
     if caliber:
-        rest = _CALIBER.sub(" ", rest, count=1)
+        raw = _CALIBER.sub(" ", raw) if "-" in caliber else _LENS_TOKEN.sub(" ", raw)
+    brand, rest = strip_brand(raw, brand_list)
     parts = tokens(rest)
+    matches: list[Reference] = []
     for model in sorted(set(models), key=lambda m: -len(key(m))):
         model_key = key(model)
         if not model_key:
             continue
-        for index in range(1, len(parts) + 1):
-            if key("".join(parts[:index])) == model_key:
-                return Reference(brand, model, " ".join(parts[index:]), caliber)
+        for start in range(len(parts)):
+            for end in range(start + 1, len(parts) + 1):
+                if key("".join(parts[start:end])) != model_key:
+                    continue
+                color_parts = []
+                reference_caliber = caliber
+                for part in parts[end:]:
+                    if not re.search(r"\d", part):
+                        break
+                    if color_parts and _LENS_ONLY.fullmatch(part) and 38 <= int(part) <= 66:
+                        reference_caliber = reference_caliber or part
+                        break
+                    color_parts.append(part)
+                matches.append(Reference(brand, model, " ".join(color_parts), reference_caliber))
+    if matches:
+        distinct = {(match.model_key, match.color_key) for match in matches}
+        if len(distinct) > 1:
+            return Reference(brand=brand, caliber=caliber, ambiguous=True)
+        return matches[0]
     if len(parts) >= 2:
         return Reference(brand, " ".join(parts[:-1]), parts[-1], caliber)
     return Reference(brand, parts[0] if parts else "", "", caliber)
@@ -172,22 +191,12 @@ class MatchResult:
     status: str
     basis: str = ""
     reasons: list[str] = field(default_factory=list)
+    observations: list[str] = field(default_factory=list)
+    normalized: dict[str, Any] = field(default_factory=dict)
 
     @property
     def comparable(self) -> bool:
         return self.status == EXACT
-
-
-def _contains_reference(title: str, model_key: str, color_key: str) -> bool:
-    parts = tokens(title)
-    for start in range(len(parts)):
-        for end in range(start + 1, len(parts) + 1):
-            if key("".join(parts[start:end])) != model_key:
-                continue
-            for stop in range(end + 1, min(end + 4, len(parts)) + 1):
-                if key("".join(parts[end:stop])) == color_key:
-                    return True
-    return False
 
 
 def _valid_gtin(value: Any) -> str:
@@ -204,51 +213,81 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
 
     candidate keys (all optional): ean_published, brand, model, color, caliber, title.
     """
-    reasons: list[str] = []
     own_model, own_color, own_brand = key(product.get("model")), key(product.get("color")), key(product.get("brand"))
     title = str(candidate.get("title") or "")
-    brand = key(candidate.get("brand"))
-    brand_evidence = bool(brand) or (bool(own_brand) and own_brand in key(title))
-
     published = str(candidate.get("ean_published") or "").strip()
     ean = _valid_gtin(published) if published else ""
+    references = [parse_reference(text, brands=[str(product.get("brand") or "")],
+                                  models=[str(product.get("model") or "")])
+                  for text in [title, *(candidate.get("identifiers") or [])]]
+    relevant = [ref for index, ref in enumerate(references)
+                if index == 0 or ref.model_key == own_model or
+                (ref.color_key and any(char.isalpha() for char in ref.model) and
+                 any(char.isdigit() for char in ref.model) and
+                 not caliber_from_code((candidate.get("identifiers") or [])[index - 1]))]
+    models = {ref.model_key for ref in relevant
+              if ref.model_key == own_model or any(char.isdigit() for char in ref.model)}
+    colors = {ref.color_key for ref in relevant if any(char.isdigit() for char in ref.color)}
+    if candidate.get("model"):
+        models.add(key(candidate["model"]))
+    if any(char.isdigit() for char in str(candidate.get("color") or "")):
+        colors.add(key(candidate["color"]))
+    brands = {key(ref.brand) for ref in references if ref.brand}
+    if candidate.get("brand"):
+        brands.add(key(candidate["brand"]))
+    brand_tokens = " ".join(tokens(product.get("brand")))
+    if brand_tokens and f" {brand_tokens} " in f" {' '.join(tokens(title))} ":
+        brands.add(own_brand)
+    calibers = {normalize_caliber(value) for value in
+                [candidate.get("caliber"), *(ref.caliber for ref in references)] if normalize_caliber(value)}
+    observed_caliber = normalize_caliber(candidate.get("caliber")) or (sorted(calibers)[0] if calibers else "")
+    caliber_state = compare_calibers(product.get("caliber"), observed_caliber)
+    verified_ean = bool(ean and ean == _valid_gtin(product.get("ean")))
+    normalized = {"catalogue": {"ean": product.get("ean"), "brand": own_brand, "model": own_model,
+                                "color": own_color, "caliber": normalize_caliber(product.get("caliber"))},
+                  "listing": {"ean": ean, "brands": sorted(brands), "models": sorted(models),
+                              "colors": sorted(colors), "calibers": sorted(calibers)},
+                  "verified_ean": verified_ean, "caliber_comparison": caliber_state,
+                  "caliber_informational": verified_ean}
+    reasons = []
+    observations = []
+    if verified_ean and caliber_state != "equal":
+        observations.append(f"Calibre informativo por EAN publicado idéntico: catálogo "
+                            f"{normalize_caliber(product.get('caliber')) or 'desconocido'}, "
+                            f"ficha {observed_caliber or 'desconocido'} ({caliber_state})")
+    contradictory_calibers = any(compare_calibers(a, b) == "different" for a in calibers for b in calibers)
+    if contradictory_calibers and verified_ean:
+        observations.append("Calibre informativo: medidas publicadas contradictorias")
+    def result(status: str, basis: str = "") -> MatchResult:
+        return MatchResult(status, basis, reasons, observations, normalized)
+
     if published and not ean:
-        reasons.append("EAN publicado no válido: se ignora")
+        reasons.append("EAN publicado no válido: no se aplica la excepción de calibre")
     if ean and ean != product.get("ean"):
-        return MatchResult(REJECTED, reasons=[f"EAN publicado distinto: {ean}"])
-
-    model_given, color_given = key(candidate.get("model")), key(candidate.get("color"))
-    if not (model_given and color_given) and title and own_model and own_color \
-            and _contains_reference(title, own_model, own_color):
-        model_given, color_given = own_model, own_color
-    caliber_state = compare_calibers(product.get("caliber"), candidate.get("caliber") or extract_caliber(title))
-
-    conflicts = []
-    if brand and brand != own_brand:
-        conflicts.append(f"marca {candidate.get('brand')}")
-    if model_given and model_given != own_model:
-        conflicts.append(f"modelo {candidate.get('model')}")
-    if color_given and color_given != own_color:
-        conflicts.append(f"color {candidate.get('color')}")
-    if caliber_state == "different":
-        conflicts.append("calibre")
-    if ean:
-        if conflicts:
-            return MatchResult(PROBABLE, reasons=reasons + [
-                "EAN idéntico pero contradice: " + ", ".join(conflicts) + ": revisar"])
-        return MatchResult(EXACT, "ean", reasons + ["EAN publicado idéntico"])
-    if conflicts:
-        return MatchResult(REJECTED, reasons=reasons + ["Distinto " + ", ".join(conflicts)])
-
-    if not (model_given and color_given):
-        return MatchResult(REJECTED, reasons=reasons + ["No se identifican modelo y color"])
-    if caliber_state != "equal":
-        why = ("el calibre del catálogo es desconocido" if not normalize_caliber(product.get("caliber"))
-               else "la ficha no publica el calibre")
-        return MatchResult(PROBABLE, reasons=reasons + [f"Modelo y color coinciden pero {why}: revisar"])
-    if not brand_evidence:
-        return MatchResult(PROBABLE, reasons=reasons + ["Falta evidencia de la marca: revisar"])
-    return MatchResult(EXACT, "reference", reasons + ["Marca, modelo, color y calibre coinciden"])
+        reasons.append(f"EAN publicado distinto: {ean}")
+        return result(REJECTED)
+    if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
+        reasons.append("Identificación ambigua: requiere revisión")
+        return result(PROBABLE)
+    for name, expected, found in [("Marca", own_brand, brands), ("Modelo", own_model, models),
+                                  ("Color", own_color, colors)]:
+        if not expected or found != {expected}:
+            label = f"Distinto {name.lower()}" if expected and found else f"{name} no confirmado"
+            reasons.append(f"{label}: catálogo {expected or 'desconocido'}, "
+                           f"ficha {', '.join(sorted(found)) or 'desconocido'}")
+    if reasons and any((found and found != {expected}) for expected, found in
+                       [(own_brand, brands), (own_model, models), (own_color, colors)]):
+        return result(PROBABLE if verified_ean else REJECTED)
+    if not verified_ean and (caliber_state != "equal" or contradictory_calibers):
+        reasons.append("Distinto calibre sin EAN verificado" if caliber_state == "different" else
+                       f"Calibre no confirmado sin EAN verificado: {caliber_state}")
+        if caliber_state == "different" or contradictory_calibers:
+            return result(REJECTED)
+    if reasons:
+        return result(PROBABLE)
+    reasons.append("EAN publicado idéntico; marca, modelo y código de color confirmados" if verified_ean else
+                   "Marca, modelo, color y calibre coinciden")
+    return result(EXACT, "ean" if verified_ean else "reference")
 
 
 class ReferenceIndex:

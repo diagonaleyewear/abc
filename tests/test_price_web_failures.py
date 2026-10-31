@@ -68,12 +68,21 @@ def test_wrong_product_can_be_replaced_without_touching_history(tmp_path):
     assert _offers(store) == 1
 
 
-def test_same_model_with_other_caliber_is_a_variant_problem(tmp_path):
+def test_same_ean_with_other_caliber_is_informational(tmp_path):
     site, store, search, cid = _setup(tmp_path)
     site.add(GOOD, page(name="Prada PR 27ZS 16K08Z 52-20", price=239, gtin=EAN))
     sub = search.submit_url(EAN, cid, GOOD)
-    assert (sub.state, sub.reason) == ("needs_confirmation", "variant_differs")
-    assert "otro color o calibre" in sub.message and _offers(store) == 0
+    assert (sub.state, sub.reason) == ("verified", "vat_unconfirmed")
+    assert "Calibre informativo" in sub.outcome.detail
+    assert _offers(store) == 1
+
+
+def test_without_published_ean_other_caliber_remains_a_variant_problem(tmp_path):
+    site, store, search, cid = _setup(tmp_path)
+    site.add(GOOD, page(name="Prada PR 27ZS 16K08Z 52-20", price=239, gtin=None))
+    sub = search.submit_url(EAN, cid, GOOD)
+    assert sub.state == "rejected" and sub.reason == "variant_differs"
+    assert _offers(store) == 0
 
 
 def test_contradicting_ean_is_reported_as_ean_conflict(tmp_path):

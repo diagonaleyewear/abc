@@ -24,7 +24,7 @@ from typing import Callable
 import pandas as pd
 from filelock import FileLock, Timeout
 
-from price_comparator import PriceComparatorStore, _number
+from price_comparator import PriceComparatorStore
 from price_connectors import CONNECTORS, Connector, ConnectorBlocked, ConnectorError, Observation, validate_source
 from price_web import web_connectors
 
@@ -390,9 +390,6 @@ class CompetitorScheduler:
         market = item.market or competitor["market"]
         stamp = _iso(self._now())
         latest = self._latest_offer(item.ean, competitor["id"], market)
-        if latest is not None and self._same_content(latest, item):
-            self._touch_check(item.ean, competitor["id"], market, latest["id"], stamp)
-            return "unchanged", ""
         frame = pd.DataFrame([{
             "EAN": item.ean, "Competidor": competitor["name"], "Precio": item.price,
             "Precio promocional": item.promotional_price, "Precio anterior": item.previous_price,
@@ -402,38 +399,24 @@ class CompetitorScheduler:
             "Evidencia": item.evidence or "Feed autorizado, identificación por EAN", "Fecha consulta": stamp,
             "Marca": item.brand, "Color": item.color, "Calibre": item.caliber, "EAN publicado": item.ean_published,
             "Título": item.title,
+            "Identificadores": list(item.identifiers), "Ambigua": item.ambiguous,
             "IVA incluido": "" if item.tax_included is None else ("sí" if item.tax_included else "no"),
         }])
         report = self.store.import_offers(frame)
         if report.rejected:
             return "rejected", report.rejected[0]
         saved = self._latest_offer(item.ean, competitor["id"], market)
-        self._touch_check(item.ean, competitor["id"], market, saved["id"], stamp)
+        if not report.updated:
+            self._touch_check(item.ean, competitor["id"], market, saved["id"], stamp)
         with self.store._connect() as connection, connection:
             connection.execute("UPDATE competitors SET connectivity=? WHERE id=?",
                                (f"connector:{connector.name}", competitor["id"]))
-        return ("new" if latest is None else "changed"), ""
+        return ("unchanged" if report.updated else "new" if latest is None else "changed"), ""
 
     def _latest_offer(self, ean: str, competitor_id: str, market: str):
         with self.store._connect() as connection:
             return connection.execute("""SELECT * FROM offers WHERE ean=? AND competitor_id=? AND market=?
                 ORDER BY captured_at DESC,id DESC LIMIT 1""", (ean, competitor_id, market)).fetchone()
-
-    @staticmethod
-    def _same_content(offer, item: Observation) -> bool:
-        def number(value):
-            return _number(value, "valor", optional=True)
-
-        try:
-            fields = (number(item.price), number(item.promotional_price), number(item.previous_price),
-                      number(item.shipping_cost))
-        except ValueError:
-            return False
-        current = (offer["price"], offer["promotional_price"], offer["previous_price"], offer["shipping_cost"])
-        return (offer["match_status"] == "exact_match" and fields == current
-                and item.currency == offer["currency"] and item.availability == offer["availability"]
-                and item.url == offer["url"]
-                and (None if item.tax_included is None else int(item.tax_included)) == offer["price_includes_tax"])
 
     def _touch_check(self, ean: str, competitor_id: str, market: str, offer_id: int, stamp: str) -> None:
         with self.store._connect() as connection, connection:
