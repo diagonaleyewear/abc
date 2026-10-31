@@ -117,6 +117,18 @@ worker de interfaz con errores persistidos y trabajos antiguos inyectados
 que se cancelan al reanudar. No se ha realizado ninguna consulta a tiendas
 reales ni guardado/activado la seleccion en la base de produccion.
 
+Suite completa final: **1176 tests pasaron, 15 omitidos y 1 fallo** en
+`test_local_library_search_and_download_permissions`, validacion de
+fotografias de Kering. El mismo fallo ya se habia observado antes del piloto;
+no se ha modificado su logica ni su test. No se presenta la suite como verde.
+Compilacion Python y `git diff --check`: correctos.
+
+Docker/CI: **pendientes**, no verificados. Docker/Podman no estan disponibles
+en este equipo. La rama se publica sin merge; crear la PR ejecuta el workflow
+existente, que construye y carga la imagen sin publicarla/desplegarla en eventos
+`pull_request`. El build depende de que el job de tests pase. No activar
+despliegues para sustituir esta validacion.
+
 ## Archivos modificados
 
 - [price_pilot.py](../price_pilot.py): alcance, plan, cola manual, bloqueo HTTP,
