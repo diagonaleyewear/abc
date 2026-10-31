@@ -650,7 +650,7 @@ class WebPriceSearch:
             outcome.state, outcome.detail = "error", "La URL redirige fuera del dominio del competidor"
             outcome.reason = "redirect"
             return outcome
-        outcome.notes = [*match.reasons, *page.notes]
+        outcome.notes = [*match.reasons, *match.observations, *page.notes]
         outcome.method = f"web:{page.method}"
         outcome.state = {EXACT: "exact", PROBABLE: "probable", REJECTED: "rejected"}.get(status, "probable")
         outcome.detail = "; ".join(outcome.notes)
@@ -724,6 +724,7 @@ class WebPriceSearch:
             "Marca": page.brand if page else "", "Modelo": product["model"] if outcome.state == "exact" else "",
             "Color": page.color if page else "", "Calibre": page.caliber if page else "",
             "EAN publicado": page.ean_published if page else "", "Título": page.title if page else "",
+            "Identificadores": page.identifiers if page else [], "Ambigua": bool(page and page.ambiguous),
             "IVA incluido": tax, "Tipo IVA": "" if page is None or page.vat_rate is None else page.vat_rate,
         }
 
@@ -987,7 +988,8 @@ class WebFichaConnector:
                     url=outcome.url, previous_price="" if page.previous_price is None else str(page.previous_price),
                     match_status="exact_match", method=outcome.method, evidence=outcome.detail,
                     tax_included=page.includes_tax, ean_published=page.ean_published, caliber=page.caliber,
-                    color=page.color, brand=page.brand, title=page.title, market=config_market or page.market))
+                    color=page.color, brand=page.brand, title=page.title, market=config_market or page.market,
+                    identifiers=tuple(page.identifiers), ambiguous=page.ambiguous))
         return found
 
 

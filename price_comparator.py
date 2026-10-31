@@ -4,6 +4,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from io import BytesIO
 import math
 import os
@@ -714,7 +715,10 @@ class PriceComparatorStore:
                         if offer_domain != competitor["domain"] and not offer_domain.endswith("." + competitor["domain"]):
                             raise ValueError("El dominio de la oferta no coincide con el competidor")
 
-                    identity = self._offer_identity(row, ean, product, match_status)
+                    validation: dict = {}
+                    identity = self._offer_identity(row, ean, product, match_status, validation=validation)
+                    if validation:
+                        evidence += " | Validación identidad: " + json.dumps(validation, ensure_ascii=False)
 
                     if not _text(row["Precio"]) or match_status == "rejected":
                         fingerprint = _fingerprint((ean, competitor["id"], market, url, captured,
@@ -809,7 +813,7 @@ class PriceComparatorStore:
         return ImportReport(imported, updated, tuple(errors))
 
     @staticmethod
-    def _offer_identity(row: Any, ean: str, product: Any, match_status: str) -> tuple:
+    def _offer_identity(row: Any, ean: str, product: Any, match_status: str, *, validation: dict | None = None) -> tuple:
         """Structured identity of an offer: (ean_published, model, colour, caliber, basis, tax_included, vat).
 
         An exact match is accepted only if the declared identity really verifies against the catalogue.
@@ -840,13 +844,23 @@ class PriceComparatorStore:
         if any((published, model, color, caliber, _text(row.get("Marca")), _text(row.get("Título")))):
             result = classify(dict(product), {
                 "ean_published": published, "brand": _text(row.get("Marca")), "model": model,
-                "color": color, "caliber": caliber, "title": _text(row.get("Título"))})
+                "color": color, "caliber": caliber, "title": _text(row.get("Título")),
+                "identifiers": row.get("Identificadores") if isinstance(row.get("Identificadores"), list) else [],
+                "ambiguous": row.get("Ambigua") is True})
+            if validation is not None:
+                validation.update(result.normalized)
+                validation.update({"reasons": result.reasons, "observations": result.observations})
             if match_status == "exact_match" and result.status != EXACT:
                 raise ValueError("Marcado exact_match, pero no se verifica: " + "; ".join(result.reasons))
             if result.status == REJECTED and match_status not in {"rejected", "not_found", "error"}:
                 raise ValueError("Identidad descartada: " + "; ".join(result.reasons))
             if match_status == "exact_match" and not basis:
                 basis = result.basis
+            listing = result.normalized["listing"]
+            if not model and len(listing["models"]) == 1:
+                model = listing["models"][0]
+            if not color and len(listing["colors"]) == 1:
+                color = listing["colors"][0]
         elif match_status == "exact_match" and basis:
             raise ValueError("Base de coincidencia sin datos de identidad")
         return (published, model, color, caliber, basis, tax_included, vat_rate)

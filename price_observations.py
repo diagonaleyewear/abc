@@ -101,6 +101,8 @@ def observations_to_frame(data: dict, index: ReferenceIndex) -> tuple[pd.DataFra
             "Marca": _clean(obs.get("marca")), "Modelo": _clean(obs.get("modelo")),
             "Color": _clean(obs.get("color")), "Calibre": _clean(obs.get("calibre")),
             "EAN publicado": _clean(obs.get("ean_publicado")), "Título": _clean(obs.get("titulo")),
+            "Identificadores": obs.get("identificadores") if isinstance(obs.get("identificadores"), list) else [],
+            "Ambigua": obs.get("ambigua") is True,
             "IVA incluido": _tristate(obs.get("iva_incluido")), "Tipo IVA": obs.get("tipo_iva") or "",
         })
     return pd.DataFrame(rows), errors

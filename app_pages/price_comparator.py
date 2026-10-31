@@ -732,8 +732,9 @@ def _render_pilot(store: PriceComparatorStore) -> None:
                    "Al guardar, las colas y actualizaciones generales quedan bloqueadas, incluso al desactivar "
                    "el piloto. Las ocho tiendas restantes no se activan ni se eliminan.")
         if selected and eligible.loc[selected, "caliber"].str.strip().eq("").any():
-            st.warning("Hay productos sin calibre en el catálogo. Se pueden consultar sus fichas, pero sus "
-                       "ofertas no serán comparables hasta verificar ese dato del catálogo.")
+            st.info("Hay productos sin calibre en el catálogo. Con EAN publicado idéntico y verificado, "
+                    "el calibre es informativo; siguen siendo obligatorios marca, modelo, código de color "
+                    "y los demás requisitos comerciales.")
         competitors = {row["id"]: row["name"] for row in pilot.competitors()}
         cids = st.multiselect("Seis competidores", list(competitors), default=list(competitors),
                               max_selections=6, format_func=competitors.get, key="pilot_competitors")

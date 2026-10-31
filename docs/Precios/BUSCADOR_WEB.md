@@ -15,8 +15,11 @@ precio con el sistema existente (`import_offers`, histórico, gráficos). Códig
 
 ## Reglas de fiabilidad
 
-- **Coincidencia**: EAN publicado idéntico, o modelo + color + calibre sin EAN → *exacta*. Color o calibre distinto,
-  EAN distinto o ficha con varias ofertas → *probable* o *descartada*; nunca entra en comparaciones.
+- **Coincidencia**: EAN publicado idéntico verificado con marca, modelo y código de color confirmados → *exacta*;
+  el calibre vacío o distinto se registra como información, no bloquea. Sin EAN verificado se exige marca +
+  modelo + código de color + calibre coincidentes. EAN distinto, modelo/color incorrectos o identificación
+  ambigua → *probable* o *descartada*. Las denominaciones comerciales no sustituyen códigos de fabricante.
+  [Regla y trazabilidad](../PRICE_IDENTITY.md).
 - **IVA**: solo «incluido» si la ficha lo declara, si publica el precio sin IVA y la proporción es un tipo español
   (1,21 / 1,10 / 1,04), o si el competidor tiene «IVA incluido» verificado. Si no, la oferta se guarda pero no compara.
 - **Mercado y moneda**: se toman de cada ficha (`<html lang="es-ES">`, `priceCurrency`) o del competidor si una persona

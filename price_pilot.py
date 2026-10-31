@@ -14,7 +14,7 @@ from filelock import FileLock, Timeout
 
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_connectors import ConnectorError
-from price_references import compare_calibers, key, parse_reference
+from price_references import EXACT, classify
 
 MAX_PRODUCTS = 20
 MAX_COMPETITORS = 6
@@ -330,9 +330,12 @@ class PricePilot:
                     with self.store._connect() as connection, connection:
                         connection.execute("UPDATE pilot_jobs SET status='running' WHERE id=?", (job["id"],))
                     outcome = search.locate(job["ean"], cid, fetcher=fetcher)
-                    reasons = self._record(search, config, outcome)
+                    validation: dict = {}
+                    reasons = self._record(search, config, outcome, validation=validation)
+                    observation = asdict(outcome)
+                    observation["validation"] = validation
                     self._finish(job, outcome.state, "; ".join(reasons) or outcome.detail,
-                                 observation=asdict(outcome), comparable=not reasons and outcome.priced,
+                                 observation=observation, comparable=not reasons and outcome.priced,
                                  priced=bool(outcome.page and outcome.page.has_price))
                     if outcome.state == "blocked":
                         with self.store._connect() as connection, connection:
@@ -341,29 +344,18 @@ class PricePilot:
                             budget = connection.execute("SELECT * FROM pilot_budgets WHERE run_id=? AND competitor_id=?",
                                                         (run_id, cid)).fetchone()
 
-    def _record(self, search, config: dict, outcome) -> list[str]:
+    def _record(self, search, config: dict, outcome, *, validation: dict | None = None) -> list[str]:
         page = outcome.page
         if page is None:
             return [outcome.reason or outcome.state]
         product = search._product(outcome.ean)
-        candidate = parse_reference(page.title, brands=[product["brand"]], models=[product["model"]])
-        reasons = []
+        match = classify(product, page.candidate())
+        normalized = match.normalized
+        reasons = list(match.reasons) if match.status != EXACT else []
         if outcome.state != "exact" or page.ambiguous:
             reasons.append("Coincidencia no exacta")
-        try:
-            published = normalize_gtin(page.ean_published) if page.ean_published else ""
-        except ValueError:
-            published = ""
-        if published != product["ean"]:
+        if not normalized["verified_ean"]:
             reasons.append("EAN no confirmado")
-        if key(page.brand or candidate.brand) != key(product["brand"]):
-            reasons.append("Marca no confirmada")
-        if key(candidate.model) != key(product["model"]):
-            reasons.append("Modelo no confirmado")
-        if key(page.color or candidate.color) != key(product["color"]):
-            reasons.append("Color no confirmado")
-        if compare_calibers(product["caliber"], page.caliber or candidate.caliber) != "equal":
-            reasons.append("Calibre no confirmado")
         identity_valid = not reasons
         if page.availability != "available":
             reasons.append("Sin stock" if page.availability == "unavailable" else "Stock desconocido")
@@ -379,6 +371,9 @@ class PricePilot:
             reasons.append("Precio final no válido")
         if page.has_price and outcome.state in {"exact", "probable"}:
             frame = search.frame_row(product, config, outcome, stamp())
+            listing = normalized["listing"]
+            frame["Modelo"] = listing["models"][0] if len(listing["models"]) == 1 else ""
+            frame["Color"] = listing["colors"][0] if len(listing["colors"]) == 1 else ""
             # Unknown/incorrect identity must never enter the global comparable set.
             if not identity_valid or not market_valid or not currency_valid or page.price <= 0:
                 frame["Estado coincidencia"] = "manual_review"
@@ -387,6 +382,10 @@ class PricePilot:
             reasons.extend(report.rejected)
         elif not reasons:
             reasons.append("Observación no registrada")
+        if validation is not None:
+            validation.update(normalized)
+            validation.update({"accepted": not reasons and outcome.priced, "observations": match.observations,
+                               "reasons": reasons or [*match.reasons, "Precio EUR, IVA incluido, stock y mercado ES verificados"]})
         return reasons
 
     def _finish(self, job, outcome: str, detail: str, *, observation: dict | None = None,
@@ -422,6 +421,12 @@ class PricePilot:
         own = dict(zip(summary["ean"], summary["own_price_eur"]))
         frame["Precio Vytria"] = frame["ean"].map(own)
         observations = frame["observation"].map(json.loads)
+        frame["Validación normalizada"] = observations.map(
+            lambda row: json.dumps(row.get("validation", {}), ensure_ascii=False))
+        frame["Motivo de validación"] = observations.map(
+            lambda row: "; ".join(row.get("validation", {}).get("reasons", [])))
+        frame["Observaciones de calibre"] = observations.map(
+            lambda row: "; ".join(row.get("validation", {}).get("observations", [])))
         frame["Precio final"] = observations.map(lambda row: (row.get("page") or {}).get("price"))
         for label, field in {"EAN publicado": "ean_published", "Marca ficha": "brand", "Título ficha": "title",
                              "Color ficha": "color", "Calibre ficha": "caliber", "Moneda": "currency",
@@ -430,4 +435,6 @@ class PricePilot:
             frame[label] = observations.map(lambda row: (row.get("page") or {}).get(field))
         frame["Diferencia frente a Vytria €"] = frame["Precio final"] - frame["Precio Vytria"]
         frame.loc[frame["comparable"] != 1, "Diferencia frente a Vytria €"] = float("nan")
+        frame["Diferencia frente a Vytria %"] = (
+            frame["Diferencia frente a Vytria €"] / frame["Precio Vytria"].where(frame["Precio Vytria"] > 0) * 100)
         return frame, metrics

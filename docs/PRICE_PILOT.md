@@ -11,8 +11,11 @@ La muestra incluye las tres Prada exigidas, diez marcas, precios de 82 a
 1100 EUR, monturas y gafas de sol, y parejas de variantes de color de Gucci,
 Miu Miu, Saint Laurent y Tom Ford. **Calibre pendiente**: ni la exportacion
 ni el Excel original disponible incluyen calibre. El usuario ha autorizado
-continuar documentando esta limitacion. No se inventan medidas; una oferta
-sin calibre del catalogo verificado no es comparable. Los precios del CSV
+continuar documentando esta limitacion. No se inventan medidas. Con la regla
+actual, un EAN publicado identico y verificado hace que el calibre sea
+informativo; no bloquea si falta o difiere. Marca, modelo y codigo de color
+siguen siendo obligatorios. Sin EAN verificado se mantiene la validacion
+dimensional estricta. Los precios del CSV
 son evidencia de seleccion, no precios eternamente validos: al guardar y
 ejecutar se verifica de nuevo su vigencia en la base de Cloud.
 
@@ -69,10 +72,12 @@ de programacion antiguos habilitados.
 ## Observaciones e historico
 
 Cada trabajo guarda la observacion original y su motivo, incluso si no es
-comparable. Se exige EAN publicado, marca, modelo, color y calibre coincidentes,
+comparable. Se exige EAN publicado, marca, modelo y codigo de color coincidentes,
 precio positivo, EUR, evidencia de mercado ES, IVA incluido confirmado y
 stock disponible. Una incoherencia con mercado/moneda configurados tambien
-excluye. Los precios extraidos se importan con las funciones existentes;
+excluye. El calibre vacio o diferente es informativo con EAN publicado
+identico verificado y se registra para auditoria; nunca se actualiza el
+catalogo automaticamente. Los precios extraidos se importan con las funciones existentes;
 identidades o mercados no verificados quedan en revision, nunca comparables.
 Las importaciones rechazadas permanecen visibles en el resultado del piloto.
 
