@@ -11,7 +11,7 @@ from html.parser import HTMLParser
 import json
 import re
 from typing import Any, Iterable
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
 
 from price_comparator import normalize_gtin
 from price_references import caliber_from_code, extract_caliber, extract_lens, parse_reference
@@ -21,7 +21,7 @@ _EAN_LABELLED = re.compile(r"(?:\bEAN(?:/GTIN)?\b|\bGTIN(?:-?13)?\b|c[oó]digo\s
                            r"(?:<[^>]{0,200}>\s*){0,4}:?\s*(\d{13})(?!\d)", re.I)
 _EAN_DATA_ATTR = re.compile(r"\bdata-ean=[\"'](\d{13})[\"']", re.I)
 _PRESTASHOP_CURRENCY = re.compile(r"var prestashop\s*=\s*\{\"currency\":\{[^{}]*?\"iso_code\":\"([A-Z]{3})\"")
-_AVAILABLE = {"instock", "limitedavailability", "onlineonly", "instoreonly"}
+_AVAILABLE = {"instock", "limitedavailability"}
 _UNAVAILABLE = {"outofstock", "soldout", "discontinued"}
 _VOID = {"meta", "link", "img", "br", "hr", "input", "source", "area", "base", "col", "embed", "wbr"}
 
@@ -49,6 +49,12 @@ class ProductPage:
     market_conflict: bool = False
     ambiguous: bool = False
     source_url: str = ""
+    variant_urls: list[str] = field(default_factory=list)
+    variant_id: str = ""
+    variant_scoped: bool = False
+    stock_evidence: list[str] = field(default_factory=list)
+    delivery_evidence: list[str] = field(default_factory=list)
+    stock_conflict: bool = False
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -134,23 +140,71 @@ def _gtins(node: dict) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _offer_facts(node: dict) -> dict[str, Any]:
+def _url_key(url: str) -> tuple[str, str, str, tuple[tuple[str, str], ...]]:
+    parsed = urlparse(url)
+    return (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"),
+            tuple(sorted(parse_qsl(parsed.query, keep_blank_values=True))))
+
+
+def _product_urls(node: dict, url: str) -> list[str]:
+    declared = [node.get("url")]
+    for offer in _as_list(node.get("offers")):
+        if isinstance(offer, dict):
+            declared.append(offer.get("url"))
+            declared.extend(o.get("url") for o in _as_list(offer.get("offers")) if isinstance(o, dict))
+    return list(dict.fromkeys(urljoin(url, value) for value in declared if isinstance(value, str) and value))
+
+
+def _matches_product_url(node: dict, url: str) -> bool:
+    declared = node.get("url")
+    if isinstance(declared, str):
+        identity_url = urljoin(url, declared)
+        if any(key == "variant" for key, _ in parse_qsl(urlparse(identity_url).query)) \
+                and _url_key(identity_url) != _url_key(url):
+            return False
+    return any(_url_key(value) == _url_key(url) for value in _product_urls(node, url))
+
+
+def _conditional_price(node: dict) -> bool:
+    return any(node.get(field) is not None for field in
+               ("eligibleQuantity", "eligibleCustomerType", "validForMemberTier", "eligibleTransactionVolume")) \
+        or bool(re.search(r"cup[oó]n|coupon|promo(?:tional)? code", _name(node.get("name")), re.I))
+
+
+def _offer_facts(node: dict, url: str) -> dict[str, Any]:
     """price/currency/availability/VAT from the offers of one Product node; several different prices = ambiguous."""
     offers: list[dict] = []
     for offer in _as_list(node.get("offers")):
         if isinstance(offer, dict):
             inner = [o for o in _as_list(offer.get("offers")) if isinstance(o, dict)]
             offers.extend(inner or [offer])
-    facts: dict[str, Any] = {"ambiguous": False, "notes": []}
+    facts: dict[str, Any] = {"ambiguous": False, "notes": [], "stock_evidence": [], "delivery_evidence": []}
+    variant_offers = [o for o in offers if isinstance(o.get("url"), str)
+                      and urlparse(urljoin(url, o["url"])).path == urlparse(url).path
+                      and urlparse(urljoin(url, o["url"])).query]
+    if variant_offers and (len(variant_offers) > 1 or any(
+            key == "variant" for o in variant_offers for key, _ in parse_qsl(urlparse(o["url"]).query))):
+        offers = [o for o in variant_offers if _url_key(urljoin(url, o["url"])) == _url_key(url)]
+        if not offers:
+            facts["ambiguous"] = True
+            facts["notes"].append("Ninguna oferta corresponde a la URL de variante solicitada")
     markets: set[str] = set()
     seen = []
     for offer in offers:
+        if _conditional_price(offer):
+            facts["notes"].append("Oferta condicionada: no se usa como precio de venta")
+            continue
+        raw_stock = str(offer.get("availability") or "")
+        if raw_stock:
+            facts["stock_evidence"].append(raw_stock)
         for region in _as_list(offer.get("eligibleRegion")):
             country = _name(region.get("addressCountry")) if isinstance(region, dict) else _name(region)
             if re.fullmatch(r"[A-Za-z]{2}", country):
                 markets.add(country.upper())
         for shipping in _as_list(offer.get("shippingDetails")):
             if isinstance(shipping, dict):
+                if shipping.get("deliveryTime"):
+                    facts["delivery_evidence"].append(json.dumps(shipping["deliveryTime"], ensure_ascii=False))
                 for destination in _as_list(shipping.get("shippingDestination")):
                     country = _name(destination.get("addressCountry")) if isinstance(destination, dict) else ""
                     if re.fullmatch(r"[A-Za-z]{2}", country):
@@ -163,9 +217,14 @@ def _offer_facts(node: dict) -> dict[str, Any]:
             value = parse_price(item.get("price"))
             if kind in {"listprice", "strikethroughprice", "srp", "msrp"}:
                 previous = previous or value
-            elif value is not None and price is None:
+            elif _conditional_price(item):
+                facts["notes"].append("Precio condicionado: no se aplica cupón ni precio de miembro/cantidad")
+                continue
+            elif kind in {"", "saleprice"} and value is not None and price is None:
                 price = value
-            if item.get("valueAddedTaxIncluded") is not None and tax is None:
+            elif value is not None and kind not in {"", "saleprice"}:
+                facts["notes"].append("Tipo de precio no verificado como venta: " + kind)
+            if kind in {"", "saleprice"} and item.get("valueAddedTaxIncluded") is not None and tax is None:
                 tax = _truthy(item.get("valueAddedTaxIncluded"))
         if offer.get("price") is not None:
             price = parse_price(offer.get("price"))
@@ -173,16 +232,21 @@ def _offer_facts(node: dict) -> dict[str, Any]:
             facts["notes"].append("AggregateOffer sin precio único: no se usa lowPrice")
         seen.append((price, str(offer.get("priceCurrency") or "").upper(), availability_of(offer.get("availability")),
                      tax, previous))
-    distinct = {item[:3] for item in seen if item[0] is not None}
+    distinct = {(item[0], item[1], item[3]) for item in seen if item[0] is not None}
     if len(distinct) > 1:
         facts["ambiguous"] = True
         facts["notes"].append("La ficha publica varias ofertas distintas")
-    chosen = next((item for item in seen if item[0] is not None), None)
+    chosen = next((item for item in seen if item[0] is not None), seen[0] if seen else None)
     if chosen:
         facts.update(price=chosen[0], currency=chosen[1], availability=chosen[2], includes_tax=chosen[3],
                      previous_price=chosen[4])
-    elif seen:
-        facts["availability"] = seen[0][2]
+    stocks = {item[2] for item in seen if item[2] != "unknown"}
+    ordered = any(availability_of(value) == "unknown" and re.search(r"backorder|preorder", value, re.I)
+                  for value in facts["stock_evidence"])
+    facts["stock_conflict"] = len(stocks) > 1 or ("available" in stocks and ordered)
+    if facts["stock_conflict"]:
+        facts["availability"] = "unknown"
+        facts["notes"].append("Stock publicado contradictorio entre ofertas: revisión obligatoria")
     if len(markets) == 1:
         facts["market"] = next(iter(markets))
     elif markets:
@@ -211,21 +275,34 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     if not products:
         return None
     page = ProductPage(url=url, method="json-ld", structured_type="schema.org/Product")
-    path = urlparse(url).path.rstrip("/").lower()
-    node = next((p for p in products if p.get("url") and urlparse(str(p["url"])).path.rstrip("/").lower() == path), None)
-    if node is None:
+    page.variant_urls = list(dict.fromkeys(value for p in products for value in _product_urls(p, url)))
+    variants = [value for key, value in parse_qsl(urlparse(url).query) if key == "variant"]
+    page.variant_id = variants[0] if len(set(variants)) == 1 else ""
+    page.variant_scoped = len(products) > 1 or bool(variants) or any(
+        key == "variant" for value in page.variant_urls for key, _ in parse_qsl(urlparse(value).query))
+    matching = [p for p in products if _matches_product_url(p, url)]
+    matching = list({json.dumps(p, sort_keys=True): p for p in matching}.values())
+    if len(matching) == 1:
+        node = matching[0]
+    elif not matching and len(products) == 1 and not page.variant_scoped:
         node = products[0]
-        if len({tuple(_gtins(p)) or (str(p.get("sku")),) for p in products}) > 1:
-            page.ambiguous = True
-            page.notes.append("La ficha describe varias variantes: no se elige ninguna")
+    else:
+        page.ambiguous = True
+        page.variant_scoped = True
+        page.notes.append("La URL no identifica una única variante: no se toma identidad, precio ni stock")
+        return page
     page.title = _name(node.get("name"))
     page.brand = _name(node.get("brand"))
+    page.model = _name(node.get("model"))
     page.color = _color_code(_name(node.get("color")))
     gtins = _gtins(node)
     page.ean_published = gtins[0] if gtins else ""
+    if len(gtins) > 1:
+        page.ambiguous = True
+        page.notes.append("EAN publicados contradictorios: " + ", ".join(gtins))
     page.identifiers = [str(node[k]) for k in ("mpn", "sku") if node.get(k)]
     page.caliber = extract_caliber(page.title) or extract_caliber(urlparse(url).path.rsplit("/", 1)[-1])
-    facts = _offer_facts(node)
+    facts = _offer_facts(node, url)
     page.ambiguous |= facts["ambiguous"]
     page.notes += facts["notes"]
     page.price, page.currency = facts.get("price"), facts.get("currency", "")
@@ -235,6 +312,12 @@ def _from_json_ld(html: str, url: str) -> ProductPage | None:
     page.market = facts.get("market", "")
     page.market_source = "ficha:JSON-LD eligibleRegion/shippingDestination" if page.market else ""
     page.market_conflict = facts.get("market_conflict", False)
+    page.stock_evidence = facts["stock_evidence"]
+    page.delivery_evidence = facts["delivery_evidence"]
+    page.stock_conflict = facts.get("stock_conflict", False)
+    page.notes.extend("Plazo publicado: " + value for value in page.delivery_evidence)
+    if page.variant_scoped:
+        page.notes.append("Variante según URL: " + url + "; identificadores: " + ", ".join(page.identifiers))
     return page
 
 
@@ -469,29 +552,53 @@ def extract_product(html: str, url: str, *, price_selector: str = "", availabili
                     page.notes.append("EAN publicado no válido")
                 break
         page.caliber = extract_caliber(page.title) or extract_caliber(urlparse(url).path.rsplit("/", 1)[-1])
-    if price_selector and page.price is None:
-        selected = parse_price(css_text(parsed, price_selector))
+    if price_selector and page.price is None and not page.variant_scoped:
+        text = css_text(parsed, price_selector)
+        conditioned = re.search(r"\bPVP\b|recomendado|hist[oó]rico|cup[oó]n|coupon|promo(?:tional)? code", text, re.I)
+        selected = None if conditioned else parse_price(text)
         if selected is not None:
             page.price, page.method = selected, "selector"
             page.notes.append("Precio tomado del selector configurado")
-    if availability_selector and page.availability == "unknown":
-        text = css_text(parsed, availability_selector).lower()
-        if re.search(r"agotado|sin stock|no disponible|out of stock", text):
-            page.availability = "unavailable"
-        elif re.search(r"en stock|disponible|in stock|añadir al carrito", text):
-            page.availability = "available"
+        elif conditioned:
+            page.notes.append("Selector con precio recomendado, histórico o condicionado: no se usa como venta")
+    if availability_selector and not page.variant_scoped:
+        _selector_stock(page, css_text(parsed, availability_selector))
     if page.includes_tax is None and tax_policy in {"included", "excluded"}:
         page.includes_tax = tax_policy == "included"
         page.notes.append(f"IVA según la política verificada del competidor ({tax_policy})")
-    _infer_tax_from_pretax(page, meta)
-    _enrich(page, html, url)
-    explicit = (meta.get("product:market") or "").upper()
+    if not page.variant_scoped:
+        _infer_tax_from_pretax(page, meta)
+        _enrich(page, html, url)
+    explicit = (meta.get("product:market") or "").upper() if not page.variant_scoped else ""
     if re.fullmatch(r"[A-Z]{2}", explicit):
         if page.market and page.market != explicit:
             page.market_conflict = True
         else:
             page.market, page.market_source = explicit, "ficha:product:market"
     return page
+
+
+def _selector_stock(page: ProductPage, text: str) -> None:
+    if not text:
+        return
+    page.stock_evidence.append(text)
+    page.notes.append("Stock publicado: " + text)
+    unavailable = bool(re.search(r"\bagotado\b|\bsin stock\b|\bno disponible\b|\bout of stock\b", text, re.I))
+    available = bool(re.search(r"\ben stock\b|\bin stock\b", text, re.I))
+    ordered = bool(re.search(r"\bbajo pedido\b|\bbackorder\b|\bpreorder\b|\bpre-order\b", text, re.I))
+    delay = re.search(r"(?:entrega|env[ií]o|delivery)\s+en\s+[1-9]\d*(?:\s*[-–]\s*\d+)?\s*d[ií]as?", text, re.I)
+    if re.search(r"\bentrega\b|\benv[ií]o\b|\bdelivery\b|\bshipping\b", text, re.I):
+        page.delivery_evidence.append(text)
+        page.notes.append("Plazo publicado: " + text)
+    state = "unavailable" if unavailable else "available" if available and not ordered else "unknown"
+    page.stock_conflict |= (available and (unavailable or ordered or bool(delay))) \
+        or (page.availability in {"available", "unavailable"} and state in {"available", "unavailable"}
+            and page.availability != state) or (page.availability == "available" and ordered)
+    if page.stock_conflict:
+        page.availability = "unknown"
+        page.notes.append("Stock y plazo/señales contradictorios: revisión obligatoria")
+    elif state != "unknown" and page.availability == "unknown":
+        page.availability = state
 
 
 def resolve_market(page: ProductPage, config: dict) -> tuple[str, str, bool]:

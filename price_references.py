@@ -37,6 +37,11 @@ def key(value: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", _ascii(value).upper())
 
 
+def model_key(value: Any) -> str:
+    normalized = key(value)
+    return normalized[:-1] if re.fullmatch(r"FT\d{4}S", normalized) else normalized
+
+
 def tokens(value: Any) -> list[str]:
     return [token for token in _SEPARATORS.split(_ascii(value).upper().strip()) if token]
 
@@ -98,7 +103,7 @@ class Reference:
 
     @property
     def model_key(self) -> str:
-        return key(self.model)
+        return model_key(self.model)
 
     @property
     def color_key(self) -> str:
@@ -136,23 +141,31 @@ def parse_reference(text: str, *, brands: Iterable[str] = (), models: Iterable[s
     parts = tokens(rest)
     matches: list[Reference] = []
     for model in sorted(set(models), key=lambda m: -len(key(m))):
-        model_key = key(model)
-        if not model_key:
+        expected_model = model_key(model)
+        if not expected_model:
             continue
         for start in range(len(parts)):
             for end in range(start + 1, len(parts) + 1):
-                if key("".join(parts[start:end])) != model_key:
+                if model_key("".join(parts[start:end])) != expected_model:
                     continue
+                color_start = end
+                matched_model = model
+                if color_start < len(parts) and parts[color_start] == "S" \
+                        and re.fullmatch(r"FT\d{4}", expected_model):
+                    color_start += 1
+                if color_start < len(parts) and parts[color_start] == "OPT":
+                    matched_model += " OPT"
+                    color_start += 1
                 color_parts = []
                 reference_caliber = caliber
-                for part in parts[end:]:
+                for part in parts[color_start:]:
                     if not re.search(r"\d", part):
                         break
                     if color_parts and _LENS_ONLY.fullmatch(part) and 38 <= int(part) <= 66:
                         reference_caliber = reference_caliber or part
                         break
                     color_parts.append(part)
-                matches.append(Reference(brand, model, " ".join(color_parts), reference_caliber))
+                matches.append(Reference(brand, matched_model, " ".join(color_parts), reference_caliber))
     if matches:
         distinct = {(match.model_key, match.color_key) for match in matches}
         if len(distinct) > 1:
@@ -214,7 +227,7 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
 
     candidate keys (all optional): ean_published, brand, model, color, caliber, title.
     """
-    own_model, own_color, own_brand = key(product.get("model")), key(product.get("color")), key(product.get("brand"))
+    own_model, own_color, own_brand = model_key(product.get("model")), key(product.get("color")), key(product.get("brand"))
     title = str(candidate.get("title") or "")
     published = str(candidate.get("ean_published") or "").strip()
     ean = _valid_gtin(published) if published else ""
@@ -230,7 +243,7 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
               if ref.model_key == own_model or any(char.isdigit() for char in ref.model)}
     colors = {ref.color_key for ref in relevant if any(char.isdigit() for char in ref.color)}
     if candidate.get("model"):
-        models.add(key(candidate["model"]))
+        models.add(model_key(candidate["model"]))
     if any(char.isdigit() for char in str(candidate.get("color") or "")):
         colors.add(key(candidate["color"]))
     brands = {key(ref.brand) for ref in references if ref.brand}
@@ -309,8 +322,8 @@ class ReferenceIndex:
         compact = key(re.sub(_CALIBER, " ", _ascii(text)))
         for level, test in (
             ("brand_model_color", lambda p: ref.brand and key(p["brand"]) == key(ref.brand)
-             and key(p["model"]) == ref.model_key and key(p["color"]) == ref.color_key),
-            ("model_color", lambda p: key(p["model"]) == ref.model_key and ref.color_key
+             and model_key(p["model"]) == ref.model_key and key(p["color"]) == ref.color_key),
+            ("model_color", lambda p: model_key(p["model"]) == ref.model_key and ref.color_key
              and key(p["color"]) == ref.color_key),
             ("normalized_variants", lambda p: compact in {key(p["model"]) + key(p["color"]),
                                                           key(p["brand"]) + key(p["model"]) + key(p["color"])}),
