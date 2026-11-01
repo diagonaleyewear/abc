@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
+import requests
 from filelock import FileLock
 from streamlit.testing.v1 import AppTest
 
@@ -510,6 +511,118 @@ def test_no_unverified_search_or_unauthorized_competitor_queries(pilot, mode, ve
     assert discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == "pending"
 
 
+def test_discovery_authorization_warning_formats_multiple_entries_and_unknown_names():
+    from app_pages.price_comparator import _discovery_authorization_warning
+
+    unauthorized = [
+        {"competitor_id": "visio", "ean": EAN, "reasons": ["Condiciones pendientes", "Robots pendiente"]},
+        {"competitor_id": "other", "ean": SAMPLE_EANS[1], "reasons": ["Búsqueda no autorizada"]},
+    ]
+    assert _discovery_authorization_warning(unauthorized, {"visio": "Visio Factory"}) == (
+        f"No consultable: Visio Factory · EAN {EAN}: Condiciones pendientes; Robots pendiente"
+        f" | other · EAN {SAMPLE_EANS[1]}: Búsqueda no autorizada")
+
+
+@pytest.mark.parametrize("key_prefix", ["dashboard", "products"])
+def test_product_discovery_unauthorized_warning_is_readable_and_offline(pilot, monkeypatch, key_prefix):
+    import app_pages.price_comparator as page
+
+    _, store, search, site, cid, _ = pilot
+    configure(search, cid)
+    search.update_config(cid, terms_reviewed=False, terms_note="", access_status="pending_authorization",
+                         search_verified=False)
+    preview = PilotDiscovery(store).preview([(cid, EAN)])
+    assert preview["unauthorized"] == [{
+        "competitor_id": cid, "ean": EAN, "reasons": [
+            "Condiciones comerciales no verificadas", "robots.txt no permitido/verificado",
+            "Búsqueda GET no verificada/autorizada",
+        ],
+    }]
+    assert preview["effective"] == []
+    before = commerce(store)
+    config_before = search.config(cid)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
+    launched = []
+    monkeypatch.setattr(page, "_launch", lambda target, *args: launched.append((target, args)))
+
+    def reject_http(*args, **kwargs):
+        pytest.fail("La vista previa no debe realizar HTTP")
+
+    monkeypatch.setattr(requests.Session, "send", reject_http)
+    app = AppTest.from_string(
+        "from app_pages.price_comparator import render_price_comparator_page\n"
+        "render_price_comparator_page()").run(timeout=60)
+    if key_prefix == "products":
+        app.selectbox(key="products_selected_ean").set_value(EAN).run(timeout=60)
+    else:
+        app.selectbox(key="dashboard_product").set_value(EAN).run(timeout=60)
+    app.multiselect(key=f"{key_prefix}_locate_competitors_{EAN}").set_value([cid]).run(timeout=60)
+
+    assert not app.exception
+    expected = "No consultable: Visio Factory · EAN " + EAN + ": " + "; ".join(
+        preview["unauthorized"][0]["reasons"])
+    assert expected in [warning.value for warning in app.warning]
+    app.checkbox(key=f"{key_prefix}_locate_approved_{EAN}").set_value(True).run(timeout=60)
+    assert not app.exception
+    assert app.button(key=f"{key_prefix}_locate_product_{EAN}").disabled
+    assert launched == [] and site.calls == []
+    assert commerce(store) == before and search.config(cid) == config_before
+
+
+def test_product_discovery_mixed_selection_preserves_authorized_edel(pilot, monkeypatch):
+    import app_pages.price_comparator as page
+
+    service, store, search, site, visio, _ = pilot
+    search.update_config(visio, terms_reviewed=False, terms_note="")
+    edel = next(row["id"] for row in service.competitors() if row["name"] == "Edel-Optics")
+    base = "https://www.edel-optics.es"
+    search.update_config(
+        edel, access_status="robots_allowed", terms_reviewed=True, terms_note="Offline authorization",
+        locate_strategy="site_search", search_mode="ean", search_url_template=base + "/search?q={query}",
+        search_verified=True, search_evidence="Offline GET fixture")
+    pairs = [(visio, EAN), (edel, EAN)]
+    discovery = PilotDiscovery(store)
+    preview = discovery.preview(pairs)
+    assert preview["effective"] == [[edel, EAN]]
+    assert [row["competitor_id"] for row in preview["unauthorized"]] == [visio]
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
+    launched = []
+    monkeypatch.setattr(page, "_launch", lambda target, *args: launched.append((target, args)))
+
+    def reject_http(*args, **kwargs):
+        pytest.fail("Las pruebas solo permiten transporte HTTP simulado")
+
+    monkeypatch.setattr(requests.Session, "send", reject_http)
+    app = AppTest.from_string(
+        "from app_pages.price_comparator import render_price_comparator_page\n"
+        "render_price_comparator_page()").run(timeout=60)
+    app.selectbox(key="dashboard_product").set_value(EAN).run(timeout=60)
+    app.multiselect(key=f"dashboard_locate_competitors_{EAN}").set_value([visio, edel]).run(timeout=60)
+    assert not app.exception
+    assert any("No consultable: Visio Factory" in warning.value for warning in app.warning)
+    assert app.button(key=f"dashboard_locate_product_{EAN}").disabled
+    app.checkbox(key=f"dashboard_locate_approved_{EAN}").set_value(True).run(timeout=60)
+    assert not app.button(key=f"dashboard_locate_product_{EAN}").disabled
+    app.button(key=f"dashboard_locate_product_{EAN}").click().run(timeout=60)
+    assert not app.exception and site.calls == []
+    assert len(launched) == 1 and launched[0][0] is page._run_discovery
+    assert launched[0][1][1:] == (False, pairs)
+
+    url = base + "/PR-27ZS-16K08Z-de-Prada.html"
+    site.add(base + "/robots.txt", "User-agent: *\nAllow: /\n")
+    site.add(base + "/search?q=" + EAN, f'<a href="{url}">Prada PR27ZS 16K08Z {EAN}</a>')
+    site.add(url, prada_page(EAN))
+    before = commerce(store)
+    discovery.run(selection=pairs, search=search)
+    assert site.calls == [base + "/robots.txt", base + "/search?q=" + EAN, url]
+    candidate = discovery.candidates().iloc[0]
+    assert (candidate.competitor_id, candidate.ean, candidate.state) == (edel, EAN, "candidate_found")
+    assert search._indexed(edel, EAN) == []
+    assert commerce(store) == before
+
+
 def test_not_found_is_persistent_and_explicit_retry_does_not_do_http(pilot):
     service, store, search, site, cid, _ = pilot
     configure(search, cid)
@@ -835,6 +948,8 @@ def test_ui_coverage_settings_and_approval_are_offline(pilot, monkeypatch):
     assert not app.exception
     assert any(item.value == "Localización de fichas del piloto" for item in app.subheader)
     assert app.button(key="discovery_start").disabled
+    assert any(warning.value.startswith("No consultable: ") and " · EAN " in warning.value
+               for warning in app.warning)
     assert app.selectbox(key=f"web_{cid}_market").value == ""
     assert app.selectbox(key=f"web_{cid}_search_mode").value == "auto"
     assert not site.calls
