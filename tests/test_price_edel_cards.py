@@ -7,9 +7,25 @@ from price_web_extract import extract_edel_search_cards, extract_product
 from tests.web_fixtures import FakeSite, make_search
 
 FIXTURE = Path(__file__).parent / "fixtures" / "edel_optics_search_results.html"
+STOCK_FIXTURE = Path(__file__).parent / "fixtures" / "edel_optics_explicit_stock_states.html"
 SEARCH_URL = "https://www.edel-optics.es/B%C3%BAsqueda.html?query=8056597877329"
 EAN = "8056597877329"
 PRODUCT = {"ean": EAN, "brand": "Prada", "model": "PR 65ZS", "color": "ZVN09T", "caliber": "55-20"}
+
+
+def test_empty_textpoint_in_supplied_cards_does_not_prove_availability():
+    html = FIXTURE.read_text(encoding="utf-8")
+    cards = extract_edel_search_cards(html, SEARCH_URL, PRODUCT, tax_policy="included")
+
+    assert html.count('<p class="textPoint"></p>') == 3
+    assert all(page.availability == "unknown" for page in cards)
+
+
+def test_explicit_availability_is_extracted_and_scoped_to_its_card():
+    html = STOCK_FIXTURE.read_text(encoding="utf-8")
+    cards = extract_edel_search_cards(html, SEARCH_URL, PRODUCT)
+
+    assert [page.availability for page in cards] == ["available", "unavailable", "unknown"]
 
 
 def test_result_cards_keep_identity_price_and_availability_scoped_per_card():
@@ -75,7 +91,9 @@ def test_ean_search_uses_the_configured_query_and_never_fetches_each_card(tmp_pa
     assert site.calls.count(search_url) == 1
     assert outcome.url not in site.calls
     with store._connect() as connection:
-        rows = connection.execute("SELECT price,availability,match_status FROM offers").fetchall()
-    assert [(row["price"], row["availability"], row["match_status"]) for row in rows] == [
-        (187.99, "unknown", "exact_match")]
+        rows = connection.execute(
+            "SELECT price,availability,match_status,market,price_includes_tax FROM offers").fetchall()
+    assert [(row["price"], row["availability"], row["match_status"], row["market"],
+             row["price_includes_tax"]) for row in rows] == [
+        (187.99, "unknown", "exact_match", "ES", 1)]
     assert store.dashboard()[0].set_index("ean").loc[EAN, "competitor_count"] == 0

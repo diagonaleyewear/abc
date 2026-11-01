@@ -92,11 +92,18 @@ La fixture sanitizada aportada contiene Prada PR 65ZS/ZVN09T a 187,99 EUR,
 PR 27ZS/16K08Z a 243,50 EUR y PR 67ZS/1BC5W1 a 243,50 EUR. Para el EAN
 `8056597877329`, solo la tarjeta PR 65ZS/ZVN09T corresponde a la referencia;
 las otras dos no se mezclan ni se visitan. El fragmento no publica EAN ni
-disponibilidad: el EAN queda vacio y el stock `unknown`. Ese stock no permite
-una oferta comparable. El descubrimiento solo guarda el candidato y su
-evidencia; no crea ofertas. Una URL solo se confirma tras aprobacion humana.
-Con EAN publicado contradictorio, la tarjeta queda pendiente de revision y
-no puede aprobarse como coincidencia exacta.
+disponibilidad: el EAN queda vacio y el stock `unknown`. Aunque incluye un
+`<p class="textPoint"></p>` vacio por tarjeta, la regla CSS recibida solo
+declara `color: green`; no incluye la regla que genera el punto ni una
+variacion HTML que codifique su estado. Por tanto, ni la clase vacia ni ese
+fragmento CSS prueban stock estatico por tarjeta. El extractor solo acepta
+disponibilidad explicita dentro de la tarjeta (por ejemplo, Schema.org
+`InStock`/`OutOfStock`); no hereda indicadores de la pagina ni de otras
+tarjetas. Para el HTML recibido conserva `unknown`, que no permite una oferta
+comparable. El descubrimiento solo guarda el candidato y su evidencia; no crea
+ofertas. Una URL solo se confirma tras aprobacion humana. Con EAN publicado
+contradictorio, la tarjeta queda pendiente de revision y no puede aprobarse
+como coincidencia exacta.
 
 La prueba usa exclusivamente la fixture HTML y transporte simulado. No se ha
 consultado el sitio en directo ni se declara verificado el mecanismo GET. El
