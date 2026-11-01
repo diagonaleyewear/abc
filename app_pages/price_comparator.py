@@ -22,7 +22,7 @@ from price_scheduler import CompetitorScheduler, SchedulerConfigError
 from price_pilot import MAX_PRODUCTS, SAMPLE_EANS, PilotError, PricePilot, pilot_scope
 from price_discovery import PilotDiscovery
 from price_web import (
-    EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError,
+    EXTRACTION_TEXT, LOCATION_TEXT, OPERABILITY_TEXT, WebPriceSearch, WebSearchError, validate_competitor_url,
 )
 from vytria_price_sync import ISSUE_LABELS, STATUS_LABELS, SyncInProgress, VytriaPriceSync
 
@@ -139,6 +139,14 @@ def _run_pilot(pilot: PricePilot, resume: bool) -> None:
         pilot.report_error(exc)
 
 
+def _run_price_refresh(pilot: PricePilot, selection: list[tuple[str, str]]) -> None:
+    try:
+        pilot.run(selection=selection)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Actualización supervisada de precios interrumpida")
+        pilot.report_error(exc)
+
+
 def _run_discovery(pilot: PricePilot, resume: bool, selection=None) -> None:
     try:
         PilotDiscovery(pilot.store).run(resume=resume, selection=selection)
@@ -193,7 +201,7 @@ def _render_vytria_prices(store: PriceComparatorStore) -> None:
         st.error(f"La última sincronización falló: {last['error']} Se conservan los últimos precios, "
                  "marcados como desactualizados cuando superan el plazo de vigencia.")
 
-    st.caption("El botón «Actualizar precios Vytria» está en la parte superior de la pantalla.")
+    st.caption("La sincronización manual se inicia desde Administración → Competidores y ejecuciones.")
     auto = st.toggle("Sincronización diaria automática", value=sync.auto_enabled, key="vytria_auto_sync",
                      help="Desactivada por defecto. Requiere además un disparador diario aprobado que ejecute "
                           "`python vytria_price_sync.py --scheduled`.")
@@ -246,7 +254,7 @@ def _render_actions(store: PriceComparatorStore) -> None:
     left, right = st.columns(2)
     with left:
         running = sync.is_running()
-        if st.button("Actualizar precios Vytria", key="sync_vytria_prices", disabled=running, type="primary",
+        if st.button("Sincronizar precios Vytria desde Odoo", key="sync_vytria_prices", disabled=running,
                      help="Lee la tarifa 59 de Odoo (solo lectura)."):
             _launch(_run_sync, sync)
             st.rerun()
@@ -267,57 +275,17 @@ def _render_actions(store: PriceComparatorStore) -> None:
         _watch_running_competitors(scheduler)
 
 
-def _render_detail(store: PriceComparatorStore, summary: pd.DataFrame, expiry: int) -> None:
-    st.subheader("Histórico de precios por referencia")
-    selected = st.selectbox("Referencia", options=summary["ean"].tolist(), key="price_detail_ean",
-                            format_func=lambda ean: f"{ean} · {summary.loc[summary.ean == ean, 'commercial_name'].iloc[0]}")
-    window = st.radio("Periodo", list(analytics.WINDOWS), horizontal=True, key="price_detail_window")
-    available = store.competitors()
-    names = sorted(available["name"].tolist())
-    chosen = st.multiselect("Competidores en el gráfico", names, default=[], key="price_detail_competitors",
-                            help="Vacío = todos los competidores con precios almacenados. Vytria siempre se muestra.")
-    series = analytics.price_series(store, selected, analytics.WINDOWS[window], chosen or None)
-    if series.empty:
-        st.info("No hay precios almacenados de esta referencia en el periodo. Los periodos sin dato no se dibujan.")
-    else:
-        if series.groupby("series").size().max() < 2:
-            st.info("Solo hay una observación por serie: se muestra como punto, sin línea ni tendencia.")
-        st.plotly_chart(analytics.price_figure(series), width="stretch")
-        st.caption("Línea escalonada: cada precio se mantiene hasta el siguiente cambio registrado. "
-                   "● cambio detectado · ✕ comprobación correcta sin cambio. Zonas sin línea: sin información.")
-    row = summary[summary["ean"] == selected].iloc[0]
-    st.write(f"**Precio Vytria:** {row['own_price_eur'] if pd.notna(row['own_price_eur']) else 'sin precio confirmado'}"
-             f" · **Estado:** {row['own_price_status'] or '—'}")
-    offers = store.offer_history(selected)
-    if not offers.empty:
-        latest = offers.sort_values(["captured_at", "id"]).groupby(["competitor_id", "market"]).tail(1).copy()
-        latest["Estado del precio"] = latest["captured_at"].map(lambda value: analytics.price_state(value, expiry))
-        latest["Uso en comparación"] = latest.apply(
-            lambda item: exclusion_reason(item.to_dict()) or "Comparable", axis=1)
-        st.dataframe(latest[["competitor_name", "price", "promotional_price", "currency", "availability",
-                             "match_status", "Uso en comparación", "captured_at", "Estado del precio", "url"]].rename(columns={
-            "competitor_name": "Competidor", "price": "Precio", "promotional_price": "Promoción",
-            "currency": "Moneda", "availability": "Disponibilidad", "match_status": "Coincidencia",
-            "captured_at": "Último cambio", "url": "URL"}), width="stretch", hide_index=True)
-    with st.expander("Histórico completo de ofertas"):
-        st.dataframe(offers, width="stretch", hide_index=True)
-
-
 def _load(store: PriceComparatorStore) -> dict:
     expiry = store.price_expiry_days()
     window = st.session_state.get("dashboard_period", "30 días")
     snapshot_days = min(expiry, DASHBOARD_WINDOWS.get(window, 30))
-    summary, counts = store.dashboard(snapshot_days)
+    summary, _ = store.dashboard(snapshot_days)
     offers = store.current_offers(snapshot_days)
-    changes = analytics.recent_changes(store, 7)
     threshold = float(store.get_setting("alert_threshold_pct"))
     pairs = analytics.comparable_pairs(summary, offers)
     return {
-        "expiry": expiry, "snapshot_days": snapshot_days, "summary": summary, "counts": counts,
-        "offers": offers, "changes": changes,
+        "expiry": expiry, "snapshot_days": snapshot_days, "summary": summary, "offers": offers,
         "threshold": threshold, "pairs": pairs,
-        "positioning": analytics.competitor_positioning(summary, offers, threshold),
-        "indicators": analytics.kpis(summary, len(changes)),
     }
 
 
@@ -327,29 +295,37 @@ def _pct(value: float | None, *, signed: bool = False) -> str:
     return f"{value:+.1f} %".replace(".", ",") if signed else f"{value:.1f} %".replace(".", ",")
 
 
-def _render_summary(store: PriceComparatorStore, data: dict) -> None:
+def _render_shared_filters(data: dict) -> None:
     summary, offers = data["summary"], data["offers"]
-    if summary.empty:
-        st.info("Importe primero el catálogo piloto en la pestaña «Configuración».")
-        return
-    st.header("Cómo estamos")
     competitor_names = sorted(offers["competitor_name"].dropna().unique()) if not offers.empty else []
-    with st.expander("Filtros", expanded=False):
-        f1, f2, f3, f4 = st.columns([1.2, 1.6, 1.4, 1.4])
-        brands = f1.multiselect("Marca", sorted(value for value in summary["brand"].dropna().unique() if value),
+    with st.expander("Filtros compartidos", expanded=False):
+        brands = st.multiselect("Marca", sorted(value for value in summary["brand"].dropna().unique() if value),
                                 key="dashboard_brand")
-        selected_competitors = f2.multiselect(
+        selected_competitors = st.multiselect(
             "Competidor", competitor_names, key="dashboard_competitor",
             help="Vacío = todos los competidores con datos vigentes.")
-        state = f3.selectbox("Estado competitivo", analytics.STATE_OPTIONS, key="dashboard_state")
-        window = f4.selectbox(
+        state = st.selectbox("Estado competitivo", analytics.STATE_OPTIONS, key="dashboard_state")
+        window = st.selectbox(
             "Periodo", list(DASHBOARD_WINDOWS), index=1, key="dashboard_period",
             help="Limita los datos actuales al menor entre el periodo y la vigencia configurada; delimita también los gráficos.")
         query = st.text_input("Buscar EAN, modelo o referencia", key="dashboard_search",
                               placeholder="EAN, modelo o código de color")
+    data["filtered_summary"] = analytics.dashboard_scope(
+        summary, offers, brands=brands, competitors=selected_competitors, query=query,
+        states=() if state == analytics.STATE_ALL else [state])
+    data["selected_competitors"] = selected_competitors
+    data["dashboard_window"] = window
 
-    scoped = analytics.dashboard_scope(summary, offers, brands=brands, competitors=selected_competitors,
-                                      query=query, states=() if state == analytics.STATE_ALL else [state])
+
+def _render_summary(store: PriceComparatorStore, data: dict) -> None:
+    summary = data["filtered_summary"]
+    if summary.empty:
+        st.info("No hay productos para los filtros seleccionados. Ajuste los filtros o importe el catálogo desde Administración.")
+        return
+    st.header("Cómo estamos")
+    scoped = summary
+    selected_competitors = data["selected_competitors"]
+    window = data["dashboard_window"]
     indicators = analytics.kpis(scoped, 0)
     st.caption(
         "Se comparan precios verificados y vigentes del mismo mercado, con IVA incluido. "
@@ -376,14 +352,16 @@ def _render_summary(store: PriceComparatorStore, data: dict) -> None:
                    f"{no_own} sin precio Vytria y {no_competitor} sin competencia comparable.")
 
     st.header("Cómo evolucionamos")
-    st.plotly_chart(analytics.positioning_distribution_figure(scoped), width="stretch")
+    st.plotly_chart(analytics.positioning_distribution_figure(scoped), width="stretch",
+                    key="dashboard_positioning_chart")
     history = analytics.competitiveness_series(
         store, DASHBOARD_WINDOWS[window], expiry_days=data["expiry"], eans=scoped["ean"].tolist(),
         competitors=selected_competitors or None)
     if history.empty:
         st.info("Todavía no hay observaciones históricas recientes suficientes para calcular una evolución.")
     else:
-        st.plotly_chart(analytics.competitiveness_figure(history), width="stretch")
+        st.plotly_chart(analytics.competitiveness_figure(history), width="stretch",
+                        key="dashboard_competitiveness_chart")
         if history["day"].nunique() < 2:
             st.info("Solo hay observaciones comparables en un día de este periodo; no se puede inferir una tendencia.")
         st.caption("Cada punto usa solo precios validados y comprobados dentro del plazo vigente. "
@@ -422,8 +400,43 @@ def _render_summary(store: PriceComparatorStore, data: dict) -> None:
                               selected_competitors)
 
 
+def _render_products(store: PriceComparatorStore, data: dict) -> None:
+    summary = data["filtered_summary"]
+    st.header("Productos")
+    if summary.empty:
+        st.info("No hay productos para los filtros seleccionados.")
+        return
+    table = analytics.commercial_table(summary)
+    columns = ["brand", "model", "color", "ean", "own_price_eur", "best_competitor",
+               "competitor_min_eur", "difference_vs_competitor_pct", "position"]
+    display = table[columns].rename(columns=TABLE_LABELS)
+    selected = st.dataframe(
+        display, width="stretch", hide_index=True, key="products_table",
+        on_select="rerun", selection_mode="single-row", column_config={
+            "Precio Vytria": st.column_config.NumberColumn("Precio Vytria", format="%.2f €"),
+            "Precio competidor": st.column_config.NumberColumn("Precio competidor", format="%.2f €"),
+            "% vs mejor competidor": st.column_config.NumberColumn("% vs mejor competidor", format="%.1f %%"),
+        })
+    st.download_button("Descargar productos Excel", _excel_bytes({"Productos": display}),
+                       "comparador_precios.xlsx", XLSX_MIME, key="products_export")
+    if selected.selection.rows and selected.selection.rows[0] < len(summary):
+        st.session_state["products_selected_ean"] = summary.iloc[selected.selection.rows[0]]["ean"]
+    options = summary["ean"].tolist()
+    current = st.session_state.get("products_selected_ean", st.session_state.get("dashboard_product"))
+    if current not in options:
+        current = options[0]
+    st.selectbox("Producto", options, index=options.index(current), key="products_selected_ean",
+                 format_func=lambda value: (
+                     f"{summary.loc[summary.ean == value, 'brand'].iloc[0]} · "
+                     f"{summary.loc[summary.ean == value, 'model'].iloc[0]} · "
+                     f"{summary.loc[summary.ean == value, 'color'].iloc[0]} · {value}"))
+    ean = st.session_state["products_selected_ean"]
+    _render_dashboard_product(store, data, summary, ean, DASHBOARD_WINDOWS[data["dashboard_window"]],
+                              data["selected_competitors"], key_prefix="products")
+
+
 def _render_dashboard_product(store: PriceComparatorStore, data: dict, summary: pd.DataFrame, ean: str,
-                              days: int, selected_competitors) -> None:
+                              days: int, selected_competitors, key_prefix: str = "dashboard") -> None:
     row = summary[summary["ean"] == ean].iloc[0]
     own = row["own_price_eur"]
     competitor = row["competitor_min_eur"]
@@ -443,7 +456,8 @@ def _render_dashboard_product(store: PriceComparatorStore, data: dict, summary: 
                  f"Posición {int(row['position_rank'])} entre Vytria y {int(row['competitor_count'])} competidores; "
                  "los empates conservan la misma posición.")
 
-    product_offers = data["offers"][data["offers"]["ean"] == ean].copy()
+    product_offers = store.current_offers(max(data["expiry"] * 2, 1))
+    product_offers = product_offers[product_offers["ean"] == ean].copy()
     if selected_competitors:
         product_offers = product_offers[product_offers["competitor_name"].isin(selected_competitors)]
     if not product_offers.empty:
@@ -455,7 +469,10 @@ def _render_dashboard_product(store: PriceComparatorStore, data: dict, summary: 
             reason = exclusion_reason(offer.to_dict())
             if reason:
                 return reason
-            return "Mercado distinto" if offer["market"] != own_market else "Comparable"
+            if offer["market"] != own_market:
+                return "Mercado distinto"
+            freshness = analytics.price_state(offer["checked_at"], data["expiry"])
+            return "Comparable" if freshness == analytics.STATE_CURRENT else freshness
 
         latest["comparison_status"] = latest.apply(comparison_status, axis=1)
         latest["price_eur"] = (latest["promotional_price"].where(
@@ -467,14 +484,147 @@ def _render_dashboard_product(store: PriceComparatorStore, data: dict, summary: 
             "checked_at": "Última comprobación", "url": "URL"}), width="stretch", hide_index=True,
             column_config={"Precio EUR": st.column_config.NumberColumn("Precio EUR", format="%.2f €"),
                            "URL": st.column_config.LinkColumn("URL")})
+        history_offers = store.offer_history(ean)
+        if not history_offers.empty:
+            history_offers["price_eur"] = (history_offers["promotional_price"].where(
+                history_offers["promotional_price"].notna(), history_offers["price"])
+                * history_offers["fx_to_eur"])
+            with st.expander("Histórico completo de precios"):
+                st.dataframe(history_offers[["competitor_name", "price_eur", "currency", "availability",
+                                             "market", "match_status", "captured_at", "url"]].rename(columns={
+                    "competitor_name": "Competidor", "price_eur": "Precio EUR", "currency": "Moneda",
+                    "availability": "Disponibilidad", "market": "Mercado", "match_status": "Coincidencia",
+                    "captured_at": "Fecha de observación", "url": "URL",
+                }), hide_index=True, width="stretch")
     else:
         st.info("No hay observaciones recientes para los competidores seleccionados.")
 
     history = analytics.price_series(store, ean, days, selected_competitors or None, market=row["market"])
     if not history.empty:
         st.plotly_chart(analytics.price_figure(history, "Evolución de precios verificados"),
-                        width="stretch")
+                        width="stretch", key=f"{key_prefix}_price_history_{ean}")
         st.caption("Precios históricos por fecha de observación; los periodos sin datos no se interpolan.")
+    _render_product_refresh(store, ean, key_prefix)
+
+
+def _render_product_refresh(store: PriceComparatorStore, ean: str, key_prefix: str) -> None:
+    pilot = PricePilot(store)
+    st.subheader("Actualizar precios")
+    try:
+        scope = pilot_scope(store)
+        if scope is None:
+            st.info("Configure un alcance supervisado en Administración para consultar precios.")
+            return
+        if ean not in scope["eans"]:
+            st.info("Este producto no está dentro del alcance autorizado del piloto. "
+                    "La consulta de precios solo está disponible para productos seleccionados en Administración.")
+            return
+        plan = pilot.price_refresh_plan(ean)
+    except PilotError as exc:
+        st.error(f"No se pudo preparar la actualización: {exc}")
+        return
+    st.dataframe(plan[["competitor", "status", "url", "reason"]].rename(columns={
+        "competitor": "Competidor", "status": "Estado", "url": "Ficha confirmada", "reason": "Motivo",
+    }), width="stretch", hide_index=True,
+        column_config={"Ficha confirmada": st.column_config.LinkColumn("Ficha confirmada")})
+    available = plan[plan["status"] == "Consultable"]
+    with store._connect() as connection:
+        previous_run = connection.execute(
+            "SELECT MAX(id) FROM pilot_runs WHERE operation='prices'").fetchone()[0] or 0
+    if available.empty:
+        st.info("No hay fichas confirmadas y autorizadas para consultar. Puede localizar una ficha cuando "
+                "la combinación esté pendiente y el competidor tenga autorización.")
+    else:
+        options = dict(zip(available["competitor_id"], available["competitor"]))
+        selected = st.multiselect("Tiendas que se van a consultar", list(options),
+                                  default=list(options), format_func=options.get,
+                                  key=f"{key_prefix}_refresh_competitors_{ean}")
+        approved = st.checkbox("He revisado las fichas y autorizo esta consulta supervisada",
+                               key=f"{key_prefix}_refresh_approved_{ean}")
+        busy = pilot.is_running()
+        if st.button("Actualizar precios", type="primary", key=f"{key_prefix}_refresh_prices_{ean}",
+                     disabled=busy or not selected or not approved):
+            try:
+                pilot.enable()
+                st.session_state[f"{key_prefix}_refresh_run_before_{ean}"] = previous_run
+                _launch(_run_price_refresh, pilot, [(cid, ean) for cid in selected])
+            except (PilotError, ValueError, sqlite3.Error) as exc:
+                st.error(f"No se pudo iniciar la actualización: {exc}")
+            else:
+                st.rerun()
+        if busy:
+            _watch_running_pilot(pilot)
+
+    discovery = PilotDiscovery(store)
+    coverage = discovery.coverage()
+    if coverage.empty:
+        st.info("Para localizar fichas, configure el alcance supervisado en Administración.")
+        return
+    missing = coverage[(coverage["ean"] == ean) & (coverage["state"] == "pending")]
+    if not missing.empty:
+        names = dict(zip(missing["competitor_id"], missing["competitor"]))
+        selected_missing = st.multiselect(
+            "Competidores sin ficha: localizar de forma supervisada",
+            missing["competitor_id"].tolist(), format_func=names.get,
+            key=f"{key_prefix}_locate_competitors_{ean}")
+        pairs = [(cid, ean) for cid in selected_missing]
+        preview = None
+        try:
+            if pairs:
+                preview = discovery.preview(pairs)
+        except PilotError as exc:
+            st.error(f"No se pudo preparar la localización: {exc}")
+        if preview and preview["unauthorized"]:
+            st.warning("No consultable: " + "; ".join(preview["unauthorized"]))
+        approved = st.checkbox("He revisado el alcance y autorizo buscar las fichas seleccionadas",
+                               key=f"{key_prefix}_locate_approved_{ean}")
+        busy = pilot.is_running()
+        if st.button("Localizar ficha", key=f"{key_prefix}_locate_product_{ean}",
+                     disabled=busy or not approved or not preview or not preview["effective"]):
+            try:
+                pilot.enable()
+                _launch(_run_discovery, pilot, False, pairs)
+            except (PilotError, ValueError, sqlite3.Error) as exc:
+                st.error(f"No se pudo iniciar la localización: {exc}")
+            else:
+                st.rerun()
+        if busy:
+            _watch_running_pilot(pilot)
+
+    with store._connect() as connection:
+        latest_run = connection.execute("""SELECT id,status,finished_at,error FROM pilot_runs
+            WHERE operation='prices' ORDER BY id DESC LIMIT 1""").fetchone()
+    if latest_run and latest_run["status"] in ("done", "interrupted", "cancelled"):
+        results, _ = pilot.results(int(latest_run["id"]))
+        product_results = results[results["ean"] == ean] if not results.empty else results
+        if not product_results.empty:
+            baseline = st.session_state.get(f"{key_prefix}_refresh_run_before_{ean}")
+            is_new_result = baseline is not None and int(latest_run["id"]) > baseline
+            updated = int(product_results["priced"].sum())
+            total = len(product_results)
+            if latest_run["status"] != "done":
+                message = "La actualización se interrumpió. Se conserva el último precio comprobado."
+                if latest_run["error"]:
+                    st.error(f"{message} {latest_run['error']}")
+                else:
+                    st.warning(message)
+            elif is_new_result and updated == total:
+                st.success("Precios actualizados.")
+            elif is_new_result and updated:
+                st.warning(f"Actualizados {updated} de {total} competidores.")
+            elif is_new_result:
+                st.warning("No se pudo actualizar ningún precio; se conservan las últimas observaciones válidas.")
+            else:
+                st.caption(f"Últimos resultados guardados: {latest_run['finished_at']} UTC. "
+                           "Esta vista no ha realizado una consulta nueva.")
+            if is_new_result:
+                st.session_state.pop(f"{key_prefix}_refresh_run_before_{ean}", None)
+            st.dataframe(product_results[["competitor_id", "outcome", "detail", "checked_at"]].rename(columns={
+                "competitor_id": "Competidor", "outcome": "Resultado", "detail": "Detalle",
+                "checked_at": "Última consulta",
+            }), hide_index=True, width="stretch")
+            if product_results["Disponibilidad"].eq("unknown").any():
+                st.info("Disponibilidad pendiente de verificar.")
 
 
 def _render_web_finder(store: PriceComparatorStore) -> None:
@@ -665,47 +815,6 @@ def _show_submission(target, sub) -> None:
         target.info(sub.message)
     else:
         target.warning(sub.message)
-
-
-def _render_comparison(store: PriceComparatorStore, data: dict) -> None:
-    _render_web_finder(store)
-    st.divider()
-    summary, offers, changes = data["summary"], data["offers"], data["changes"]
-    if summary.empty:
-        st.info("Importe primero el catálogo piloto en la pestaña «Configuración».")
-        return
-    table = analytics.commercial_table(summary)
-    f1, f2, f3, f4 = st.columns(4)
-    brands = f1.multiselect("Marca", sorted(v for v in table["brand"].dropna().unique() if v), key="cmp_brand")
-    competitors = f2.multiselect("Competidor", sorted(offers["competitor_name"].unique()) if not offers.empty else [],
-                                 key="cmp_competitor")
-    availability = f3.multiselect("Disponibilidad", sorted(offers["availability"].unique()) if not offers.empty else [],
-                                  key="cmp_availability")
-    positions = f4.multiselect("Posición de precio", list(analytics.POSITIONS), key="cmp_position")
-    filtered = analytics.filter_table(table, offers, brands=brands, competitors=competitors,
-                                      availability=availability, positions=positions)
-    st.dataframe(filtered.rename(columns=TABLE_LABELS), width="stretch", hide_index=True)
-    st.download_button("Descargar comparación Excel", _excel_bytes({"Comparación": filtered.rename(columns=TABLE_LABELS)}),
-                       "comparador_precios.xlsx", XLSX_MIME)
-
-    attention = st.expander(f"Requieren atención ({int(summary['own_price_eur'].isna().sum())} sin precio Vytria · "
-                            f"{len(changes)} cambios recientes)")
-    with attention:
-        missing = summary[summary["own_price_eur"].isna()]
-        if not missing.empty:
-            st.write("Sin precio Vytria validado (no participan en la comparación):")
-            st.dataframe(missing[["brand", "commercial_name", "ean", "own_price_status"]], width="stretch",
-                         hide_index=True)
-        if not changes.empty:
-            st.write("Cambios de precio importantes:")
-            st.dataframe(changes, width="stretch", hide_index=True)
-
-
-def _render_history(store: PriceComparatorStore, data: dict) -> None:
-    if data["summary"].empty:
-        st.info("Importe primero el catálogo piloto en la pestaña «Configuración».")
-        return
-    _render_detail(store, data["summary"], data["expiry"])
 
 
 def _make_web_search(store: PriceComparatorStore) -> WebPriceSearch:
@@ -961,8 +1070,9 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
               "Confirmadas": int(counts.get("confirmed", 0)),
               "Candidatas": int(counts.get("candidate_found", 0) + counts.get("pending_validation", 0)),
               "Pendientes": int(counts.get("pending", 0)), "Combinaciones": len(coverage)})
-    st.dataframe(coverage.pivot(index="ean", columns="competitor", values="Estado"),
-                 width="stretch")
+    with st.expander("Cobertura de localización", expanded=False):
+        st.dataframe(coverage.pivot(index="ean", columns="competitor", values="Estado"),
+                     width="stretch")
     st.caption("La selección de ejecución es independiente de los filtros de la matriz. No se repiten fichas "
                "conocidas ni candidatos pendientes; el descubrimiento no crea ofertas.")
     scope = pilot_scope(pilot.store)
@@ -1072,23 +1182,6 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
             filtered = filtered[filtered[column].isin(selected)]
     st.dataframe(filtered, hide_index=True, width="stretch",
                  column_config={"url": st.column_config.LinkColumn("URL confirmada o pendiente")})
-    candidates = discovery.candidates()
-    if not candidates.empty:
-        st.dataframe(candidates, hide_index=True, width="stretch")
-        pending = candidates[candidates.state.isin(["candidate_found", "pending_validation"])]
-        if not pending.empty:
-            selected_id = st.selectbox("Candidato a revisar", list(pending.id), key="discovery_candidate",
-                                       format_func=lambda i: f"{pending.set_index('id').loc[i, 'ean']} · "
-                                       f"{pending.set_index('id').loc[i, 'url']}")
-            row = pending.set_index("id").loc[selected_id]
-            st.json(json.loads(row["evidence"]))
-            with st.form("discovery_review"):
-                note = st.text_input("Revisor y motivo", key="discovery_review_note")
-                confirm = st.form_submit_button("Confirmar ficha", disabled=busy or row["state"] != "candidate_found")
-                discard = st.form_submit_button("Descartar candidato", disabled=busy)
-                if confirm or discard:
-                    discovery.review(int(selected_id), accept=confirm, note=note)
-                    st.rerun()
     retryable = coverage[coverage.state.isin(["not_found", "not_allowed", "error", "blocked"])]
     if not retryable.empty:
         with st.form("discovery_retry"):
@@ -1105,6 +1198,92 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
     if not audit.empty:
         with st.expander("Registro de consultas de localización"):
             st.dataframe(audit, hide_index=True, width="stretch")
+
+
+def _render_pending_reviews(pilot: PricePilot) -> None:
+    discovery = PilotDiscovery(pilot.store)
+    if flash := st.session_state.pop("discovery_review_flash", ""):
+        st.success(flash)
+    candidates = discovery.candidates()
+    pending = candidates[candidates["state"].isin(["candidate_found", "pending_validation"])] \
+        if not candidates.empty else candidates
+    st.header("Fichas pendientes de revisión")
+    if pending.empty:
+        st.info("No hay candidatos pendientes de revisión.")
+    else:
+        products = pilot.candidates().set_index("ean")
+        competitor_names = {row["id"]: row["name"] for row in pilot.competitors()}
+
+        def candidate_label(candidate_id: int) -> str:
+            candidate = pending.set_index("id").loc[candidate_id]
+            product = products.loc[candidate["ean"]]
+            return (f"{product['brand']} {product['model']} · {product['color']} · "
+                    f"{competitor_names.get(candidate['competitor_id'], candidate['competitor_id'])}")
+
+        selected_id = st.selectbox("Candidato", pending["id"].tolist(), key="pending_candidate",
+                                   format_func=candidate_label)
+        row = pending.set_index("id").loc[selected_id]
+        product = products.loc[row["ean"]]
+        state_text = ("Coincidencia exacta; compruebe la ficha antes de confirmar."
+                      if row["state"] == "candidate_found" else
+                      "La identidad es ambigua; este candidato solo se puede descartar.")
+        with st.container(border=True):
+            st.subheader(f"{product['brand']} {product['model']} · {product['color']}")
+            st.markdown(f"**Competidor:** {competitor_names.get(row['competitor_id'], row['competitor_id'])}")
+            st.write("URL encontrada:", row["url"])
+            st.caption(f"Estado: pendiente de revisión. {state_text}")
+            try:
+                config = WebPriceSearch(pilot.store).config(row["competitor_id"])
+                candidate_url = validate_competitor_url(row["url"], config["domain"])
+            except (WebSearchError, ValueError) as exc:
+                st.error(f"No se puede abrir esta URL como ficha del competidor: {exc}")
+            else:
+                st.link_button("Ver ficha", candidate_url)
+            with st.expander("Detalles técnicos"):
+                st.write({"ID interno": int(selected_id), "Estado interno": row["state"],
+                          "Ejecución": int(row["run_id"]), "Método": row["method"]})
+                try:
+                    st.json(json.loads(row["evidence"]))
+                except (TypeError, ValueError) as exc:
+                    st.error(f"No se pudo leer la evidencia técnica: {exc}")
+            with st.form("discovery_review"):
+                note = st.text_input("Revisor y motivo", key="discovery_review_note")
+                confirm = st.form_submit_button(
+                    "Confirmar ficha", type="primary",
+                    disabled=pilot.is_running() or row["state"] != "candidate_found",
+                    key="discovery_confirm_candidate")
+                discard = st.form_submit_button("Descartar candidato", disabled=pilot.is_running(),
+                                                key="discovery_discard_candidate")
+                if confirm or discard:
+                    try:
+                        discovery.review(int(selected_id), accept=confirm, note=note)
+                    except (PilotError, ValueError, sqlite3.Error) as exc:
+                        st.error(f"No se pudo guardar la revisión: {exc}")
+                    else:
+                        st.session_state["discovery_review_flash"] = (
+                            "Ficha confirmada." if confirm else "Candidato descartado. "
+                            "Las fichas confirmadas de este producto se conservan.")
+                        st.rerun()
+
+    coverage = discovery.coverage()
+    issues = coverage[coverage["state"].isin(["not_allowed", "error", "blocked", "rejected"])] \
+        if not coverage.empty else coverage
+    results, _ = pilot.results()
+    if not results.empty:
+        failures = results[results["outcome"].isin(["error", "blocked", "not_allowed"])]
+    else:
+        failures = results
+    if not issues.empty or not failures.empty:
+        st.header("Incidencias que requieren revisión")
+        if not issues.empty:
+            st.dataframe(issues[["ean", "competitor", "Estado", "detail"]].rename(columns={
+                "ean": "EAN", "competitor": "Competidor", "Estado": "Estado", "detail": "Detalle",
+            }), hide_index=True, width="stretch")
+        if not failures.empty:
+            st.dataframe(failures[["ean", "competitor_id", "outcome", "detail", "checked_at"]].rename(columns={
+                "ean": "EAN", "competitor_id": "Competidor", "outcome": "Resultado",
+                "detail": "Detalle", "checked_at": "Fecha",
+            }), hide_index=True, width="stretch")
 
 
 def _render_competitors(store: PriceComparatorStore, data: dict) -> None:
@@ -1367,20 +1546,32 @@ def render_price_comparator_page() -> None:
         return
     st.markdown(PAGE_STYLE, unsafe_allow_html=True)
     _show_pending_reports()
-    _render_actions(store)
     data = _load(store)
-    summary_tab, comparison_tab, history_tab, competitors_tab, settings_tab = st.tabs(
-        ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"])
+    if data["summary"].empty:
+        data["filtered_summary"] = data["summary"]
+        data["selected_competitors"] = []
+        data["dashboard_window"] = st.session_state.get("dashboard_period", "30 días")
+    else:
+        _render_shared_filters(data)
+    summary_tab, products_tab, pending_tab, admin_tab = st.tabs(
+        ["Resumen", "Productos", "Pendientes", "Administración"])
     with summary_tab:
         _render_summary(store, data)
-    with comparison_tab:
-        _render_comparison(store, data)
-    with history_tab:
-        _render_history(store, data)
-    with competitors_tab:
-        _render_competitors(store, data)
-    with settings_tab:
-        _render_settings(store)
-        st.divider()
-        st.header("Importación de datos")
-        _render_data_sources(store)
+    with products_tab:
+        _render_products(store, data)
+    with pending_tab:
+        _render_pending_reviews(PricePilot(store))
+    with admin_tab:
+        section = st.selectbox(
+            "Área administrativa",
+            ["Competidores y ejecuciones", "Búsqueda manual", "Importar datos", "Configuración"],
+            key="price_admin_section")
+        if section == "Competidores y ejecuciones":
+            _render_actions(store)
+            _render_competitors(store, data)
+        elif section == "Búsqueda manual":
+            _render_web_finder(store)
+        elif section == "Importar datos":
+            _render_data_sources(store)
+        else:
+            _render_settings(store)

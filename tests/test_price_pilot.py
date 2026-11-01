@@ -44,10 +44,14 @@ def pilot(tmp_path, monkeypatch):
     return service, store, search, site, cid, extras
 
 
-def known(pilot, ean=REQUIRED_EANS[0], **overrides):
+def known(pilot, ean=REQUIRED_EANS[0], *, verified=True, **overrides):
     service, store, search, site, cid, _ = pilot
     url = url_of(PRADA[ean]["slug"])
     index_url(store, cid, ean, url)
+    if verified:
+        with store._connect() as connection, connection:
+            connection.execute("""UPDATE competitor_product_urls SET status='verified'
+                WHERE competitor_id=? AND ean=? AND url=?""", (cid, ean, url))
     site.add(url, prada_page(ean, **overrides))
     return url
 
@@ -133,6 +137,87 @@ def test_price_verification_dedup_and_history_survives_error(pilot):
     service.run(search=search)
     with store._connect() as c:
         assert c.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
+
+
+def test_selected_product_refresh_uses_only_confirmed_authorized_urls(pilot):
+    service, store, search, site, cid, _ = pilot
+    url = known(pilot)
+    with store._connect() as connection, connection:
+        connection.execute("""UPDATE competitor_product_urls SET status='verified',source='user'
+            WHERE competitor_id=? AND ean=? AND url=?""", (cid, REQUIRED_EANS[0], url))
+
+    plan = service.price_refresh_plan(REQUIRED_EANS[0]).set_index("competitor_id")
+    assert plan.loc[cid, "status"] == "Consultable"
+    assert plan.loc[cid, "url"] == url
+    assert site.calls == []
+
+    service.enable()
+    run_id = service.run(search=search, selection=[(cid, REQUIRED_EANS[0])])
+    with store._connect() as connection:
+        jobs = connection.execute(
+            "SELECT competitor_id,ean FROM pilot_jobs WHERE run_id=?", (run_id,)).fetchall()
+        budgets = connection.execute(
+            "SELECT competitor_id FROM pilot_budgets WHERE run_id=?", (run_id,)).fetchall()
+    assert [tuple(row) for row in jobs] == [(cid, REQUIRED_EANS[0])]
+    assert [row["competitor_id"] for row in budgets] == [cid]
+    assert site.calls == [BASE + "/robots.txt", url]
+
+    service.run(search=search, selection=[(cid, REQUIRED_EANS[0])])
+    with store._connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
+        assert connection.execute("SELECT checks FROM offer_checks").fetchone()[0] == 1
+
+    previous_price = float(store.offer_history(REQUIRED_EANS[0]).iloc[0]["price"])
+    updated_price = previous_price - 10
+    site.add(url, prada_page(REQUIRED_EANS[0], price=updated_price))
+    service.run(search=search, selection=[(cid, REQUIRED_EANS[0])])
+    history = store.offer_history(REQUIRED_EANS[0])
+    assert len(history) == 2
+    assert set(history["price"]) == {previous_price, updated_price}
+
+
+def test_selected_product_refresh_never_uses_unconfirmed_urls(pilot):
+    service, store, search, site, cid, _ = pilot
+    url = known(pilot, verified=False)
+    service.enable()
+
+    run_id = service.run(search=search, selection=[(cid, REQUIRED_EANS[0])])
+
+    assert site.calls == []
+    with store._connect() as connection:
+        job = connection.execute(
+            "SELECT status,outcome,detail FROM pilot_jobs WHERE run_id=?", (run_id,)).fetchone()
+    assert job["status"] == "done"
+    assert job["outcome"] == "not_found"
+    assert "No hay ficha confirmada" in job["detail"]
+    assert search._indexed(cid, REQUIRED_EANS[0])[0]["url"] == url
+
+
+def test_product_detail_starts_only_explicitly_selected_price_refresh(pilot, monkeypatch):
+    import app_pages.price_comparator as page
+    from streamlit.testing.v1 import AppTest
+
+    _, store, search, site, cid, _ = pilot
+    url = known(pilot)
+    with store._connect() as connection, connection:
+        connection.execute("""UPDATE competitor_product_urls SET status='verified',source='user'
+            WHERE competitor_id=? AND ean=? AND url=?""", (cid, REQUIRED_EANS[0], url))
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
+    launched = []
+    monkeypatch.setattr(page, "_launch", lambda target, *args: launched.append((target, args)))
+
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=60)
+    assert not app.exception and site.calls == []
+    app.selectbox(key="dashboard_product").set_value(REQUIRED_EANS[0]).run(timeout=60)
+    app.checkbox(key=f"dashboard_refresh_approved_{REQUIRED_EANS[0]}").set_value(True).run(timeout=60)
+    app.button(key=f"dashboard_refresh_prices_{REQUIRED_EANS[0]}").click().run(timeout=60)
+
+    assert not app.exception and site.calls == []
+    assert len(launched) == 1
+    assert launched[0][0] is page._run_price_refresh
+    assert launched[0][1][1] == [(cid, REQUIRED_EANS[0])]
 
 
 @pytest.mark.parametrize("override,reason", [

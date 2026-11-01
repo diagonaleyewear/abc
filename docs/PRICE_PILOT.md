@@ -57,7 +57,8 @@ de precios sigue reutilizando exclusivamente URLs guardadas.
    desactivado. La comprobacion explicita solo lee robots.txt del competidor
    registrado; no desbloquea consultas comerciales. No activar programaciones.
    Ver [aislamiento y comprobacion](PRICE_ROBOTS_CONFIGURATION.md).
-2. En **Competidores > Piloto de comparacion**, revisar el catalogo y precios
+2. En **Administracion > Competidores y ejecuciones > Piloto de comparacion**,
+   revisar el catalogo y precios
    vigentes. Proponer la muestra o seleccionar los 20 EAN, incluyendo las
    tres Prada. Si falta un dato requerido, Cloud rechaza el guardado indicando
    el EAN; no lo reemplaza silenciosamente.
@@ -70,6 +71,22 @@ de precios sigue reutilizando exclusivamente URLs guardadas.
 5. Revisar resultados, motivos de exclusion, contadores, datos comerciales
    y exportacion CSV. Una ejecucion interrumpida solo se reanuda con el mismo
    alcance y presupuestos; usar **Reanudar prueba interrumpida**.
+
+## Flujo comercial en Cloud
+
+La navegacion principal del comparador es **Resumen**, **Productos**,
+**Pendientes** y **Administracion**. Los filtros de marca, competidor, estado,
+periodo y busqueda se comparten entre Resumen y Productos. El detalle del
+producto concentra ofertas, vigencia e historico.
+
+Desde un producto incluido en el piloto, **Actualizar precios** presenta las
+fichas confirmadas y autorizadas, permite elegir competidores y requiere una
+confirmacion humana antes de encolar exclusivamente esos pares. La
+actualizacion no vuelve a descubrir URLs, no consulta al cargar la pagina y
+mantiene la barrera, autorizaciones, robots y presupuesto del piloto. Si falta
+una ficha, **Localizar ficha** es una operacion distinta; las candidaturas
+resultantes se revisan desde **Pendientes**. Los reintentos, ejecuciones,
+configuracion web, importaciones y diagnosticos siguen en **Administracion**.
 
 El CLI `price_scheduler.py --once` tambien respeta la barrera y usa la cola
 dedicada cuando hay piloto habilitado. No usarlo como activacion inicial:

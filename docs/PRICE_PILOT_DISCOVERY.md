@@ -115,9 +115,13 @@ proveedores externos, proxies, rotacion ni elusion de CAPTCHA.
 
 ## Localizacion de fichas del piloto
 
-La interfaz muestra matriz 20x6, cobertura, tabla filtrable EAN/competidor/
-metodo/estado/URL y candidatos con evidencia y referencia normalizada. Los
-filtros de esta tabla son solo visuales y nunca cambian la cola.
+La interfaz comercial concentra las fichas que requieren revision en
+«Pendientes»: cada elemento muestra primero marca, modelo, color, competidor
+y URL, con acciones de confirmar/descartar junto al candidato. El JSON,
+identificador interno, metodo y ejecucion se muestran solo en «Detalles
+tecnicos». «Administracion > Competidores y ejecuciones» conserva la matriz
+20x6, el alcance, presupuestos, filtros, colas, resultados y auditoria. Los
+filtros de cobertura son solo visuales y nunca cambian la cola.
 
 Estados:
 
@@ -127,7 +131,8 @@ Estados:
   aun SIN aprobacion humana.
 - Pendiente de validar: datos incompletos/ambiguos; no puede confirmarse.
 - Ficha confirmada: aprobada por una persona.
-- Producto no encontrado: consulta sin candidato valido (rechazos auditados).
+- Producto no encontrado: solo cuando la consulta no devuelve candidatos y no
+  existe una ficha confirmada ni candidatos abiertos.
 - Consulta no autorizada: metodo/acceso/condiciones no preparados.
 - Error o bloqueo: HTTP, presupuesto, CAPTCHA o mecanismo incompatible.
 
@@ -167,6 +172,25 @@ la ficha no publica EAN. Un EAN contradictorio o atributos insuficientes NO
 pueden aprobarse como coincidencia exacta.
 Solo guarda URL/identidad en `competitor_product_urls`; no guarda precio.
 El comparador volvera a extraer y validar datos comerciales.
+
+Descartar registra el estado, fecha y nota en el candidato individual. No
+marca el producto como inexistente ni altera una URL confirmada de la misma
+combinacion EAN/competidor. La cobertura agregada conserva `confirmed` si hay
+una ficha validada; si quedan candidatos abiertos, refleja su estado; si se
+descarta el ultimo candidato, vuelve a `pending` para permitir otra
+localizacion, no a `not_found`. Una revision repetida con la misma decision es
+idempotente. Las URL descartadas no vuelven a aparecer como candidatos
+pendientes en ejecuciones posteriores; si se vuelven a encontrar, se omiten.
+
+En el detalle de producto, «Actualizar precios» solo se habilita para
+competidores del alcance supervisado que tengan URL confirmada, autorizacion
+registrada y acceso verificado. La vista previa no hace HTTP. El usuario elige
+las tiendas y confirma; la cola persistida contiene solo esos pares
+EAN/competidor y reutiliza presupuesto, pausas, robots y validaciones
+comerciales existentes. La operacion de precios no inicia descubrimiento ni
+crea ofertas duplicadas. Si falta una ficha, «Localizar ficha» inicia por
+separado una localizacion supervisada y explicita; la revision de la URL sigue
+en «Pendientes». No se consultan webs al cargar el comparador.
 
 Las fichas conocidas/confirmadas y candidatos pendientes no se repiten en
 nuevas ejecuciones de localizacion. Errores/no encontrado requieren preparar

@@ -24,6 +24,7 @@ def ui(tmp_path, monkeypatch):
 
 def _search(app=None):
     app = app or AppTest.from_string(SCRIPT).run(timeout=90)
+    app.selectbox(key="price_admin_section").set_value("Búsqueda manual").run(timeout=90)
     app.text_input(key="web_text").set_value(EAN).run(timeout=90)
     app.multiselect(key="web_competitors").set_value(["Visio Factory"])
     app.button(key="web_search_button").click()

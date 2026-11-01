@@ -61,6 +61,7 @@ def test_page_button_runs_sync_in_background_without_blocking(tmp_path, monkeypa
     _wait_until(lambda: not VytriaPriceSync(PriceComparatorStore()).is_running())
     app.run()
     assert not app.button(key="sync_vytria_prices").disabled
+    app.selectbox(key="price_admin_section").set_value("Importar datos").run()
     assert any(metric.label == "Con precio confirmado" and metric.value == "1/1" for metric in app.metric)
 
 
