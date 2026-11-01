@@ -16,6 +16,8 @@ POSITION_BEST = "Vytria con el mejor precio"
 POSITION_HIGHER = "Vytria más caro"
 POSITION_NONE = "Sin comparación"
 POSITIONS = (POSITION_BEST, POSITION_HIGHER, POSITION_NONE)
+STATE_ALL = "Todos"
+STATE_OPTIONS = (STATE_ALL, POSITION_BEST, POSITION_HIGHER, POSITION_NONE)
 STATE_CURRENT = "Vigente"
 STATE_LAST_KNOWN = "Último conocido"
 STATE_EXPIRED = "Caducado"
@@ -49,13 +51,15 @@ def position_of(difference_eur: float | None) -> str:
 
 def commercial_table(summary: pd.DataFrame) -> pd.DataFrame:
     if summary.empty:
-        return pd.DataFrame(columns=["brand", "model", "ean", "own_price_eur", "best_competitor",
+        return pd.DataFrame(columns=["brand", "model", "color", "ean", "own_price_eur", "best_competitor",
                                      "competitor_min_eur", "difference_eur", "difference_pct",
                                      "last_checked_at", "position", "own_price_status"])
     table = summary.assign(model=summary["commercial_name"])
     table["position"] = table["difference_eur"].map(position_of)
-    return table[["brand", "model", "ean", "own_price_eur", "best_competitor", "competitor_min_eur",
-                  "difference_eur", "difference_pct", "last_checked_at", "position", "own_price_status"]]
+    return table.reindex(columns=["brand", "model", "color", "ean", "own_price_eur", "best_competitor",
+                                  "competitor_min_eur", "difference_eur", "difference_pct",
+                                  "difference_vs_competitor_pct", "last_checked_at", "position",
+                                  "own_price_status"])
 
 
 def filter_table(table: pd.DataFrame, offers: pd.DataFrame, *, brands=(), competitors=(),
@@ -77,17 +81,23 @@ def filter_table(table: pd.DataFrame, offers: pd.DataFrame, *, brands=(), compet
 
 def kpis(summary: pd.DataFrame, recent_change_count: int) -> dict[str, float | int | None]:
     own = int(summary["own_price_eur"].notna().sum()) if not summary.empty else 0
-    comparable = int((summary["competitor_count"] > 0).sum()) if not summary.empty else 0
     compared = summary[summary["difference_eur"].notna()] if not summary.empty else summary
+    comparable = len(compared)
     best = int((compared["difference_eur"] <= 0).sum()) if not summary.empty else 0
+    expensive = int((compared["difference_eur"] > 0).sum()) if not summary.empty else 0
+    mean_gap = (float(compared["difference_vs_competitor_pct"].mean())
+                if len(compared) and "difference_vs_competitor_pct" in compared else None)
     return {
         "vytria_confirmed": own,
         "comparable": comparable,
         # None (not 0) when nothing is comparable: "0 %" would claim Vytria never has the best price.
         "best_price_pct": (best / len(compared) * 100) if len(compared) else None,
         "compared": len(compared),
-        "vytria_more_expensive": int((compared["difference_eur"] > 0).sum()) if len(compared) else 0,
+        "vytria_more_expensive": expensive,
+        "vytria_more_expensive_pct": expensive / len(compared) * 100 if len(compared) else None,
         "vytria_cheaper": int((compared["difference_eur"] < 0).sum()) if len(compared) else 0,
+        "no_information": max(0, len(summary) - comparable),
+        "mean_gap_vs_best_pct": mean_gap,
         "recent_changes": recent_change_count,
     }
 
@@ -106,7 +116,8 @@ def comparable_pairs(summary: pd.DataFrame, offers: pd.DataFrame) -> pd.DataFram
     contributes its latest valid offer per EAN. ``difference_pct`` = (competitor - Vytria) / Vytria * 100,
     so a negative value means the competitor is cheaper.
     """
-    columns = ["ean", "competitor", "own_eur", "competitor_eur", "difference_pct", "checked_at"]
+    columns = ["ean", "competitor_id", "competitor", "url", "own_eur", "competitor_eur",
+               "difference_pct", "checked_at"]
     if summary.empty or offers.empty:
         return pd.DataFrame(columns=columns)
     own = summary[summary["own_price_eur"].notna() & (summary["own_price_eur"] > 0)][["ean", "market", "own_price_eur"]]
@@ -118,7 +129,8 @@ def comparable_pairs(summary: pd.DataFrame, offers: pd.DataFrame) -> pd.DataFram
     joined = joined.assign(competitor_eur=price * joined["fx_to_eur"])
     latest = joined.sort_values(["captured_at", "id"]).groupby(["ean", "competitor_id"]).tail(1)
     result = pd.DataFrame({
-        "ean": latest["ean"], "competitor": latest["competitor_name"], "own_eur": latest["own_price_eur"],
+        "ean": latest["ean"], "competitor_id": latest["competitor_id"], "competitor": latest["competitor_name"],
+        "url": latest.get("url", pd.Series("", index=latest.index)), "own_eur": latest["own_price_eur"],
         "competitor_eur": latest["competitor_eur"], "checked_at": latest["checked_at"],
     })
     result["difference_pct"] = (result["competitor_eur"] - result["own_eur"]) / result["own_eur"] * 100
@@ -150,6 +162,95 @@ def mean_gap_pct(pairs: pd.DataFrame) -> float | None:
     return float(pairs["difference_pct"].mean()) if not pairs.empty else None
 
 
+def dashboard_scope(summary: pd.DataFrame, offers: pd.DataFrame, *, brands=(), competitors=(),
+                    query: str = "", states=()) -> pd.DataFrame:
+    """Recalculate the best valid competitor price after applying the dashboard's shared filters."""
+    scoped = summary.copy()
+    if brands:
+        scoped = scoped[scoped["brand"].isin(brands)]
+    if query.strip():
+        term = query.strip().casefold()
+        fields = [name for name in ("ean", "brand", "model", "commercial_name", "color", "internal_reference")
+                  if name in scoped.columns]
+        text = scoped[fields].fillna("").astype(str).agg(" ".join, axis=1).str.casefold()
+        scoped = scoped[text.str.contains(term, regex=False)]
+    scoped_offers = offers
+    if competitors:
+        scoped_offers = scoped_offers[scoped_offers["competitor_name"].isin(competitors)]
+    pairs = comparable_pairs(scoped, scoped_offers)
+    if scoped.empty:
+        return scoped
+
+    recalculated = scoped.copy()
+    for column in ("competitor_min_eur", "competitor_mean_eur", "competitor_max_eur", "difference_eur",
+                   "difference_pct", "difference_vs_competitor_pct", "position"):
+        recalculated[column] = None
+    recalculated["best_competitor"] = ""
+    recalculated["best_url"] = ""
+    recalculated["last_checked_at"] = ""
+    recalculated["competitor_count"] = 0
+
+    for ean, group in pairs.groupby("ean"):
+        index = recalculated.index[recalculated["ean"] == ean]
+        if not len(index):
+            continue
+        prices = group.sort_values(["competitor_eur", "competitor", "competitor_id"])
+        best = prices.iloc[0]
+        own = float(best["own_eur"])
+        minimum = float(best["competitor_eur"])
+        difference = own - minimum
+        recalculated.loc[index, "competitor_min_eur"] = minimum
+        recalculated.loc[index, "competitor_mean_eur"] = float(group["competitor_eur"].mean())
+        recalculated.loc[index, "competitor_max_eur"] = float(group["competitor_eur"].max())
+        recalculated.loc[index, "difference_eur"] = difference
+        recalculated.loc[index, "difference_pct"] = difference / own * 100 if own else None
+        recalculated.loc[index, "difference_vs_competitor_pct"] = difference / minimum * 100 if minimum else None
+        recalculated.loc[index, "position"] = 1 + int((group["competitor_eur"] < own).sum())
+        recalculated.loc[index, "best_competitor"] = best["competitor"]
+        recalculated.loc[index, "best_url"] = best["url"]
+        recalculated.loc[index, "last_checked_at"] = best["checked_at"]
+        recalculated.loc[index, "competitor_count"] = int(group["competitor_id"].nunique())
+
+    result = commercial_table(recalculated)
+    result["position_rank"] = scoped["position"].values
+    result["reference_model"] = scoped["model"].values if "model" in scoped.columns else ""
+    result["color"] = scoped["color"].values if "color" in scoped.columns else ""
+    result["commercial_name"] = scoped["commercial_name"].values if "commercial_name" in scoped.columns else ""
+    if "commercial_name" in scoped.columns:
+        result["model"] = scoped["commercial_name"].where(
+            scoped["commercial_name"].fillna("").astype(bool), scoped.get("model", ""))
+    for column in ("market", "own_price_status", "confirmed_offer_count"):
+        if column in scoped.columns:
+            result[column] = scoped[column].values
+    result["competitor_count"] = recalculated["competitor_count"].values
+    if states and STATE_ALL not in states:
+        result = result[result["position"].isin(states)]
+    return result.reset_index(drop=True)
+
+
+def attention_table(summary: pd.DataFrame, n: int = 10) -> pd.DataFrame:
+    """Products priced above their best current, verified, comparable competitor offer."""
+    table = commercial_table(summary)
+    if table.empty:
+        return table
+    table = table[table["difference_eur"] > 0]
+    return table.sort_values(["difference_vs_competitor_pct", "difference_eur"],
+                             ascending=False, ignore_index=True).head(n)
+
+
+def positioning_counts(summary: pd.DataFrame) -> pd.DataFrame:
+    counts = summary.get("position", pd.Series(dtype=str)).value_counts()
+    total = len(summary)
+    return pd.DataFrame([
+        {"position": POSITION_BEST, "count": int(counts.get(POSITION_BEST, 0)),
+         "share_pct": float(counts.get(POSITION_BEST, 0) / total * 100) if total else 0.0},
+        {"position": POSITION_HIGHER, "count": int(counts.get(POSITION_HIGHER, 0)),
+         "share_pct": float(counts.get(POSITION_HIGHER, 0) / total * 100) if total else 0.0},
+        {"position": POSITION_NONE, "count": int(counts.get(POSITION_NONE, 0)),
+         "share_pct": float(counts.get(POSITION_NONE, 0) / total * 100) if total else 0.0},
+    ])
+
+
 def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.DataFrame:
     query = """
         SELECT o.id,o.ean,o.competitor_id,c.name AS competitor_name,o.market,o.price,o.promotional_price,
@@ -168,8 +269,8 @@ def _offer_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.Data
 
 
 def _vytria_frame(store: PriceComparatorStore, ean: str | None = None) -> pd.DataFrame:
-    query = """SELECT ean,price,currency,recorded_at FROM vytria_price_history
-               WHERE validation_status='validated' AND currency='EUR'"""
+    query = """SELECT id,ean,market,price,currency,price_includes_tax,recorded_at FROM vytria_price_history
+               WHERE validation_status='validated' AND currency='EUR' AND price_includes_tax=1"""
     params: tuple = ()
     if ean:
         query += " AND ean=?"
@@ -206,19 +307,29 @@ def recent_changes(store: PriceComparatorStore, days: int = 7, threshold_pct: fl
 
 
 def price_series(store: PriceComparatorStore, ean: str, days: int, competitors=None,
-                 now: datetime | None = None) -> pd.DataFrame:
+                 now: datetime | None = None, market: str | None = None) -> pd.DataFrame:
     """Stored observations only. `kind` is 'change' (a new price was recorded) or 'check' (same price re-confirmed)."""
     end = now or _utc()
     since = (end - timedelta(days=days)).isoformat()
     rows = []
-    for item in _vytria_frame(store, ean).itertuples():
+    own = _vytria_frame(store, ean)
+    if market is None and not own.empty:
+        market = own.sort_values(["recorded_at", "id"]).iloc[-1]["market"]
+    if market:
+        own = own[own["market"] == market]
+    for item in own.itertuples():
         rows.append({"series": "Vytria", "at": item.recorded_at, "eur": item.price, "kind": "change"})
     offers = _offer_frame(store, ean)
+    if market:
+        offers = offers[offers["market"] == market]
     if competitors is not None:
         offers = offers[offers["competitor_name"].isin(competitors)]
     for item in offers.itertuples():
-        rows.append({"series": item.competitor_name, "at": item.captured_at, "eur": item.eur, "kind": "change"})
-        if item.last_offer_id == item.id and item.last_ok_at and item.last_ok_at > item.captured_at:
+        available = item.availability == "available"
+        rows.append({"series": item.competitor_name, "at": item.captured_at,
+                     "eur": item.eur if available else float("nan"),
+                     "kind": "change" if available else "unavailable"})
+        if available and item.last_offer_id == item.id and item.last_ok_at and item.last_ok_at > item.captured_at:
             rows.append({"series": item.competitor_name, "at": item.last_ok_at, "eur": item.eur, "kind": "check"})
     frame = pd.DataFrame(rows, columns=["series", "at", "eur", "kind"]).sort_values(["series", "at"], ignore_index=True)
     if frame.empty:
@@ -232,24 +343,43 @@ def price_series(store: PriceComparatorStore, ean: str, days: int, competitors=N
     return pd.concat(keep, ignore_index=True)
 
 
-def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime | None = None) -> pd.DataFrame:
-    """Daily share of compared references where Vytria had the best price, as of each day's end."""
+def competitiveness_series(store: PriceComparatorStore, days: int, now: datetime | None = None, *,
+                           expiry_days: int | None = None, eans=None, competitors=None) -> pd.DataFrame:
+    """Daily share of fresh, same-market compared references where Vytria matched or beat the competition."""
     end = now or _utc()
+    expiry = expiry_days or store.price_expiry_days()
     vytria = _vytria_frame(store)
     offers = _offer_frame(store)
+    if eans is not None:
+        selected = set(eans)
+        vytria = vytria[vytria["ean"].isin(selected)]
+        offers = offers[offers["ean"].isin(selected)]
+    if competitors is not None:
+        offers = offers[offers["competitor_name"].isin(competitors)]
     if vytria.empty or offers.empty:
         return pd.DataFrame(columns=["day", "best_price_pct", "compared"])
     rows = []
     for offset in range(days, -1, -1):
         day = (end - timedelta(days=offset)).date()
-        cutoff = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc).isoformat()
-        own = vytria[vytria["recorded_at"] <= cutoff].groupby("ean")["price"].last()
+        day_end = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
+        cutoff_dt = min(day_end, end)
+        cutoff = cutoff_dt.isoformat()
+        own = vytria[vytria["recorded_at"] <= cutoff].sort_values(["recorded_at", "id"]) \
+            .groupby(["ean", "market"]).tail(1).copy()
+        own["recorded_dt"] = pd.to_datetime(own["recorded_at"], utc=True)
+        own = own[(cutoff_dt - own["recorded_dt"]) <= timedelta(days=expiry)]
         latest = offers[offers["captured_at"] <= cutoff].sort_values(["captured_at", "id"]) \
             .groupby(["ean", "competitor_id", "market"]).tail(1)
-        # Availability is checked on the latest observation: an out-of-stock update must not revive an older price.
+        # A later recheck extends freshness only from its actual date; future checks never leak backwards.
+        latest = latest.copy()
+        latest["captured_dt"] = pd.to_datetime(latest["captured_at"], utc=True)
+        last_ok = pd.to_datetime(latest["last_ok_at"], utc=True, errors="coerce")
+        latest["checked_dt"] = last_ok.where(last_ok.notna() & (last_ok <= cutoff_dt), latest["captured_dt"])
+        latest = latest[(cutoff_dt - latest["checked_dt"]) <= timedelta(days=expiry)]
         latest = latest[latest["availability"] == "available"]
-        minimum = latest.groupby("ean")["eur"].min()
-        joined = pd.concat([own.rename("own"), minimum.rename("min")], axis=1, join="inner")
+        minimum = latest.groupby(["ean", "market"])["eur"].min()
+        own_prices = own.set_index(["ean", "market"])["price"]
+        joined = pd.concat([own_prices.rename("own"), minimum.rename("min")], axis=1, join="inner").dropna()
         if len(joined):
             rows.append({"day": day, "best_price_pct": float((joined["own"] <= joined["min"]).mean() * 100),
                          "compared": len(joined)})
@@ -332,7 +462,28 @@ def competitiveness_figure(series: pd.DataFrame):
     import plotly.graph_objects as go
 
     figure = go.Figure(go.Scatter(x=series["day"], y=series["best_price_pct"], mode="lines+markers",
-                                  line_shape="hv", name="Vytria con el mejor precio"))
+                                  line_shape="hv", name="Vytria igual o más barata",
+                                  customdata=series[["compared"]],
+                                  hovertemplate="%{x|%d/%m/%Y}: %{y:.1f} %<br>"
+                                                "Productos comparados: %{customdata[0]}<extra></extra>"))
     figure.update_layout(yaxis_title="% de referencias", yaxis_range=[0, 100], xaxis_title="Día (UTC)",
                          margin={"l": 10, "r": 10, "t": 20, "b": 10})
+    return figure
+
+
+def positioning_distribution_figure(summary: pd.DataFrame):
+    import plotly.graph_objects as go
+
+    data = positioning_counts(summary)
+    colours = {POSITION_BEST: BRAND_GREEN, POSITION_HIGHER: "#C2410C", POSITION_NONE: "#94A3B8"}
+    labels = [f"{row.count} ({row.share_pct:.1f} %)".replace(".", ",") for row in data.itertuples()]
+    figure = go.Figure(go.Bar(
+        x=data["count"], y=data["position"], orientation="h",
+        marker={"color": [colours[value] for value in data["position"]]},
+        text=labels, textposition="auto",
+        customdata=data[["share_pct"]],
+        hovertemplate="%{y}: %{x} productos (%{customdata[0]:.1f} %)<extra></extra>"))
+    figure.update_layout(xaxis_title="Productos del catálogo filtrado", yaxis_title="",
+                         margin={"l": 10, "r": 10, "t": 10, "b": 10}, height=200)
+    figure.update_xaxes(dtick=1, rangemode="tozero")
     return figure

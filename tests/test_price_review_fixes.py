@@ -81,7 +81,9 @@ def test_prada_history_keeps_availability_change_and_chart_plots_real_points(pra
     assert list(history["price"]) == [187.0, 187.0]
     series = pa.price_series(prada, "8056597877329", 30)
     assert set(series["series"]) == {"Vytria", "Visio Factory"}
-    assert (series[series["series"] == "Visio Factory"]["eur"] == 187.0).all()
+    competitor = series[series["series"] == "Visio Factory"].sort_values("at")
+    assert competitor.iloc[0]["eur"] == 187.0
+    assert competitor.iloc[-1]["kind"] == "unavailable" and pd.isna(competitor.iloc[-1]["eur"])
     figure = pa.price_figure(series)
     assert {trace.name for trace in figure.data} >= {"Vytria", "Visio Factory"}
     # Competitiveness uses the latest observation per day: the out-of-stock EAN no longer counts.
@@ -95,8 +97,8 @@ def test_prada_five_tabs_render_with_real_values(prada):
     assert not app.exception
     assert [tab.label for tab in app.tabs] == ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"]
     values = {metric.label: metric.value for metric in app.metric}
-    assert values["Referencias con precio Vytria"] == "3/4"  # the catalogue also holds the Bottega Veneta reference
-    assert values["Diferencia media del mercado vs Vytria"] == "-21,6 %"
+    assert values["Productos comparados"] == "2 / 4"  # only fresh, comparable competitor offers count
+    assert values["Diferencia media vs. mejor"] == "+27,6 %"
 
     app.selectbox(key="price_detail_ean").set_value("8056597877329").run(timeout=90)
     assert not app.exception

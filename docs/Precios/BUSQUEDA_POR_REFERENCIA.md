@@ -54,6 +54,48 @@ python price_observations.py import observaciones.json --apply    # escribe en l
 - Mercado y moneda de los competidores: no se asumen. Quedan vacíos hasta que se verifiquen (editable en la interfaz). `ES`/`EUR` es solo el mercado objetivo de la comparación (precio Vytria). Las observaciones JSON deben traer `mercado` (y `moneda` si hay precio); si faltan se rechazan con aviso. `PriceComparatorStore.fill_competitor_defaults()` solo lista los pendientes; `apply=True` exige `market=` y `currency=` confirmados explícitamente.
 - «Diferencia %» principal = diferencia ÷ precio Vytria (`difference_pct`); sobre el competidor queda en `difference_vs_competitor_pct`.
 
+## Dashboard comercial
+
+La pestaña inicial «Resumen» muestra indicadores, posicionamiento, evolución,
+productos que requieren atención y consulta individual. El ámbito son
+productos únicos del catálogo identificados por EAN; las ofertas se validan
+por las reglas existentes de identidad, disponibilidad, IVA incluido, EUR y
+mercado coincidente con el precio de Vytria. Se usa una sola observación
+vigente por EAN y competidor. El calibre es informativo.
+
+- **Productos comparados**: referencias con precio Vytria validado y al menos
+  una oferta comparable.
+- **Igual o más barato**: productos donde Vytria cuesta lo mismo o menos que
+  el mínimo comparable, dividido por los productos comparados. El empate
+  cuenta como competitivo.
+- **Más caro**: productos por encima del mínimo comparable, con el mismo
+  denominador.
+- **Diferencia media vs. mejor**: media no ponderada por producto de
+  `(precio Vytria − mejor precio comparable) / mejor precio comparable × 100`.
+  Un resultado positivo indica que Vytria es más cara. Sin comparaciones
+  válidas, los porcentajes se muestran como «Sin datos», no como cero.
+
+El filtro de periodo (7, 30 o 90 días) se comparte entre el resumen y las dos
+series históricas; los datos del resumen se limitan además a la vigencia máxima
+configurada. La serie global recalcula cada día con los últimos precios
+disponibles hasta ese día, exige que sigan vigentes en esa fecha y no rellena
+días sin productos comparables. Un único día con datos se muestra como punto,
+no como tendencia. La línea por producto solo usa observaciones exactas,
+disponibles, con IVA y del mismo mercado; las observaciones sin disponibilidad
+crean una interrupción, no prolongan una oferta como vigente.
+
+Los filtros de marca, competidor, estado y texto se aplican antes de recalcular
+KPIs, distribución, tabla de atención y selección de producto. Al elegir un
+competidor, el mínimo y la posición se vuelven a calcular solo con sus ofertas.
+La tabla de atención incluye exclusivamente Vytria por encima de competencia y
+se ordena por la mayor diferencia porcentual frente al mejor precio. No se
+generan recomendaciones de rebaja ni cambios automáticos de precios.
+
+Capturas de la revisión visual con datos sintéticos: [escritorio](./dashboard-desktop-synthetic.png),
+[móvil](./dashboard-mobile-synthetic.png), [tabla de atención](./dashboard-atencion-synthetic.png)
+y [detalle de producto](./dashboard-detalle-synthetic.png). Los importes y productos
+de las capturas no representan datos comerciales reales.
+
 ## Cobertura de competidores
 
 Fichero [cobertura_competidores.json](./cobertura_competidores.json) (14 competidores). Cargar y ver:
