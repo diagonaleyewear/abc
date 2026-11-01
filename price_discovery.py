@@ -21,6 +21,7 @@ STATE_TEXT = {
     "candidate_found": "Candidato encontrado", "pending_validation": "Pendiente de validar",
     "confirmed": "Ficha confirmada", "not_found": "Producto no encontrado",
     "not_allowed": "Consulta no autorizada", "error": "Error o bloqueo", "blocked": "Error o bloqueo",
+    "rejected": "Candidato rechazado por identidad",
 }
 
 
@@ -249,12 +250,23 @@ class PilotDiscovery:
         evidence: dict = {"attempts": [], "candidates": []}
         seen: set[str] = set()
         best_state = "not_found"
+        discarded_seen = False
+
+        def previously_discarded(url: str) -> bool:
+            with self.store._connect() as connection:
+                return connection.execute("""SELECT 1 FROM pilot_url_candidates
+                    WHERE competitor_id=? AND ean=? AND url=? AND state='discarded' LIMIT 1""",
+                                          (cid, ean, url)).fetchone() is not None
+
         try:
             def save_candidate(outcome, method: str) -> None:
-                nonlocal best_state
+                nonlocal best_state, discarded_seen
                 data = asdict(outcome)
                 evidence["candidates"].append(data)
                 if outcome.page is None:
+                    return
+                if previously_discarded(outcome.url):
+                    discarded_seen = True
                     return
                 match = classify(product, outcome.page.candidate())
                 exact = outcome.state == "exact" and match.status == EXACT and not outcome.page.ambiguous
@@ -320,6 +332,9 @@ class PilotDiscovery:
                     seen.add(url)
                     self._guard(ean, cid, run_id)
                     url = validate_competitor_url(url, config["domain"])
+                    if previously_discarded(url):
+                        discarded_seen = True
+                        continue
                     current = search.config(cid)
                     if current["search_mode"] == "known" or (
                             method != "sitemap" and not current["search_verified"]):
@@ -338,6 +353,8 @@ class PilotDiscovery:
             return "error", str(exc), evidence
         if not any("urls" in attempt or "search_url" in attempt for attempt in evidence["attempts"]):
             return "not_allowed", "No hay un método autorizado y verificado de localización", evidence
+        if best_state == "not_found" and discarded_seen:
+            return "pending", "Se omitió una URL descartada anteriormente; no se ha determinado la ausencia de ficha", evidence
         return best_state, json.dumps(evidence["attempts"], ensure_ascii=False), evidence
 
     def review(self, candidate_id: int, *, accept: bool, note: str) -> None:
@@ -352,15 +369,18 @@ class PilotDiscovery:
                 if scope is None or row is None or row["ean"] not in scope["eans"] \
                         or row["competitor_id"] not in scope["competitors"]:
                     raise PilotError("Candidato fuera del alcance actual del piloto")
+                desired_state = "confirmed" if accept else "discarded"
+                if row["state"] == desired_state:
+                    return
                 if row["state"] not in ("candidate_found", "pending_validation"):
                     raise PilotError("El candidato ya se revisó o fue rechazado por identidad")
                 cid, ean = row["competitor_id"], row["ean"]
                 with search._lock(cid):
-                    config, product = search.config(cid), search._product(ean)
-                    data = json.loads(row["evidence"])
-                    page = ProductPage(**data["page"])
-                    match = classify(product, page.candidate())
                     if accept:
+                        config, product = search.config(cid), search._product(ean)
+                        data = json.loads(row["evidence"])
+                        page = ProductPage(**data["page"])
+                        match = classify(product, page.candidate())
                         if match.status != EXACT or page.ambiguous:
                             raise PilotError("La identidad exacta no está confirmada; no puede aprobarse")
                         url = validate_competitor_url(row["url"], config["domain"])
@@ -385,11 +405,30 @@ class PilotDiscovery:
     def _review_row(connection, row, state: str, note: str) -> None:
         connection.execute("UPDATE pilot_url_candidates SET state=?,reviewed_at=?,review_note=? WHERE id=?",
                            (state, stamp(), note.strip(), row["id"]))
+        cid, ean = row["competitor_id"], row["ean"]
+        current = connection.execute(
+            "SELECT state FROM pilot_discovery WHERE competitor_id=? AND ean=?", (cid, ean),
+        ).fetchone()
+        confirmed_url = connection.execute("""SELECT 1 FROM competitor_product_urls
+            WHERE competitor_id=? AND ean=? AND status='verified' AND source='user' LIMIT 1""",
+                                           (cid, ean)).fetchone()
+        pending = connection.execute("""SELECT state FROM pilot_url_candidates
+            WHERE competitor_id=? AND ean=? AND state IN ('candidate_found','pending_validation')""",
+                                     (cid, ean)).fetchall()
+        if state == "confirmed" or confirmed_url or (current and current["state"] == "confirmed"):
+            aggregate_state = "confirmed"
+            detail = "Ficha confirmada; se ha registrado la revisión de otro candidato."
+        elif pending:
+            aggregate_state = ("candidate_found" if any(item["state"] == "candidate_found" for item in pending)
+                               else "pending_validation")
+            detail = "Quedan candidatos pendientes de revisión."
+        else:
+            aggregate_state = "pending"
+            detail = "Candidato descartado; la existencia de una ficha válida no se ha determinado."
         connection.execute("""INSERT INTO pilot_discovery(competitor_id,ean,state,method,detail,updated_at)
             VALUES(?,?,?,?,?,?) ON CONFLICT(competitor_id,ean) DO UPDATE SET state=excluded.state,
             detail=excluded.detail,updated_at=excluded.updated_at""",
-                           (row["competitor_id"], row["ean"], "confirmed" if state == "confirmed" else "not_found",
-                            row["method"], note.strip(), stamp()))
+                           (cid, ean, aggregate_state, row["method"], detail, stamp()))
 
     def reset(self, ean: str, cid: str, *, note: str) -> None:
         if not note.strip():
@@ -406,7 +445,13 @@ class PilotDiscovery:
                     raise PilotError("Reanude o cierre la operación interrumpida antes de preparar otro intento")
                 coverage = self.coverage()
                 row = coverage[(coverage.ean == ean) & (coverage.competitor_id == cid)].iloc[0]
-                if row["state"] not in ("not_found", "not_allowed", "error", "blocked"):
+                discarded = False
+                with self.store._connect() as connection:
+                    discarded = connection.execute("""SELECT 1 FROM pilot_url_candidates
+                        WHERE competitor_id=? AND ean=? AND state='discarded' LIMIT 1""", (cid, ean)).fetchone() \
+                        is not None
+                if row["state"] not in ("not_found", "not_allowed", "error", "blocked") \
+                        and not (row["state"] == "pending" and discarded):
                     raise PilotError("Solo se reintentan combinaciones sin ficha ni candidatos pendientes")
                 with self.store._connect() as connection, connection:
                     connection.execute("""UPDATE pilot_discovery SET state='pending',detail=?,updated_at=?

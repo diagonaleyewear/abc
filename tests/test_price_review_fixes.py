@@ -95,12 +95,12 @@ def test_prada_history_keeps_availability_change_and_chart_plots_real_points(pra
 def test_prada_five_tabs_render_with_real_values(prada):
     app = AppTest.from_string(SCRIPT).run(timeout=90)
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"]
+    assert [tab.label for tab in app.tabs] == ["Resumen", "Productos", "Pendientes", "Administración"]
     values = {metric.label: metric.value for metric in app.metric}
     assert values["Productos comparados"] == "2 / 4"  # only fresh, comparable competitor offers count
     assert values["Diferencia media vs. mejor"] == "+27,6 %"
 
-    app.selectbox(key="price_detail_ean").set_value("8056597877329").run(timeout=90)
+    app.selectbox(key="products_selected_ean").set_value("8056597877329").run(timeout=90)
     assert not app.exception
     assert any(len(frame.value) == 2 for frame in app.dataframe)  # full history keeps both observations
     assert len(app.expander) >= 14  # competitors tab lists the 14 reference competitors

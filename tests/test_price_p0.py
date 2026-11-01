@@ -161,7 +161,7 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     app = AppTest.from_string(SCRIPT).run(timeout=60)
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"]
+    assert [tab.label for tab in app.tabs] == ["Resumen", "Productos", "Pendientes", "Administración"]
     values = {metric.label: metric.value for metric in app.metric}
     assert values["Productos comparados"] == "1 / 1"
     assert values["Más caro"] == "100,0 %"
@@ -169,7 +169,7 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     labels = [expander.label for expander in app.expander]
     assert any(label.startswith("Edel-Optics") and "Bloqueado" in label for label in labels)
     assert any("**Necesitamos:**" in markdown.value for markdown in app.markdown)
-    assert EAN in app.selectbox(key="price_detail_ean").value
+    assert EAN in app.selectbox(key="products_selected_ean").value
 
 
 def test_page_creates_initial_configuration_on_first_access(tmp_path, monkeypatch):
@@ -184,4 +184,4 @@ def test_page_creates_initial_configuration_on_first_access(tmp_path, monkeypatc
     with reopened._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM competitor_schedule WHERE enabled=0").fetchone()[0] == 14
         assert connection.execute("SELECT COUNT(*) FROM comparator_settings").fetchone()[0] == 3
-    assert any("Importe primero el catálogo piloto" in item.value for item in app.info)
+    assert any("importe el catálogo desde Administración" in item.value for item in app.info)

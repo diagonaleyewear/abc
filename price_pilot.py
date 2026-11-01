@@ -207,6 +207,63 @@ class PricePilot:
                              "plan": state, "known_urls": len(urls), **limits})
         return pd.DataFrame(rows)
 
+    def price_refresh_plan(self, ean: str) -> pd.DataFrame:
+        """Return confirmed, authorized URL refresh options without performing HTTP."""
+        from price_web import WebPriceSearch
+
+        scope = pilot_scope(self.store)
+        if scope is None:
+            raise PilotError("Piloto sin configurar")
+        try:
+            normalized = normalize_gtin(ean)
+        except ValueError as exc:
+            raise PilotError("EAN no válido") from exc
+        if normalized != ean or ean not in scope["eans"]:
+            raise PilotError("El producto está fuera del alcance del piloto")
+        search = WebPriceSearch(self.store)
+        names = {row["id"]: row["name"] for row in self.competitors()}
+        rows = []
+        for cid in scope["competitors"]:
+            config = search.config(cid)
+            verified = [row for row in search._indexed(cid, ean) if row["status"] == "verified"]
+            if not verified:
+                status, reason = "No disponible", "No hay una ficha confirmada"
+            elif not config["terms_reviewed"] or not config["terms_note"].strip():
+                status, reason = "No consultable", "Falta autorización comercial"
+            elif config["access_status"] != "robots_allowed":
+                status, reason = "No consultable", "Acceso web no autorizado o no verificado"
+            else:
+                status, reason = "Consultable", ""
+            rows.append({"competitor_id": cid, "competitor": names[cid], "status": status,
+                         "url": verified[0]["url"] if verified else "", "reason": reason})
+        return pd.DataFrame(rows, columns=["competitor_id", "competitor", "status", "url", "reason"])
+
+    @staticmethod
+    def _price_selection(selection, scope: dict) -> list[list[str]]:
+        if selection is None:
+            return [[cid, ean] for cid in scope["competitors"] for ean in scope["eans"]]
+        selected = []
+        for item in selection:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise PilotError("Cada selección debe contener un competidor y un EAN")
+            cid, ean = item
+            if not isinstance(cid, str) or not isinstance(ean, str):
+                raise PilotError("Competidor/EAN de selección no válido")
+            try:
+                normalized = normalize_gtin(ean)
+            except ValueError as exc:
+                raise PilotError("EAN de selección no válido") from exc
+            if normalized != ean or cid not in scope["competitors"] or ean not in scope["eans"]:
+                raise PilotError("La selección contiene un EAN o competidor fuera del piloto")
+            selected.append([cid, ean])
+        if not selected:
+            raise PilotError("Seleccione al menos una combinación EAN × competidor")
+        if len(set(map(tuple, selected))) != len(selected):
+            raise PilotError("La selección contiene combinaciones duplicadas")
+        ean_order = {ean: index for index, ean in enumerate(scope["eans"])}
+        competitor_order = {cid: index for index, cid in enumerate(scope["competitors"])}
+        return sorted(selected, key=lambda pair: (competitor_order[pair[0]], ean_order[pair[1]]))
+
     def run(self, *, resume: bool = False, search=None, operation: str = "prices",
             selection=None) -> int:
         from price_web import WebPriceSearch
@@ -230,6 +287,7 @@ class PricePilot:
                     discovery_preview = PilotDiscovery(self.store).preview(selection)
                     if not discovery_preview["effective"]:
                         raise PilotError("No hay trabajos pendientes autorizados en la selección")
+                price_selection = self._price_selection(selection, scope) if operation == "prices" else None
                 with self.store._connect() as connection, connection:
                     last = connection.execute("""SELECT * FROM pilot_runs
                         WHERE status IN ('running','interrupted') ORDER BY id DESC LIMIT 1""").fetchone()
@@ -266,6 +324,26 @@ class PricePilot:
                             if any(cid not in scope["competitors"] or ean not in scope["eans"]
                                    for cid, ean in saved):
                                 raise PilotError("La cola contiene trabajos fuera del alcance persistido")
+                        else:
+                            saved = json.loads(last["selection"] or "[]")
+                            if not saved:
+                                saved = [[r["competitor_id"], r["ean"]] for r in connection.execute(
+                                    "SELECT DISTINCT competitor_id,ean FROM pilot_jobs WHERE run_id=? ORDER BY id",
+                                    (run_id,))]
+                                connection.execute("UPDATE pilot_runs SET selection=? WHERE id=?",
+                                                   (json.dumps(saved), run_id))
+                            if selection is not None and price_selection != saved:
+                                raise PilotError("La selección original de la actualización es inmutable")
+                            job_pairs = [[r["competitor_id"], r["ean"]] for r in connection.execute(
+                                "SELECT DISTINCT competitor_id,ean FROM pilot_jobs WHERE run_id=? ORDER BY id",
+                                (run_id,))]
+                            in_scope_pairs = {(cid, ean) for cid, ean in map(tuple, job_pairs)
+                                              if cid in scope["competitors"] and ean in scope["eans"]}
+                            if set(map(tuple, saved)) != in_scope_pairs:
+                                raise PilotError("La cola de actualización no coincide con su selección persistida")
+                            if any(cid not in scope["competitors"] or ean not in scope["eans"]
+                                   for cid, ean in saved):
+                                raise PilotError("La cola contiene trabajos fuera del alcance persistido")
                         connection.execute("UPDATE pilot_jobs SET status='pending' WHERE run_id=? AND status='running'",
                                            (run_id,))
                         connection.execute("UPDATE pilot_runs SET status='running' WHERE id=?", (run_id,))
@@ -286,15 +364,18 @@ class PricePilot:
                                 connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
                                                    (run_id, cid, ean))
                         else:
-                            run_id = connection.execute("""INSERT INTO pilot_runs(started_at,status,scope,competitors,operation)
-                                VALUES(?,'running',?,?,?)""",
-                                (stamp(), json.dumps(scope["eans"]), json.dumps(scope["competitors"]), operation)).lastrowid
-                            for cid in scope["competitors"]:
+                            selected_competitors = list(dict.fromkeys(cid for cid, _ in price_selection))
+                            run_id = connection.execute("""INSERT INTO pilot_runs(
+                                started_at,status,scope,competitors,operation,selection,selection_request)
+                                VALUES(?,'running',?,?,?,?,?)""",
+                                (stamp(), json.dumps(scope["eans"]), json.dumps(scope["competitors"]), operation,
+                                 json.dumps(price_selection), json.dumps(price_selection))).lastrowid
+                            for cid in selected_competitors:
                                 connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)",
                                                    (run_id, cid))
-                                for ean in scope["eans"]:
-                                    connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
-                                                       (run_id, cid, ean))
+                            for cid, ean in price_selection:
+                                connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
+                                                   (run_id, cid, ean))
                     ean_placeholders = ",".join("?" for _ in scope["eans"])
                     cid_placeholders = ",".join("?" for _ in scope["competitors"])
                     connection.execute(f"""UPDATE pilot_jobs SET status='cancelled',outcome='pilot_excluded',
@@ -303,7 +384,16 @@ class PricePilot:
                                        (run_id, *scope["eans"], *scope["competitors"]))
                 token = _execution.set((str(self.store.database_path), run_id))
                 try:
-                    self._execute(run_id, scope, search or WebPriceSearch(self.store), operation=operation)
+                    verified_only = False
+                    if operation == "prices":
+                        with self.store._connect() as connection:
+                            saved = connection.execute(
+                                "SELECT selection FROM pilot_runs WHERE id=?", (run_id,)).fetchone()
+                        saved_pairs = set(map(tuple, json.loads(saved["selection"] or "[]")))
+                        full_scope_pairs = {(cid, ean) for cid in scope["competitors"] for ean in scope["eans"]}
+                        verified_only = bool(saved_pairs and saved_pairs != full_scope_pairs)
+                    self._execute(run_id, scope, search or WebPriceSearch(self.store), operation=operation,
+                                  verified_only=verified_only)
                 except BaseException as exc:
                     # Persist interruption even on cancellation; never hide or downgrade the exception.
                     with self.store._connect() as connection, connection:
@@ -318,7 +408,8 @@ class PricePilot:
         except Timeout as exc:
             raise PilotError("Ya hay otra ejecución del piloto") from exc
 
-    def _execute(self, run_id: int, scope: dict, search, *, operation: str = "prices") -> None:
+    def _execute(self, run_id: int, scope: dict, search, *, operation: str = "prices",
+                 verified_only: bool = False) -> None:
         from price_web_fetch import WebFetcher
         from price_discovery import PilotDiscovery
 
@@ -362,12 +453,9 @@ class PricePilot:
                         VALUES(?,?,?,?,?,?)""", (run_id, cid, job["ean"], url, f"HTTP {result[0]}", stamp()))
                 return result
 
-        if operation == "discovery":
-            with self.store._connect() as connection:
-                run_competitors = {row[0] for row in connection.execute(
-                    "SELECT DISTINCT competitor_id FROM pilot_jobs WHERE run_id=?", (run_id,))}
-        else:
-            run_competitors = set(scope["competitors"])
+        with self.store._connect() as connection:
+            run_competitors = {row[0] for row in connection.execute(
+                "SELECT competitor_id FROM pilot_budgets WHERE run_id=?", (run_id,))}
         for cid, limits in scope["competitors"].items():
             if cid not in run_competitors:
                 continue
@@ -396,9 +484,14 @@ class PricePilot:
                             or config["access_status"] != "robots_allowed":
                         self._finish(job, "not_allowed", "Sin autorización y comprobación de acceso")
                         continue
-                    if operation == "prices" and not search._indexed(cid, job["ean"]):
-                        self._finish(job, "not_found", "Ficha no localizada")
-                        continue
+                    if operation == "prices":
+                        indexed = search._indexed(cid, job["ean"])
+                        if not indexed:
+                            self._finish(job, "not_found", "Ficha no localizada")
+                            continue
+                        if verified_only and not any(row["status"] == "verified" for row in indexed):
+                            self._finish(job, "not_found", "No hay ficha confirmada para actualizar")
+                            continue
                     with self.store._connect() as connection, connection:
                         connection.execute("UPDATE pilot_jobs SET status='running' WHERE id=?", (job["id"],))
                     if operation == "discovery":
@@ -412,7 +505,8 @@ class PricePilot:
                                 budget = connection.execute("SELECT * FROM pilot_budgets WHERE run_id=? AND competitor_id=?",
                                                             (run_id, cid)).fetchone()
                         continue
-                    outcome = search.locate(job["ean"], cid, fetcher=fetcher)
+                    outcome = search.locate(job["ean"], cid, fetcher=fetcher,
+                                            verified_only=verified_only)
                     validation: dict = {}
                     reasons = self._record(search, search.config(cid), outcome, validation=validation)
                     observation = asdict(outcome)

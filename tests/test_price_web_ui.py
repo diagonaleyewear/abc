@@ -24,8 +24,10 @@ def ui(tmp_path, monkeypatch):
     return site, store, search, cid
 
 
-def _run():
+def _run(admin_section="Competidores y ejecuciones"):
     app = AppTest.from_string(SCRIPT).run(timeout=90)
+    if admin_section != "Competidores y ejecuciones":
+        app.selectbox(key="price_admin_section").set_value(admin_section).run(timeout=90)
     assert not app.exception
     return app
 
@@ -45,7 +47,7 @@ def _frames(app):
 
 
 def test_finder_is_present_and_search_is_disabled_without_text(ui):
-    app = _run()
+    app = _run("Búsqueda manual")
     assert any(s.value == "Buscar precios en la competencia" for s in app.subheader)
     assert app.button(key="web_search_button").disabled
 
@@ -54,7 +56,7 @@ def test_stored_search_by_ean_shows_price_and_percentage_against_vytria(ui):
     site, store, search, cid = ui
     search.check_access(cid)
     search.run(list(PRADA), [cid])
-    app = _search(_run(), "8056597875349", competitors=["Visio Factory"])
+    app = _search(_run("Búsqueda manual"), "8056597875349", competitors=["Visio Factory"])
     assert not app.exception and not app.error
     frame = next(f for f in _frames(app) if "Diferencia %" in f.columns and "Competidor" in f.columns)
     row = frame.iloc[0]
@@ -64,32 +66,32 @@ def test_stored_search_by_ean_shows_price_and_percentage_against_vytria(ui):
 
 def test_stored_search_by_model_and_colour_and_normalised_reference(ui):
     site, store, search, cid = ui
-    app = _search(_run(), "PR 27ZS 16K08Z")
+    app = _search(_run("Búsqueda manual"), "PR 27ZS 16K08Z")
     frame = next(f for f in _frames(app) if "Diferencia %" in f.columns)
     assert set(frame["EAN"]) == {"8056597875349"}
-    app = _search(_run(), "BOTTEGA VENETA BV1274S 005")
+    app = _search(_run("Búsqueda manual"), "BOTTEGA VENETA BV1274S 005")
     assert set(next(f for f in _frames(app) if "Diferencia %" in f.columns)["EAN"]) == {"0889652637075"}
-    app = _search(_run(), "BV1274S 005")
+    app = _search(_run("Búsqueda manual"), "BV1274S 005")
     assert set(next(f for f in _frames(app) if "Diferencia %" in f.columns)["EAN"]) == {"0889652637075"}
 
 
 def test_unknown_reference_reports_no_match_without_querying(ui):
     site, *_ = ui
-    app = _search(_run(), "REFERENCIA INEXISTENTE 999")
+    app = _search(_run("Búsqueda manual"), "REFERENCIA INEXISTENTE 999")
     assert any("Sin coincidencias" in w.value for w in app.warning)
     assert site.calls == []
 
 
 def test_web_mode_requires_a_bounded_competitor_selection(ui):
     site, *_ = ui
-    app = _search(_run(), "8056597875349", mode="Consultar webs")
+    app = _search(_run("Búsqueda manual"), "8056597875349", mode="Consultar webs")
     assert any("Elija entre 1 y 3" in e.value for e in app.error)
     assert site.calls == []
 
 
 def test_web_mode_refuses_sites_whose_access_was_not_checked(ui):
     site, *_ = ui
-    app = _search(_run(), "8056597875349", mode="Consultar webs", competitors=["Visio Factory"])
+    app = _search(_run("Búsqueda manual"), "8056597875349", mode="Consultar webs", competitors=["Visio Factory"])
     frame = next(f for f in _frames(app) if "Resultado" in f.columns)
     assert frame.iloc[0]["Resultado"] == "No consultable" and site.calls == []
 
@@ -97,7 +99,8 @@ def test_web_mode_refuses_sites_whose_access_was_not_checked(ui):
 def test_web_mode_queries_known_page_and_filters_out_of_stock(ui):
     site, store, search, cid = ui
     search.check_access(cid)
-    app = _search(_run(), "PR 65ZS ZVN09T", mode="Consultar webs", competitors=["Visio Factory"], web_only_stock=True)
+    app = _search(_run("Búsqueda manual"), "PR 65ZS ZVN09T", mode="Consultar webs",
+                   competitors=["Visio Factory"], web_only_stock=True)
     result = next(f for f in _frames(app) if "Resultado" in f.columns)
     assert result.iloc[0]["Resultado"] == "Coincidencia exacta" and result.iloc[0]["Precio"] == 187.0
     assert result.iloc[0]["Stock"] == "unavailable"
@@ -110,11 +113,11 @@ def test_web_mode_stops_after_a_block_and_reports_it(ui):
     site, store, search, cid = ui
     search.check_access(cid)
     site.add(url_of(PRADA["8056597875349"]["slug"]), "", status=429)
-    app = _search(_run(), "8056597875349", mode="Consultar webs", competitors=["Visio Factory"])
+    app = _search(_run("Búsqueda manual"), "8056597875349", mode="Consultar webs", competitors=["Visio Factory"])
     result = next(f for f in _frames(app) if "Resultado" in f.columns)
     assert result.iloc[0]["Resultado"] == "Bloqueado por el sitio"
     calls = len(site.calls)
-    app = _search(_run(), "8056597875349", mode="Consultar webs", competitors=["Visio Factory"])
+    app = _search(_run("Búsqueda manual"), "8056597875349", mode="Consultar webs", competitors=["Visio Factory"])
     assert len(site.calls) == calls
 
 

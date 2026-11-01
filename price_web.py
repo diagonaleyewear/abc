@@ -550,7 +550,7 @@ class WebPriceSearch:
                 "SELECT url FROM competitor_product_urls WHERE competitor_id=? AND ean=?", (competitor_id, ean))}
 
     def locate(self, ean: str, competitor_id: str, *, fetcher: WebFetcher | None = None,
-               persist_index: bool = True) -> Outcome:
+               persist_index: bool = True, verified_only: bool = False) -> Outcome:
         """Find and verify the competitor's page for one EAN. Does not record the offer."""
         self._pilot_guard(ean, competitor_id)
         product, config = self._product(ean), self.config(competitor_id)
@@ -563,7 +563,7 @@ class WebPriceSearch:
         from price_pilot import pilot_scope
 
         strategies = ["index"]
-        if pilot_scope(self.store) is None and config["search_mode"] != "known":
+        if not verified_only and pilot_scope(self.store) is None and config["search_mode"] != "known":
             allowed = config["locate_strategy"].split(",")
             if "site_search" in allowed and config["search_verified"]:
                 strategies.append("site_search")
@@ -635,7 +635,8 @@ class WebPriceSearch:
                         if found.state in {"probable", "rejected"} and (
                                 best is None or found.state == "probable"):
                             best = found
-            candidates = self._candidate_stream(product, config, fetcher, strategies)
+            candidates = self._candidate_stream(product, config, fetcher, strategies,
+                                                verified_only=verified_only)
             for origin, url in candidates:
                 if url in tried:
                     continue
@@ -740,12 +741,15 @@ class WebPriceSearch:
             result.detail += f"; hay {len(selected)} tarjetas compatibles entre {total} resultados"
         return result
 
-    def _candidate_stream(self, product: dict, config: dict, fetcher: WebFetcher, strategies: list[str]):
+    def _candidate_stream(self, product: dict, config: dict, fetcher: WebFetcher, strategies: list[str],
+                          *, verified_only: bool = False):
         competitor_id = config["competitor_id"]
         known = self._known_urls(competitor_id, product["ean"])
         for method in strategies:
             if method == "index":
                 for row in self._indexed(competitor_id, product["ean"]):
+                    if verified_only and row["status"] != "verified":
+                        continue
                     yield method, row["url"]
             elif method == "sitemap":
                 for url in self._sitemap_candidates(product, config, fetcher):

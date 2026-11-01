@@ -219,7 +219,7 @@ def test_comparator_page_renders_without_external_services(tmp_path, monkeypatch
     ).run()
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs] == ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"]
+    assert [tab.label for tab in app.tabs] == ["Resumen", "Productos", "Pendientes", "Administración"]
 
 
 def test_comparator_import_report_survives_page_rerun(tmp_path, monkeypatch) -> None:

@@ -218,6 +218,7 @@ def _run():
 
 
 def _search(app, text):
+    app.selectbox(key="price_admin_section").set_value("Búsqueda manual").run(timeout=90)
     app.text_input(key="web_text").set_value(text).run(timeout=90)
     app.radio(key="web_mode").set_value("Almacenados")
     app.button(key="web_search_button").click()

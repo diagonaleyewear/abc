@@ -294,6 +294,98 @@ def test_edel_search_cards_are_saved_for_review_without_pdp_or_offer_requests(pi
         assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == before_offers
 
 
+def test_edel_discard_preserves_confirmed_product_url_and_is_idempotent(pilot):
+    _, store, _, _, _, _ = pilot
+    cid = next(row["id"] for row in store.competitors().to_dict("records")
+               if row["name"] == "Edel-Optics")
+    ean = "8056597877329"
+    discovery = PilotDiscovery(store)
+    scope = pilot_scope(store)
+    now = "2026-10-31T12:00:00+00:00"
+    with store._connect() as connection, connection:
+        run_id = connection.execute("""INSERT INTO pilot_runs(
+            started_at,status,scope,competitors,operation,selection,selection_request)
+            VALUES(?,'done',?,?,'discovery','[]','[]')""",
+                                    (now, json.dumps(scope["eans"]), json.dumps(scope["competitors"]))).lastrowid
+        generic = connection.execute("""INSERT INTO pilot_url_candidates(
+            competitor_id,ean,url,run_id,state,method,evidence,identity,checked_at)
+            VALUES(?,?,?,?,'pending_validation','ean','{}','{}',?)""",
+                                     (cid, ean, "https://www.edel-optics.es/search?q=" + ean, run_id, now)).lastrowid
+        confirmed = connection.execute("""INSERT INTO pilot_url_candidates(
+            competitor_id,ean,url,run_id,state,method,evidence,identity,checked_at)
+            VALUES(?,?,?,?,'confirmed','ean','{}','{}',?)""",
+                                       (cid, ean, "https://www.edel-optics.es/PR-65ZS-ZVN09T-de-Prada.html",
+                                        run_id, now)).lastrowid
+        connection.execute("""INSERT INTO competitor_product_urls(
+            competitor_id,ean,url,match_status,status,verified_at,source)
+            VALUES(?,?,?,'exact_match','verified',?,'user')""",
+                           (cid, ean, "https://www.edel-optics.es/PR-65ZS-ZVN09T-de-Prada.html", now))
+        connection.execute("""INSERT INTO pilot_discovery(
+            competitor_id,ean,run_id,state,method,detail,updated_at)
+            VALUES(?,?,?,'confirmed','ean','Ficha confirmada',?)""", (cid, ean, run_id, now))
+
+    assert (generic, confirmed) == (1, 2)
+    discovery.review(generic, accept=False, note="Se descarta la URL genérica de búsqueda")
+    discovery.review(generic, accept=False, note="Revisión repetida")
+
+    candidates = discovery.candidates().set_index("id")
+    assert candidates.loc[generic, "state"] == "discarded"
+    assert candidates.loc[generic, "review_note"] == "Se descarta la URL genérica de búsqueda"
+    assert candidates.loc[generic, "reviewed_at"]
+    assert candidates.loc[confirmed, "state"] == "confirmed"
+    coverage = discovery.coverage().query("ean == @ean and competitor_id == @cid").iloc[0]
+    assert coverage.state == "confirmed"
+    assert coverage.url.endswith("/PR-65ZS-ZVN09T-de-Prada.html")
+    assert discovery.pending().isdisjoint({(cid, ean)})
+
+
+def test_discarding_last_candidate_does_not_claim_product_is_missing(pilot):
+    service, store, search, site, cid, _ = pilot
+    configure(search, cid)
+    only_pending(store, cid, [EAN])
+    route(site, EAN, gtin="8056597875226")
+    service.enable()
+    discovery = PilotDiscovery(store)
+    run_all_pending(discovery, search)
+    candidate = discovery.candidates().iloc[0]
+    assert candidate.state == "pending_validation"
+
+    discovery.review(int(candidate.id), accept=False, note="No se pudo verificar esta ficha")
+
+    coverage = discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0]
+    assert coverage.state == "pending"
+    assert "no se ha determinado" in coverage.detail
+    assert int(coverage.candidates) == 0
+
+
+def test_pending_candidate_ui_exposes_discard_and_validates_reviewer_note(pilot, monkeypatch):
+    import app_pages.price_comparator as page
+
+    service, store, search, site, cid, _ = pilot
+    configure(search, cid)
+    only_pending(store, cid, [EAN])
+    route(site, EAN, gtin="8056597875226")
+    service.enable()
+    discovery = PilotDiscovery(store)
+    run_all_pending(discovery, search)
+    monkeypatch.setenv("PRICE_COMPARATOR_DB_PATH", str(store.database_path))
+    monkeypatch.setattr(page, "WebPriceSearch", lambda _: search)
+
+    app = AppTest.from_string("from app_pages.price_comparator import render_price_comparator_page\n"
+                              "render_price_comparator_page()").run(timeout=60)
+    assert not app.exception
+    assert app.selectbox(key="pending_candidate").value == int(discovery.candidates().iloc[0].id)
+    assert app.button(key="discovery_discard_candidate").label == "Descartar candidato"
+    app.button(key="discovery_discard_candidate").click().run(timeout=60)
+    assert any("Indique quién revisa" in error.value for error in app.error)
+
+    app.text_input(key="discovery_review_note").set_value("Revisor: descarta la ficha ambigua")
+    app.button(key="discovery_discard_candidate").click().run(timeout=60)
+    assert not app.exception
+    assert any("Candidato descartado" in success.value for success in app.success)
+    assert discovery.candidates().iloc[0].state == "discarded"
+
+
 def test_selection_rejects_products_and_competitors_outside_pilot(pilot):
     _, store, _, _, cid, extras = pilot
     discovery = PilotDiscovery(store)
@@ -637,7 +729,7 @@ def test_review_revalidates_catalogue_and_conflicts_are_never_overridden(pilot):
     assert search._indexed(cid, EAN) == []
 
 
-def test_discard_retry_same_url_keeps_prior_evidence_and_new_candidate(pilot):
+def test_discard_retry_same_url_keeps_prior_evidence_without_reopening_candidate(pilot):
     service, store, search, site, cid, _ = pilot
     configure(search, cid)
     only_pending(store, cid, [EAN])
@@ -650,8 +742,9 @@ def test_discard_retry_same_url_keeps_prior_evidence_and_new_candidate(pilot):
     discovery.reset(EAN, cid, note="Revisor autoriza repetir tras revisar")
     run_all_pending(discovery, search)
     rows = discovery.candidates()
-    assert len(rows) == 2 and set(rows.state) == {"discarded", "candidate_found"}
+    assert len(rows) == 1 and rows.iloc[0].state == "discarded"
     assert rows.set_index("id").loc[old, "review_note"] == "Revisor descarta temporalmente"
+    assert discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == "pending"
 
 
 def test_verified_market_overrides_unverified_legacy_value_without_mutation(pilot):

@@ -281,6 +281,6 @@ def test_page_shows_insufficient_data_message_and_renders_with_data(tmp_path, mo
     assert app.metric[0].value == "0 / 1"  # the shared period filter excludes the 10-day-old offer
     assert history_windows[-1] == (7, 30)  # chart window shrinks; per-observation freshness stays configured
     assert any("Datos insuficientes para medir competitividad" in item.value for item in app.info)
-    assert app.selectbox(key="price_detail_ean").value == EAN
+    assert app.selectbox(key="products_selected_ean").value == EAN
     comparison = next(frame.value for frame in app.dataframe if "Uso en comparación" in frame.value.columns)
     assert comparison.iloc[0]["Uso en comparación"] == "Comparable"
