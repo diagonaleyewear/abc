@@ -140,9 +140,8 @@ def test_price_verification_dedup_and_history_survives_error(pilot):
     ({"pretax": None}, "IVA"),
     ({"market": None}, "Mercado"),
     ({"currency": "USD"}, "Moneda"),
-    ({"name": "Prada PR 27ZS WRONG 54-21"}, "Color"),
+    ({"name": "Prada PR 27ZS ZVN09T 54-21"}, "Color"),
     ({"brand": "Gucci"}, "Marca"),
-    ({"gtin": None}, "EAN"),
 ])
 def test_noncomparable_observations_visible(pilot, override, reason):
     service, store, search, site, cid, extras = pilot
@@ -155,6 +154,19 @@ def test_noncomparable_observations_visible(pilot, override, reason):
     assert reason.lower() in row.detail.lower(), row.detail
     assert json.loads(row.observation)["page"]
     assert store.dashboard()[1]["confirmed"] == 0
+
+
+def test_reference_match_without_published_ean_remains_comparable_in_pilot(pilot):
+    service, store, search, site, cid, _ = pilot
+    known(pilot, gtin=None)
+    service.enable()
+    service.run(search=search)
+    frame, _ = service.results()
+    row = frame.loc[(frame.ean == REQUIRED_EANS[0]) & (frame.competitor_id == cid)].iloc[0]
+    validation = json.loads(row.observation)["validation"]
+    assert row.comparable == 1
+    assert validation["verified_ean"] is False
+    assert validation["listing"]["colors"] == ["16K08Z"]
 
 
 @pytest.mark.parametrize("status,body", [(403, ""), (429, ""), (200, "<html>captcha</html>")])

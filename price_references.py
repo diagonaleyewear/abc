@@ -3,8 +3,9 @@
 Pure functions, no network and no database: they only decide *what* to look for and *whether* a candidate
 page/feed row is the catalogue product. Fetching stays in the authorised connectors.
 
-An exact published EAN makes calibre informational, never model or colour. Without verified EAN,
-brand + model + colour + calibre must be confirmed. Ambiguous evidence stays out of comparisons.
+An exact published EAN makes calibre informational, never model or colour. Without verified EAN, brand + model +
+colour code must be confirmed. Calibre is informational and does not change identity. Ambiguous evidence stays out
+of comparisons.
 """
 from __future__ import annotations
 
@@ -248,7 +249,7 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
                   "listing": {"ean": ean, "brands": sorted(brands), "models": sorted(models),
                               "colors": sorted(colors), "calibers": sorted(calibers)},
                   "verified_ean": verified_ean, "caliber_comparison": caliber_state,
-                  "caliber_informational": verified_ean}
+                  "caliber_informational": True}
     reasons = []
     observations = []
     if verified_ean and caliber_state != "equal":
@@ -263,30 +264,28 @@ def classify(product: Mapping[str, Any], candidate: Mapping[str, Any]) -> MatchR
 
     if published and not ean:
         reasons.append("EAN publicado no válido: no se aplica la excepción de calibre")
-    if ean and ean != product.get("ean"):
-        reasons.append(f"EAN publicado distinto: {ean}")
-        return result(REJECTED)
     if candidate.get("ambiguous") or any(ref.ambiguous for ref in references):
         reasons.append("Identificación ambigua: requiere revisión")
         return result(PROBABLE)
+    identity_fields = [(own_brand, brands), (own_model, models), (own_color, colors)]
+    contradictions = any(found and found != {expected} for expected, found in identity_fields)
     for name, expected, found in [("Marca", own_brand, brands), ("Modelo", own_model, models),
                                   ("Color", own_color, colors)]:
-        if not expected or found != {expected}:
-            label = f"Distinto {name.lower()}" if expected and found else f"{name} no confirmado"
-            reasons.append(f"{label}: catálogo {expected or 'desconocido'}, "
+        if found and found != {expected}:
+            reasons.append(f"Distinto {name.lower()}: catálogo {expected or 'desconocido'}, "
+                           f"ficha {', '.join(sorted(found))}")
+        elif not verified_ean and (not expected or not found):
+            reasons.append(f"{name} no confirmado: catálogo {expected or 'desconocido'}, "
                            f"ficha {', '.join(sorted(found)) or 'desconocido'}")
-    if reasons and any((found and found != {expected}) for expected, found in
-                       [(own_brand, brands), (own_model, models), (own_color, colors)]):
+    if ean and ean != product.get("ean"):
+        reasons.insert(0, f"EAN publicado distinto: {ean}; revisión manual obligatoria")
+        return result(REJECTED if contradictions else PROBABLE)
+    if contradictions:
         return result(PROBABLE if verified_ean else REJECTED)
-    if not verified_ean and (caliber_state != "equal" or contradictory_calibers):
-        reasons.append("Distinto calibre sin EAN verificado" if caliber_state == "different" else
-                       f"Calibre no confirmado sin EAN verificado: {caliber_state}")
-        if caliber_state == "different" or contradictory_calibers:
-            return result(REJECTED)
     if reasons:
         return result(PROBABLE)
     reasons.append("EAN publicado idéntico; marca, modelo y código de color confirmados" if verified_ean else
-                   "Marca, modelo, color y calibre coinciden")
+                   "Marca, modelo y código de color coinciden")
     return result(EXACT, "ean" if verified_ean else "reference")
 
 

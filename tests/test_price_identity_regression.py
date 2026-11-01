@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from price_pilot import REQUIRED_EANS, SAMPLE_EANS, pilot_scope
-from price_references import EXACT, PROBABLE, REJECTED, classify, compare_calibers, parse_reference
+from price_references import EXACT, PROBABLE, classify, compare_calibers, parse_reference
 from tests.test_price_pilot import known
 from tests.web_fixtures import prada_page
 
@@ -100,10 +100,8 @@ def test_production_values_missing_caliber_comparable_by_exact_ean(pilot):
     ({"title": "Prada Symbole PR 27ZS ZVN09T 54-21 Negro", "identifiers": ["PR27ZS"]}, "Color"),
     ({"title": "Prada Symbole PR26ZS 16K08Z 54-21 Negro", "identifiers": ["PR26ZS"]}, "Modelo"),
     ({"published": "8056597875226"}, "EAN"),
-    ({"published": ""}, "EAN"),
     ({"published": "invalid"}, "EAN"),
     ({"color": "ZVN09T"}, "Color"),
-    ({"title": "Prada Symbole PR27ZS Negro", "identifiers": ["PR27ZS"]}, "Color"),
     ({"ambiguous": True}, "Coincidencia"),
     ({"identifiers": ["PR27ZS", "PR27ZS ZVN09T 54-21"]}, "Color"),
     ({"identifiers": ["PR26ZS 16K08Z 54-21"]}, "Modelo"),
@@ -121,6 +119,16 @@ def test_strict_identity_and_commercial_rejections(pilot, fields, reason):
     assert not validation["accepted"]
     assert pilot[1].dashboard()[1]["confirmed"] == 0
     assert pilot[3].calls == []
+
+
+def test_reference_identity_without_ean_can_be_comparable_after_exact_match(pilot):
+    empty_caliber(pilot)
+    reasons, validation = check(pilot, exact_production_page(pilot, published=""))
+    assert reasons == []
+    assert validation["accepted"]
+    assert not validation["verified_ean"]
+    assert validation["listing"]["models"] == ["PR27ZS"]
+    assert validation["listing"]["colors"] == ["16K08Z"]
 
 
 def test_twenty_real_sample_references_still_parse_without_scope_change():
@@ -170,8 +178,8 @@ def test_end_to_end_title_audit_persisted_in_results(pilot):
 
 
 @pytest.mark.parametrize("published,caliber,status", [
-    (EAN, "", EXACT), (EAN, "55-21", EXACT), ("8056597875226", "54-21", REJECTED),
-    ("", "", PROBABLE), ("", "55-21", REJECTED), ("", "54-21", EXACT),
+    (EAN, "", EXACT), (EAN, "55-21", EXACT), ("8056597875226", "54-21", PROBABLE),
+    ("", "", EXACT), ("", "55-21", EXACT), ("", "54-21", EXACT),
     ("invalid", "54-21", PROBABLE),
 ])
 def test_shared_rule_without_pilot(published, caliber, status):
@@ -179,7 +187,7 @@ def test_shared_rule_without_pilot(published, caliber, status):
     match = classify(product, {"ean_published": published, "brand": "Prada", "model": "PR27ZS",
                                "color": "16K08Z", "caliber": caliber})
     assert match.status == status
-    assert match.normalized["caliber_informational"] is (published == EAN)
+    assert match.normalized["caliber_informational"]
     if published == EAN and caliber != "54-21":
         assert match.observations
 

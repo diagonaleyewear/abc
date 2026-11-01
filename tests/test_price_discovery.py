@@ -1,5 +1,6 @@
 """Supervised discovery and commercial evidence use only temporary databases and simulated HTTP."""
 import json
+from pathlib import Path
 from urllib.parse import quote
 
 import pytest
@@ -243,6 +244,56 @@ def test_edel_optics_selected_ean_creates_one_search_job(pilot):
     assert store.dashboard()[1]["confirmed"] == 0
 
 
+def test_edel_search_cards_are_saved_for_review_without_pdp_or_offer_requests(pilot):
+    service, store, search, site, _, _ = pilot
+    cid = next(row["id"] for row in service.competitors() if row["name"] == "Edel-Optics")
+    ean = "8056597877329"
+    base = search.config(cid)["site_url"].rstrip("/")
+    query_url = base + "/B%C3%BAsqueda.html?query=" + ean
+    fixture = Path(__file__).parent / "fixtures" / "edel_optics_search_results.html"
+    search.update_config(cid, locate_strategy="site_search", search_mode="ean",
+                         search_url_template=base + "/B%C3%BAsqueda.html?query={query}",
+                         search_verified=True, search_evidence="Offline fixture test; no live verification",
+                         terms_reviewed=True, terms_note="Autorización del test",
+                         access_status="robots_allowed", tax_policy="included")
+    only_pending(store, cid, [ean])
+    site.add(base + "/robots.txt", ROBOTS_OK)
+    site.add(query_url, fixture.read_text(encoding="utf-8"))
+    service.enable()
+    before_scope = pilot_scope(store)
+    before_commerce = commerce(store)
+    with store._connect() as connection:
+        before_offers = connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0]
+
+    discovery = PilotDiscovery(store)
+    run_id = discovery.run(selection=[(cid, ean)], search=search)
+    candidate = discovery.candidates().query("ean == @ean and competitor_id == @cid").iloc[0]
+    evidence = json.loads(candidate.evidence)
+
+    assert candidate.state == "candidate_found"
+    assert evidence["url"] == "https://www.edel-optics.es/PR-65ZS-ZVN09T-de-Prada.html"
+    assert evidence["page"]["source_url"] == query_url
+    assert evidence["page"]["price"] == 187.99
+    assert evidence["page"]["availability"] == "unknown"
+    assert site.calls == [base + "/robots.txt", query_url]
+    with store._connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == before_offers
+        assert connection.execute("SELECT COUNT(*) FROM pilot_jobs WHERE run_id=?", (run_id,)).fetchone()[0] == 1
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert not connection.execute("PRAGMA foreign_key_check").fetchall()
+    after_commerce = commerce(store)
+    for table in ("products", "offers", "offer_checks", "vytria_prices", "vytria_price_history",
+                  "competitor_schedule", "price_pilot"):
+        assert after_commerce[table] == before_commerce[table]
+
+    discovery.review(int(candidate.id), accept=True, note="Modelo y código de color verificados manualmente")
+    assert search._indexed(cid, ean)[0]["status"] == "verified"
+    assert pilot_scope(store) == before_scope
+    assert site.calls == [base + "/robots.txt", query_url]
+    with store._connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == before_offers
+
+
 def test_selection_rejects_products_and_competitors_outside_pilot(pilot):
     _, store, _, _, cid, extras = pilot
     discovery = PilotDiscovery(store)
@@ -292,8 +343,7 @@ def test_supervised_search_exact_candidate_requires_approval_and_reuses_confirme
 
 
 @pytest.mark.parametrize("overrides,state", [
-    ({"gtin": None}, "pending_validation"),
-    ({"gtin": "8056597875226"}, "rejected"),
+    ({"gtin": "8056597875226"}, "pending_validation"),
     ({"name": "Prada PR27ZS ZVN09T 54-21"}, "rejected"),
     ({"name": "Prada PR26ZS 16K08Z 54-21"}, "rejected"),
     ({"extra_offer": {"price": "200", "priceCurrency": "EUR", "availability": "InStock"}}, "pending_validation"),
@@ -316,6 +366,24 @@ def test_wrong_or_doubtful_identity_is_never_approved(pilot, overrides, state):
     if state == "pending_validation":
         discovery.review(int(candidate.id), accept=False, note="Descartada por falta de evidencia")
         assert discovery.candidates().iloc[0].state == "discarded"
+
+
+def test_reference_match_without_ean_can_be_approved_without_creating_an_offer(pilot):
+    service, store, search, site, cid, _ = pilot
+    configure(search, cid)
+    only_pending(store, cid, [EAN])
+    route(site, EAN, gtin=None)
+    service.enable()
+    discovery = PilotDiscovery(store)
+    run_all_pending(discovery, search)
+    candidate = discovery.candidates().iloc[0]
+    assert candidate.state == "candidate_found"
+
+    discovery.review(int(candidate.id), accept=True, note="Modelo y código de color verificados")
+
+    assert search._indexed(cid, EAN)[0]["status"] == "verified"
+    with store._connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
 
 
 def test_automatic_fallback_only_uses_authorized_methods(pilot):
@@ -465,8 +533,8 @@ def test_sitemap_is_an_explicit_auto_alternative_not_external_search(pilot):
     assert site.calls == [BASE + "/robots.txt", BASE + "/sitemap.xml", url]
 
 
-@pytest.mark.parametrize("published,state", [("8056597875226", "candidate_found"), (None, "pending_validation"),
-                                            (EAN, "rejected")])
+@pytest.mark.parametrize("published,state", [("8056597875226", "candidate_found"), (None, "candidate_found"),
+                                            (EAN, "pending_validation")])
 def test_edel_optics_ean_strategy_suggestion_never_proves_published_gtin(pilot, published, state):
     service, store, search, site, _, _ = pilot
     cid = next(row["id"] for row in service.competitors() if row["name"] == "Edel-Optics")

@@ -126,10 +126,10 @@ def test_reference_only_observation_resolves_through_normalised_reference(db, tm
 
 
 @pytest.mark.parametrize("changes, expected", [
-    ({"ean_publicado": ""}, "exact_match"),                               # no EAN: model+colour+calibre suffice
-    ({"ean_publicado": "", "calibre": ""}, None),                         # no EAN and no calibre: not exact
+    ({"ean_publicado": ""}, "exact_match"),                               # no EAN: model+colour suffice
+    ({"ean_publicado": "", "calibre": ""}, "exact_match"),                # calibre is not identity
     ({"ean_publicado": "", "color": "ZVN09T"}, None),                     # other colour
-    ({"ean_publicado": "", "calibre": "55-21"}, None),                    # other calibre
+    ({"ean_publicado": "", "calibre": "55-21"}, "exact_match"),           # other calibre
     ({"ean_publicado": "8056597875226"}, None),                           # another product's EAN
 ])
 def test_exact_claims_are_verified(db, tmp_path, changes, expected):

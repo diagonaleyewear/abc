@@ -12,10 +12,10 @@ No habia una cola de descubrimiento autorizada ni revision de candidatos.
 Ademas, el extractor interpretaba el idioma/regionalizacion como mercado,
 pero una web en espanol no demuestra que venda en Espana.
 
-Se conserva la regla de identidad de PR #96, sin cambios en
-[price_references.py](../price_references.py). La localizacion reutiliza
-`classify`, el extractor, robots por ruta y la misma cola/barrera/bloqueo y
-presupuesto persistente del piloto. Es una operacion manual separada
+La localizacion reutiliza `classify`, el extractor, robots por ruta y la misma
+cola/barrera/bloqueo y presupuesto persistente del piloto. La identidad exacta
+es EAN sin contradicciones explicitas o, si no hay EAN, marca + modelo +
+codigo de color. El calibre no participa en la identidad. Es una operacion manual separada
 (`pilot_runs.operation=discovery`), no una excepcion a las consultas generales.
 La ejecucion comercial sigue usando solo el indice y registra ofertas con
 el importador existente.
@@ -80,20 +80,38 @@ su autorizacion. La migracion NO convierte plantillas antiguas en mecanismos
 verificados. Sitemap publico debe estar habilitado y ser alternativa
 autorizada en descubrimiento automatico. Nunca se invoca busqueda externa.
 
-### Edel-Optics
+### Edel-Optics: tarjetas de resultados
 
-El ejemplo EAN `8056597875226` -> sugerencia Prada PR 26ZS es compatible con
-la estrategia EAN si se configura y verifica un mecanismo publico soportado.
-Las fixtures prueban que una sugerencia sin EAN en el enlace puede ser un
-candidato, pero NO confirma el EAN de la ficha.
+La extraccion reconoce cada contenedor `eoViewsListviewItemClassic` como una
+tarjeta independiente. Conserva su URL de producto, marca, modelo, codigo de
+color, precio y moneda, y guarda por separado la URL de busqueda como fuente.
+Una pagina de resultados con varias tarjetas no se interpreta como una ficha
+unica ni sus metadatos/precios globales se asignan al EAN consultado.
 
-No se ha investigado su transporte real mediante nuevas consultas. No se
-inventan endpoints AJAX ni plantillas operativas. Un HTML dependiente de
-AJAX/JavaScript sin enlaces legibles se informa como mecanismo pendiente de
-revision, no como producto inexistente; los endpoints no se consultan.
-Un adaptador especifico futuro requiere evidencia y autorizacion previa.
-No hay navegador automatico, endpoints internos, proveedores externos,
-proxies, rotacion ni elusion de CAPTCHA.
+La fixture sanitizada aportada contiene Prada PR 65ZS/ZVN09T a 187,99 EUR,
+PR 27ZS/16K08Z a 243,50 EUR y PR 67ZS/1BC5W1 a 243,50 EUR. Para el EAN
+`8056597877329`, solo la tarjeta PR 65ZS/ZVN09T corresponde a la referencia;
+las otras dos no se mezclan ni se visitan. El fragmento no publica EAN ni
+disponibilidad: el EAN queda vacio y el stock `unknown`. Aunque incluye un
+`<p class="textPoint"></p>` vacio por tarjeta, la regla CSS recibida solo
+declara `color: green`; no incluye la regla que genera el punto ni una
+variacion HTML que codifique su estado. Por tanto, ni la clase vacia ni ese
+fragmento CSS prueban stock estatico por tarjeta. El extractor solo acepta
+disponibilidad explicita dentro de la tarjeta (por ejemplo, Schema.org
+`InStock`/`OutOfStock`); no hereda indicadores de la pagina ni de otras
+tarjetas. Para el HTML recibido conserva `unknown`, que no permite una oferta
+comparable. El descubrimiento solo guarda el candidato y su evidencia; no crea
+ofertas. Una URL solo se confirma tras aprobacion humana. Con EAN publicado
+contradictorio, la tarjeta queda pendiente de revision y no puede aprobarse
+como coincidencia exacta.
+
+La prueba usa exclusivamente la fixture HTML y transporte simulado. No se ha
+consultado el sitio en directo ni se declara verificado el mecanismo GET. El
+estado de acceso registrado sigue bloqueado por el 403 documentado; no se
+reintenta ni elude. No se inventan endpoints AJAX ni plantillas operativas.
+HTML dependiente de AJAX/JavaScript sin tarjetas o enlaces legibles se informa
+para revision, sin consultar endpoints. No hay navegador automatico,
+proveedores externos, proxies, rotacion ni elusion de CAPTCHA.
 
 ## Localizacion de fichas del piloto
 
@@ -105,8 +123,8 @@ Estados:
 
 - Ficha conocida: indice ya guardado (incluye URLs aportadas pendientes).
 - Pendiente de localizar: no hay URL ni intento terminado.
-- Candidato encontrado: ficha con EAN publicado e identidad exacta, aun SIN
-  aprobacion humana.
+- Candidato encontrado: EAN exacto o marca/modelo/codigo de color exactos;
+  aun SIN aprobacion humana.
 - Pendiente de validar: datos incompletos/ambiguos; no puede confirmarse.
 - Ficha confirmada: aprobada por una persona.
 - Producto no encontrado: consulta sin candidato valido (rechazos auditados).
@@ -142,9 +160,11 @@ Al iniciar:
    `classify` y conserva evidencia, contradicciones y consultas.
 6. Guarda candidatos, nunca ofertas ni URLs definitivas automaticamente.
 
-La aprobacion es offline: exige nota/revisor, vuelve a contrastar la identidad
-con el catalogo actual, EAN publicado exacto y ausencia de ambiguedad.
-Una revision humana NO puede dispensar atributos ausentes ni contradicciones.
+La aprobacion exige nota/revisor, vuelve a contrastar la identidad con el
+catalogo actual y requiere ausencia de ambiguedad. Puede aprobarse por EAN
+exacto sin contradicciones o por marca/modelo/codigo de color exactos cuando
+la ficha no publica EAN. Un EAN contradictorio o atributos insuficientes NO
+pueden aprobarse como coincidencia exacta.
 Solo guarda URL/identidad en `competitor_product_urls`; no guarda precio.
 El comparador volvera a extraer y validar datos comerciales.
 
@@ -193,6 +213,11 @@ No hay conversion/borrado de ofertas ni productos ni precios Vytria, ni
 cambios de identidad/calibre, seleccion o permisos. Los resultados de precios
 siguen mostrando la ultima operacion `prices`, no una localizacion.
 El audit UI muestra las ultimas 500 consultas; la base conserva todo el registro.
+
+La correccion del parser de tarjetas no requiere una migracion adicional:
+`source_url`, los campos extraidos y la evidencia se guardan en el JSON de
+candidato existente. Los registros anteriores se leen con los valores por
+defecto del modelo y no se reescriben.
 
 ## Procedimiento de uso (solo despues de autorizar despliegue)
 
@@ -252,6 +277,19 @@ Validacion local de ejecucion selectiva:
 - Docker/Podman no estan instalados localmente. La build Docker y smoke test
   de la imagen quedan para el workflow de CI de esta PR.
 
+Validacion de extraccion de tarjetas Edel-Optics en esta correccion:
+
+- Suite completa `tests/test_price*.py`: **442 passed, 1 skipped**.
+- Regresiones focalizadas de tarjetas, revision supervisada y conservacion de
+  ofertas: **6 passed**.
+- Lint CI de errores/imports, `py_compile`, diagnosticos Pylance y
+  `git diff --check`: correctos.
+- No se consulto Edel-Optics ni ningun competidor, no se leyo/escribio SQLite
+  de produccion y no se activo ningun planificador.
+- El workflow de PR debe ejecutar la suite CI y la build Docker; Docker no
+  esta disponible localmente. El workflow de `pull_request` construye la
+  imagen sin publicarla ni desplegarla.
+
 ## Riesgos, despliegue y rollback
 
 Riesgos: buscadores que requieren JS, formatos de paginas cambiantes y
@@ -259,6 +297,10 @@ mercados multiples quedan pendientes; los limites pueden impedir completar
 114 combinaciones en un intento. No se sustituyen por busquedas externas ni
 se amplian presupuestos automaticamente. Una confirmacion antigua no elimina
 la verificacion de identidad en la siguiente consulta comercial.
+
+Para la correccion de tarjetas Edel-Optics, rollback significa revertir solo
+el commit de codigo; no hay migracion nueva ni consultas o cambios de datos
+de produccion que deshacer.
 
 Despliegue autorizado: revisar CI/tests/build, detener workers, desactivar
 piloto, esperar bloqueo libre, respaldar SQLite mediante backup existente,

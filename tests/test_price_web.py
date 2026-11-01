@@ -166,7 +166,7 @@ def test_incompatible_market_is_rejected_by_the_importer(tmp_path):
 
 
 # --- identification ----------------------------------------------------------------------------
-def test_wrong_colour_and_wrong_caliber_are_not_exact(tmp_path):
+def test_wrong_colour_is_rejected_but_wrong_caliber_does_not_change_identity(tmp_path):
     site = FakeSite()
     store, search = make_search(tmp_path, site)
     cid = competitor_id(store)
@@ -179,10 +179,10 @@ def test_wrong_colour_and_wrong_caliber_are_not_exact(tmp_path):
         index_url(store, cid, ean, url)
     _open_access(search, cid)
     outcome = search.locate(ean, cid)
-    assert outcome.state in {"rejected", "probable"} and not outcome.priced
+    assert outcome.state == "exact" and outcome.url == other_caliber
     search.record(outcome)
     summary, _ = store.dashboard(30)
-    assert pd.isna(summary.set_index("ean").loc[ean, "competitor_min_eur"])
+    assert summary.set_index("ean").loc[ean, "competitor_min_eur"] == 210
 
 
 def test_exact_by_model_color_caliber_without_published_ean(tmp_path):
@@ -198,7 +198,7 @@ def test_exact_by_model_color_caliber_without_published_ean(tmp_path):
     assert outcome.state == "exact" and outcome.page.ean_published == ""
 
 
-def test_published_ean_of_another_product_is_rejected(tmp_path):
+def test_published_ean_of_another_product_requires_manual_review(tmp_path):
     site = FakeSite()
     store, search = make_search(tmp_path, site)
     cid = competitor_id(store)
@@ -207,7 +207,8 @@ def test_published_ean_of_another_product_is_rejected(tmp_path):
     site.add(url, prada_page(ean, gtin="8056597875226"))
     index_url(store, cid, ean, url)
     _open_access(search, cid)
-    assert search.locate(ean, cid).state == "rejected"
+    outcome = search.locate(ean, cid)
+    assert outcome.state == "probable" and outcome.reason == "ean_conflict"
 
 
 # --- discovery ---------------------------------------------------------------------------------
