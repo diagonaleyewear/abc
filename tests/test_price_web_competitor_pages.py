@@ -41,9 +41,8 @@ def test_real_structures_are_extracted(name, url, product, price, tax, market, c
         assert page.caliber == caliber
     match = classify(product, page.candidate())
     if name == "mia_burton":
-        # EAN alone does not confirm a colour code that the fixture never publishes.
-        assert match.status == "probable_match"
-        assert any("Color no confirmado" in reason for reason in match.reasons)
+        # An exact published EAN is sufficient when the page does not contradict it.
+        assert match.status == "exact_match"
     else:
         assert match.status == "exact_match"
 

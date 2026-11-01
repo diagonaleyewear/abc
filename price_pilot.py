@@ -460,8 +460,6 @@ class PricePilot:
         reasons = list(match.reasons) if match.status != EXACT else []
         if outcome.state != "exact" or page.ambiguous:
             reasons.append("Coincidencia no exacta")
-        if not normalized["verified_ean"]:
-            reasons.append("EAN no confirmado")
         identity_valid = not reasons
         if page.availability != "available":
             reasons.append("Sin stock" if page.availability == "unavailable" else "Stock desconocido")

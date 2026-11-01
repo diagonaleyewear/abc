@@ -1,4 +1,4 @@
-# Identidad del comparador y calibre informativo con EAN confirmado
+# Identidad del comparador: EAN o modelo y color
 
 ## Causa raiz demostrada
 
@@ -25,17 +25,18 @@ la razon por la que no bloquean. No se completan ni modifican dimensiones
 del catalogo. No se incorpora un formulario ni un proceso de confirmacion
 de calibre: ya no es necesario para este caso.
 
-Un EAN distinto rechaza la identidad, incluso si modelo, color y precio
-coinciden. Un EAN ausente o no valido no recibe la excepcion. Se conserva la
-via estricta de referencia completa (marca, modelo, color y calibre
-verificados) en el comparador general; el piloto sigue exigiendo EAN publicado.
+Sin EAN publicado, una coincidencia exacta requiere marca, modelo y codigo de
+color del fabricante. El calibre se conserva como dato descriptivo, pero no
+participa en la identidad ni bloquea una coincidencia; no sustituye el codigo
+de color.
 
-En ambas vias son imprescindibles marca, modelo y codigo de color correctos,
-sin evidencia contradictoria o ambigua. Un EAN solo no rellena esos atributos
-ni corrige contradicciones. Los nombres comerciales (`Negro`, `Nero`) nunca
-sustituyen un codigo de fabricante. Una ficha antigua de Mia Burton sin
-codigo publicado queda ahora en revision, aunque publique el EAN: es un
-endurecimiento intencional que conserva el requisito de color.
+Un EAN distinto nunca se acepta automaticamente. Si marca/modelo/color
+coinciden, el resultado queda probable para revision manual; si tambien hay
+contradicciones en esos atributos, se rechaza. Un EAN identico permite omitir
+campos no publicados, pero cualquier contradiccion explicita mantiene el caso
+en revision. Los nombres comerciales (`Negro`, `Nero`) nunca sustituyen un
+codigo de fabricante. Las referencias incompletas sin EAN quedan probables,
+no exactas.
 
 Precio positivo, moneda/mercado comparables, IVA confirmado y disponibilidad
 verificada siguen sujetos a las comprobaciones comerciales existentes. Una
@@ -60,10 +61,10 @@ coincidencia de identidad no garantiza una oferta comparable.
   [planificador](../price_scheduler.py): conservan la evidencia de identidad.
   Un precio sin cambios pasa por el importador antes de actualizar la ultima
   comprobacion; no puede ocultar un EAN/color/modelo incorrectos nuevos.
-- [Piloto](../price_pilot.py): usa la clasificacion comun, conserva la exigencia
-  adicional de EAN publicado, muestra validacion normalizada, observaciones
-  dimensionales y diferencia absoluta/porcentual. La lista de 20 EAN y los
-  seis competidores no cambia.
+- [Piloto](../price_pilot.py): usa la clasificacion comun, valida referencia
+  exacta por EAN o marca/modelo/color y mantiene las validaciones comerciales
+  de stock, EUR, IVA y mercado. La localizacion sigue requiriendo aprobacion
+  humana antes de guardar una URL definitiva; no crea ofertas.
 - [Interfaz](../app_pages/price_comparator.py): sustituye el aviso obsoleto de
   calibre obligatorio por la nueva regla.
 
@@ -100,11 +101,11 @@ Comprueban importacion JSON/SQLite, revalidacion antes de deduplicar,
 historico intacto, 20 productos por seis tiendas y catalogo sin modificaciones.
 Solo transporte simulado y bases temporales; no consultas reales.
 
-Riesgo principal: un sitio puede publicar un EAN incorrecto. La coincidencia
-del EAN no suprime la comprobacion de marca/modelo/color ni la ambiguedad.
+Riesgo principal: un sitio puede publicar un EAN incorrecto. Un EAN
+contradictorio obliga a revision incluso si el modelo/color parecen coincidir.
 No se garantiza autenticidad de una ficha por su URL. Los codigos no
-interpretables no se fuerzan a coincidir. Las diferencias dimensionales se
-auditan pero ya no descalifican un EAN verificado.
+interpretables no se fuerzan a coincidir. Las diferencias de calibre se
+auditan, pero no cambian la identidad.
 
 Validacion local del comparador: **333 tests correctos, 1 omitido**, ejecutando
 todos los archivos `tests/test_price*.py`. Lint de errores Python/imports y

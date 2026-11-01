@@ -65,22 +65,28 @@ def test_exact_by_reference_without_ean():
     assert (result.status, result.basis) == (refs.EXACT, "reference")
 
 
-def test_without_ean_and_without_caliber_is_probable():
+def test_model_and_color_are_exact_without_ean_or_caliber():
     result = refs.classify(PR27, {"brand": "Prada", "model": "PR 27ZS", "color": "16K08Z"})
-    assert result.status == refs.PROBABLE and not result.comparable
+    assert result.status == refs.EXACT and result.comparable
 
 
-def test_different_colour_or_caliber_is_rejected():
+def test_different_colour_is_rejected_but_caliber_does_not_change_identity():
     assert refs.classify(PR27, {"brand": "Prada", "model": "PR 27ZS", "color": "ZVN09T",
                                 "caliber": "54-21"}).status == refs.REJECTED
     assert refs.classify(PR27, {"brand": "Prada", "model": "PR 27ZS", "color": "16K08Z",
-                                "caliber": "55-21"}).status == refs.REJECTED
+                                "caliber": "55-21"}).status == refs.EXACT
 
 
-def test_other_ean_is_rejected_and_contradicting_ean_goes_to_review():
-    assert refs.classify(PR27, {"ean_published": "8056597875226"}).status == refs.REJECTED
+def test_different_ean_never_matches_automatically_and_goes_to_review():
+    assert refs.classify(PR27, {"ean_published": "8056597875226"}).status == refs.PROBABLE
     result = refs.classify(PR27, {"ean_published": "8056597875349", "model": "PR 27ZS", "color": "ZVN09T"})
     assert result.status == refs.PROBABLE
+
+
+def test_exact_ean_allows_unpublished_identity_fields_but_not_contradictions():
+    assert refs.classify(PR27, {"ean_published": "8056597875349"}).status == refs.EXACT
+    assert refs.classify(PR27, {"ean_published": "8056597875349", "model": "PR 65ZS",
+                                "color": "16K08Z"}).status == refs.PROBABLE
 
 
 def test_title_parsing_and_brand_evidence():

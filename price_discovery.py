@@ -250,6 +250,31 @@ class PilotDiscovery:
         seen: set[str] = set()
         best_state = "not_found"
         try:
+            def save_candidate(outcome, method: str) -> None:
+                nonlocal best_state
+                data = asdict(outcome)
+                evidence["candidates"].append(data)
+                if outcome.page is None:
+                    return
+                match = classify(product, outcome.page.candidate())
+                exact = outcome.state == "exact" and match.status == EXACT and not outcome.page.ambiguous
+                normalized = match.normalized
+                contradiction = any(set(normalized["listing"][field]) - {normalized["catalogue"][expected]}
+                                    for field, expected in (("brands", "brand"), ("models", "model"),
+                                                            ("colors", "color")))
+                candidate_state = "rejected" if outcome.state == "rejected" or contradiction else (
+                    "candidate_found" if exact else "pending_validation")
+                with self.store._connect() as connection, connection:
+                    connection.execute("""INSERT INTO pilot_url_candidates(
+                        competitor_id,ean,url,run_id,state,method,evidence,identity,checked_at)
+                        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,competitor_id,ean,url) DO NOTHING""",
+                                       (cid, ean, outcome.url, run_id, candidate_state, method,
+                                        json.dumps(data, ensure_ascii=False),
+                                        json.dumps(match.normalized, ensure_ascii=False), stamp()))
+                if candidate_state != "rejected":
+                    best_state = "candidate_found" if exact else (
+                        best_state if best_state == "candidate_found" else "pending_validation")
+
             for method in dict.fromkeys(methods):
                 if not method:
                     continue
@@ -264,7 +289,30 @@ class PilotDiscovery:
                         evidence["attempts"].append({"method": method, "result": "Búsqueda GET no verificada/autorizada"})
                         continue
                     single = {**config, "search_mode": method}
-                    urls = search._site_search_candidates(product, single, fetcher)
+                    if config["domain"].removeprefix("www.") == "edel-optics.es":
+                        recognized, cards, source_url, total, fallback_urls = search._edel_search_cards(
+                            product, single, fetcher, method)
+                        if recognized:
+                            evidence["attempts"].append({"method": method, "search_url": source_url,
+                                                        "cards_examined": total,
+                                                        "candidate_urls": [card.url for card in cards]})
+                            for outcome in cards:
+                                self._guard(ean, cid, run_id)
+                                save_candidate(outcome, method)
+                            if best_state == "candidate_found":
+                                break
+                            continue
+                        if source_url:
+                            evidence["attempts"].append({"method": method, "search_url": source_url,
+                                                        "urls": fallback_urls,
+                                                        "result": "Sin tarjetas estructuradas reconocibles"})
+                            urls = fallback_urls
+                        else:
+                            evidence["attempts"].append({"method": method,
+                                                        "result": "No se pudo interpretar la respuesta de búsqueda"})
+                            continue
+                    else:
+                        urls = search._site_search_candidates(product, single, fetcher)
                 evidence["attempts"].append({"method": method, "urls": urls})
                 for url in urls:
                     if url in seen or len(seen) >= MAX_CANDIDATES:
@@ -277,27 +325,7 @@ class PilotDiscovery:
                             method != "sitemap" and not current["search_verified"]):
                         raise PilotError("Autorización del método de localización retirada")
                     outcome = search._visit(product, current, fetcher, url, method, False)
-                    data = asdict(outcome)
-                    evidence["candidates"].append(data)
-                    if outcome.page is None:
-                        continue
-                    match = classify(product, outcome.page.candidate())
-                    exact = outcome.state == "exact" and match.normalized["verified_ean"]
-                    normalized = match.normalized
-                    contradiction = any(set(normalized["listing"][field]) - {normalized["catalogue"][expected]}
-                                        for field, expected in (("brands", "brand"), ("models", "model"), ("colors", "color")))
-                    candidate_state = "rejected" if outcome.state == "rejected" or contradiction else (
-                        "candidate_found" if exact else "pending_validation")
-                    with self.store._connect() as connection, connection:
-                        connection.execute("""INSERT INTO pilot_url_candidates(
-                            competitor_id,ean,url,run_id,state,method,evidence,identity,checked_at)
-                            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,competitor_id,ean,url) DO NOTHING""",
-                                           (cid, ean, outcome.url, run_id, candidate_state, method,
-                                            json.dumps(data, ensure_ascii=False),
-                                            json.dumps(match.normalized, ensure_ascii=False), stamp()))
-                    if candidate_state != "rejected":
-                        best_state = "candidate_found" if exact else (
-                            best_state if best_state == "candidate_found" else "pending_validation")
+                    save_candidate(outcome, method)
                 if best_state == "candidate_found" or len(seen) >= MAX_CANDIDATES:
                     break
         except ConnectorBlocked as exc:
@@ -308,7 +336,7 @@ class PilotDiscovery:
         except (ConnectorError, WebSearchError) as exc:
             search._note_failure(cid, str(exc))
             return "error", str(exc), evidence
-        if not any("urls" in attempt for attempt in evidence["attempts"]):
+        if not any("urls" in attempt or "search_url" in attempt for attempt in evidence["attempts"]):
             return "not_allowed", "No hay un método autorizado y verificado de localización", evidence
         return best_state, json.dumps(evidence["attempts"], ensure_ascii=False), evidence
 
@@ -333,8 +361,8 @@ class PilotDiscovery:
                     page = ProductPage(**data["page"])
                     match = classify(product, page.candidate())
                     if accept:
-                        if match.status != EXACT or not match.normalized["verified_ean"] or page.ambiguous:
-                            raise PilotError("EAN publicado e identidad exacta no confirmados; no puede aprobarse")
+                        if match.status != EXACT or page.ambiguous:
+                            raise PilotError("La identidad exacta no está confirmada; no puede aprobarse")
                         url = validate_competitor_url(row["url"], config["domain"])
                         # Save URL/identity only; the future price run revalidates commercial facts.
                         with self.store._connect() as connection, connection:

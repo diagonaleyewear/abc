@@ -14,7 +14,7 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from price_comparator import normalize_gtin
-from price_references import caliber_from_code, extract_caliber, extract_lens
+from price_references import caliber_from_code, extract_caliber, extract_lens, parse_reference
 
 _LD_JSON = re.compile(r"<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>", re.I | re.S)
 _EAN_LABELLED = re.compile(r"(?:\bEAN(?:/GTIN)?\b|\bGTIN(?:-?13)?\b|c[oó]digo\s+de\s+barras)\s*:?\s*"
@@ -33,6 +33,7 @@ class ProductPage:
     structured_type: str = ""
     title: str = ""
     brand: str = ""
+    model: str = ""
     color: str = ""
     caliber: str = ""
     ean_published: str = ""
@@ -47,6 +48,7 @@ class ProductPage:
     market_source: str = ""
     market_conflict: bool = False
     ambiguous: bool = False
+    source_url: str = ""
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -55,7 +57,7 @@ class ProductPage:
 
     def candidate(self) -> dict[str, Any]:
         """The listing as seen by ``price_references.classify``."""
-        return {"brand": self.brand, "color": self.color, "caliber": self.caliber,
+        return {"brand": self.brand, "model": self.model, "color": self.color, "caliber": self.caliber,
                 "ean_published": self.ean_published, "title": self.title,
                 "identifiers": self.identifiers, "ambiguous": self.ambiguous}
 
@@ -326,11 +328,126 @@ def parse_html(html: str) -> _Collector:
     return parsed
 
 
+class _EdelSearchCards(HTMLParser):
+    """Extract facts only from each product-card container in an Edel-Optics result page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.cards: list[dict[str, Any]] = []
+        self._card: dict[str, Any] | None = None
+        self._stack: list[tuple[str, bool]] = []
+        self._captures: list[dict[str, Any]] = []
+
+    def handle_starttag(self, tag: str, values) -> None:
+        attrs = {key: value or "" for key, value in values}
+        classes = set(attrs.get("class", "").split())
+        root = tag == "div" and "eoViewsListviewItemClassic" in classes
+        if tag == "br" and self._captures:
+            for capture in self._captures:
+                capture["parts"].append(" ")
+        if root and self._card is None:
+            self._card = {"price": "", "currency": "", "url": "", "title": "", "link_title": "", "brand": "",
+                          "ean_published": "", "availability": "unknown"}
+        if self._card is None:
+            return
+        prop = attrs.get("itemprop", "").lower()
+        if prop in {"price", "pricecurrency", "availability", "gtin13", "gtin", "model", "color"}:
+            value = attrs.get("content") or attrs.get("href") or attrs.get("value") or ""
+            if value:
+                field = {"pricecurrency": "currency", "gtin13": "ean_published",
+                         "gtin": "ean_published"}.get(prop, prop)
+                self._card[field] = value
+        if prop == "url" and attrs.get("href"):
+            self._card["url"] = attrs["href"]
+        if tag == "a" and attrs.get("href") and not self._card["url"]:
+            self._card["url"] = attrs["href"]
+        if tag == "a" and attrs.get("title") and not self._card["link_title"]:
+            self._card["link_title"] = attrs["title"]
+        capture = ""
+        if prop == "name":
+            capture = "title"
+        elif "eoBrandListviewItemTxt" in classes:
+            capture = "brand"
+        if capture:
+            self._captures.append({"tag": tag, "field": capture, "parts": []})
+        if tag not in _VOID:
+            self._stack.append((tag, root))
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        for capture in self._captures:
+            capture["parts"].append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self._captures) - 1, -1, -1):
+            if self._captures[index]["tag"] == tag:
+                capture = self._captures.pop(index)
+                text = " ".join("".join(capture["parts"]).split())
+                if text and self._card is not None:
+                    old = self._card.get(capture["field"], "")
+                    self._card[capture["field"]] = " ".join(filter(None, (old, text)))
+                break
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                closed = self._stack[index:]
+                del self._stack[index:]
+                if any(is_root for _, is_root in closed) and self._card is not None:
+                    self.cards.append(self._card)
+                    self._card = None
+                    self._captures.clear()
+                break
+
+
+def extract_edel_search_cards(html: str, search_url: str, product: dict, *,
+                              tax_policy: str = "unknown") -> list[ProductPage]:
+    """Parse listing-card facts independently; never treat the result page's aggregate metadata as a product."""
+    parser = _EdelSearchCards()
+    parser.feed(html)
+    parser.close()
+    pages: list[ProductPage] = []
+    for card in parser.cards:
+        title = (card["title"] or card["link_title"]).strip()
+        brand = card["brand"].strip()
+        reference = parse_reference(title, brands=[str(product.get("brand") or "")],
+                                    models=[str(product.get("model") or "")])
+        model = card.get("model") or reference.model
+        color = _color_code(card.get("color", "")) or _color_code(reference.color)
+        if not title:
+            title = " ".join(part for part in (brand, model, color) if part)
+        try:
+            ean = normalize_gtin(card["ean_published"]) if card["ean_published"] else ""
+        except ValueError:
+            ean = ""
+        page = ProductPage(
+            url=card["url"], source_url=search_url, method="edel-optics-search-card",
+            structured_type="Edel-Optics result card", title=title, brand=brand, model=model, color=color,
+            caliber=reference.caliber, ean_published=ean, price=parse_price(card["price"]),
+            currency=card["currency"].upper(), availability=availability_of(card["availability"]),
+            includes_tax={"included": True, "excluded": False}.get(tax_policy),
+            identifiers=[f"{model} {color}".strip()] if model and color else [],
+            notes=["Datos extraídos de esta tarjeta; el HTML no publica disponibilidad"
+                   if card["availability"] == "unknown" else "Datos extraídos de esta tarjeta"])
+        if card.get("availability"):
+            page.notes = ["Datos extraídos de esta tarjeta"]
+        if page.includes_tax is not None:
+            page.notes.append(f"IVA según la política verificada del competidor ({tax_policy})")
+        if not page.ean_published:
+            page.notes.append("La tarjeta no publica EAN; identidad basada en referencia")
+        pages.append(page)
+    return pages
+
+
 def extract_product(html: str, url: str, *, price_selector: str = "", availability_selector: str = "",
                     tax_policy: str = "unknown") -> ProductPage | None:
     """Return what the page publishes, or None when it carries no product information at all."""
-    page = _from_json_ld(html, url)
     parsed = parse_html(html)
+    if any("eoViewsListviewItemClassic" in element["attrs"].get("class", "").split()
+           for element in parsed.elements):
+        return None
+    page = _from_json_ld(html, url)
     meta = parsed.meta
     if page is None:
         title = meta.get("og:title") or " ".join(parsed.title.split())

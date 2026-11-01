@@ -20,7 +20,8 @@ import pandas as pd
 from price_comparator import PriceComparatorStore, normalize_gtin
 from price_connectors import Connector, ConnectorBlocked, ConnectorError, Observation
 from price_references import EXACT, PROBABLE, REJECTED, ReferenceIndex, classify, key, search_plan, tokens
-from price_web_extract import ProductPage, extract_product, parse_html, resolve_market
+from price_web_extract import (ProductPage, extract_edel_search_cards, extract_product, parse_html,
+                               resolve_market)
 from price_web_fetch import MAX_SITEMAP_BYTES, PageGone, RobotsDenied, WebFetcher
 
 ACCESS_STATES = ("unknown", "robots_allowed", "robots_restricted", "blocked", "pending_authorization")
@@ -79,8 +80,8 @@ FAILURES: dict[str, tuple[str, str]] = {
                       "se conserva y el histórico de precios no se toca.", "url"),
     "variant_differs": ("La ficha es del mismo modelo pero de otro color o calibre. Busque la variante exacta y "
                         "facilite su URL.", "url"),
-    "ean_conflict": ("La ficha publica un EAN distinto del solicitado. Compruebe la referencia y facilite la URL "
-                     "correcta.", "url"),
+    "ean_conflict": ("La ficha publica un EAN distinto del solicitado. La coincidencia no se acepta automáticamente; "
+                     "revise manualmente la identidad y la evidencia antes de conservar la URL.", "review"),
     "ambiguous": ("La ficha es probable o ambigua (varias variantes u ofertas, o datos insuficientes): confirme la "
                   "referencia antes de guardarla; no genera ofertas comparables.", "review"),
     "no_product_data": ("La página responde pero no publica datos de producto legibles. La URL se conserva: necesita "
@@ -125,11 +126,11 @@ def failure_reason(exc: Exception) -> str:
 def mismatch_reason(status: str, reasons: list[str]) -> str:
     """Why a page is not the requested product, from the reasons given by ``classify``."""
     text = "; ".join(reasons).lower()
-    if "ean publicado distinto" in text:
-        return "ean_conflict"
     found = re.search(r"(?:contradice:|distinto) ([^:;]*)", text)
     if found:
         return "wrong_product" if re.search(r"marca|modelo", found.group(1)) else "variant_differs"
+    if "ean publicado distinto" in text:
+        return "ean_conflict"
     return "wrong_product" if status == REJECTED else "ambiguous"
 
 
@@ -571,6 +572,69 @@ class WebPriceSearch:
         tried: set[str] = set()
         best: Outcome | None = None
         try:
+            if "site_search" in strategies and config["domain"].removeprefix("www.") == "edel-optics.es":
+                for origin, url in self._candidate_stream(product, config, fetcher, ["index"]):
+                    if url in tried:
+                        continue
+                    tried.add(url)
+                    found = self._visit(product, config, fetcher, url, origin, persist_index)
+                    if found.state == "exact":
+                        best = found
+                        break
+                    if found.state in {"probable", "rejected"} and (
+                            best is None or found.state == "probable"):
+                        best = found
+                if best is not None and best.state == "exact":
+                    best.requests = fetcher.requests
+                    self._touch_query(competitor_id, ok=True)
+                    return best
+                if best is None or best.state != "exact":
+                    recognized, cards, source_url, total, fallback_urls = self._edel_search_cards(
+                        product, config, fetcher, config["search_mode"])
+                    strategies = [method for method in strategies if method != "site_search"]
+                    if recognized:
+                        result = self._best_card_outcome(cards, source_url, total)
+                        if result is not None:
+                            if result.state == "exact" and persist_index:
+                                self._upsert_index(product, config, result)
+                            result.requests = fetcher.requests
+                            self._touch_query(competitor_id, ok=result.state in {
+                                "exact", "probable", "rejected", "not_found"})
+                            return result
+                        for url in fallback_urls:
+                            if url in tried:
+                                continue
+                            tried.add(url)
+                            found = self._visit(product, config, fetcher, url, "site_search", persist_index)
+                            if found.state == "exact":
+                                best = found
+                                break
+                            if found.state in {"probable", "rejected"} and (
+                                    best is None or found.state == "probable"):
+                                best = found
+                        if best is not None:
+                            best.requests = fetcher.requests
+                            self._touch_query(competitor_id, ok=best.state in {
+                                "exact", "probable", "rejected"})
+                            return best
+                        if best is None:
+                            best = Outcome(product["ean"], competitor_id, config["name"], "not_found",
+                                           detail=f"{total} tarjetas revisadas; ninguna coincide con la referencia",
+                                           method="web:edel-optics-search")
+                        best.requests = fetcher.requests
+                        self._touch_query(competitor_id, ok=True)
+                        return best
+                    for url in fallback_urls:
+                        if url in tried:
+                            continue
+                        tried.add(url)
+                        found = self._visit(product, config, fetcher, url, "site_search", persist_index)
+                        if found.state == "exact":
+                            best = found
+                            break
+                        if found.state in {"probable", "rejected"} and (
+                                best is None or found.state == "probable"):
+                            best = found
             candidates = self._candidate_stream(product, config, fetcher, strategies)
             for origin, url in candidates:
                 if url in tried:
@@ -601,6 +665,79 @@ class WebPriceSearch:
         if best is None:
             result.detail = "No se localizó una ficha por los métodos permitidos"
         self._touch_query(competitor_id, ok=result.state in {"exact", "probable", "not_found", "rejected"})
+        return result
+
+    def _edel_search_cards(self, product: dict, config: dict, fetcher: WebFetcher, method: str
+                           ) -> tuple[bool, list[Outcome], str, int, list[str]]:
+        """Return card-level matches for the authorized query; recognized result pages are never visited as fichas."""
+        methods = [method] if method in {"ean", "model_color"} else [
+            config.get("search_preferred", "ean"), *config.get("search_alternatives", "").split(",")]
+        outcomes: list[Outcome] = []
+        fallback_urls: list[str] = []
+        source_url = ""
+        total = 0
+        recognized = False
+        for search_method in dict.fromkeys(methods):
+            single = {**config, "search_mode": search_method}
+            for _, search_url in product_search_urls(product, single, modes=[search_method]):
+                if not fetcher.rules(search_url).allowed(search_url):
+                    raise RobotsDenied("robots.txt no permite la búsqueda interna del sitio")
+                fetched = fetcher.get(search_url)
+                source_url = fetched.url
+                pages = extract_edel_search_cards(fetched.text, fetched.url, product,
+                                                  tax_policy=config["tax_policy"])
+                if not pages:
+                    links = parse_html(fetched.text).links
+                    model = key(product["model"])
+                    for href, text in links:
+                        target = urljoin(fetched.url, href)
+                        evidence = key(urlparse(target).path + " " + text)
+                        if (product["ean"] in evidence or (model and model in evidence)) \
+                                and _same_site(target, config["domain"]):
+                            target = validate_competitor_url(target, config["domain"])
+                            if target != fetched.url and target not in fallback_urls:
+                                fallback_urls.append(target)
+                    if not links and re.search(r"fetch\s*\(|XMLHttpRequest|__NEXT_DATA__", fetched.text):
+                        raise ConnectorError("Búsqueda dependiente de AJAX/JavaScript: revisar mecanismo público y "
+                                             "autorización; no se consultan endpoints ni se automatiza navegador")
+                    continue
+                recognized = True
+                total += len(pages)
+                for page in pages:
+                    try:
+                        product_url = validate_competitor_url(urljoin(fetched.url, page.url), config["domain"])
+                    except WebSearchError:
+                        continue
+                    if product_url == fetched.url or any(card.url == product_url for card in outcomes):
+                        continue
+                    page.url = product_url
+                    match = classify(product, page.candidate())
+                    if match.status == REJECTED:
+                        continue
+                    outcome = Outcome(product["ean"], config["competitor_id"], config["name"],
+                                      "exact" if match.status == EXACT and not page.ambiguous else "probable",
+                                      url=product_url, detail="; ".join([
+                                          f"Tarjeta localizada en {fetched.url}", *match.reasons,
+                                          *match.observations, *page.notes]),
+                                      method="web:edel-optics-search-card", page=page,
+                                      match_status=match.status)
+                    outcome.reason = comparability_gap(page, config) if outcome.state == "exact" else "ambiguous"
+                    outcomes.append(outcome)
+        return recognized, outcomes, source_url, total, fallback_urls[:MAX_CANDIDATES]
+
+    @staticmethod
+    def _best_card_outcome(cards: list[Outcome], search_url: str, total: int) -> Outcome | None:
+        if not cards:
+            return None
+        exact = [card for card in cards if card.state == "exact"]
+        selected = exact or cards
+        result = selected[0]
+        if len(selected) > 1:
+            result.state = "probable"
+            result.match_status = "manual_review"
+            result.page.ambiguous = True
+            result.reason = "ambiguous"
+            result.detail += f"; hay {len(selected)} tarjetas compatibles entre {total} resultados"
         return result
 
     def _candidate_stream(self, product: dict, config: dict, fetcher: WebFetcher, strategies: list[str]):
