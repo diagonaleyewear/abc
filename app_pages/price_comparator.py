@@ -507,6 +507,14 @@ def _render_dashboard_product(store: PriceComparatorStore, data: dict, summary: 
     _render_product_refresh(store, ean, key_prefix)
 
 
+def _discovery_authorization_warning(unauthorized: list[dict], names: dict[str, str]) -> str:
+    return "No consultable: " + " | ".join(
+        f"{names.get(item['competitor_id'], item['competitor_id'])} · EAN {item['ean']}: "
+        + "; ".join(item["reasons"])
+        for item in unauthorized
+    )
+
+
 def _render_product_refresh(store: PriceComparatorStore, ean: str, key_prefix: str) -> None:
     pilot = PricePilot(store)
     st.subheader("Actualizar precios")
@@ -575,7 +583,7 @@ def _render_product_refresh(store: PriceComparatorStore, ean: str, key_prefix: s
         except PilotError as exc:
             st.error(f"No se pudo preparar la localización: {exc}")
         if preview and preview["unauthorized"]:
-            st.warning("No consultable: " + "; ".join(preview["unauthorized"]))
+            st.warning(_discovery_authorization_warning(preview["unauthorized"], names))
         approved = st.checkbox("He revisado el alcance y autorizo buscar las fichas seleccionadas",
                                key=f"{key_prefix}_locate_approved_{ean}")
         busy = pilot.is_running()
@@ -1118,7 +1126,7 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
                     for cid, detail in preview["methods"].items()
                 ]), hide_index=True, width="stretch")
             if preview["unauthorized"]:
-                st.warning(preview["unauthorized"])
+                st.warning(_discovery_authorization_warning(preview["unauthorized"], names))
             if preview["active_run"]:
                 active = preview["active_run"]
                 st.warning(f"Hay una ejecución {active['operation']} {active['status']} #{active['id']}; "

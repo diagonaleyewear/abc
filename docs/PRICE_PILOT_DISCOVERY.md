@@ -123,6 +123,16 @@ tecnicos». «Administracion > Competidores y ejecuciones» conserva la matriz
 20x6, el alcance, presupuestos, filtros, colas, resultados y auditoria. Los
 filtros de cobertura son solo visuales y nunca cambian la cola.
 
+En «Actualizar precios» y en la vista previa de Administracion, las
+combinaciones sin autorizacion muestran el nombre del competidor, el EAN y
+todos los motivos de `reasons` devueltos por `PilotDiscovery.preview()`.
+La vista previa no realiza HTTP ni concede permisos. «Localizar ficha»
+sigue deshabilitado sin confirmacion humana o sin trabajos efectivos
+autorizados; una seleccion mixta solo ejecuta las combinaciones autorizadas.
+Las pruebas de regresion cubren Visio Factory sin autorizacion en Resumen y
+Productos, y Edel-Optics autorizado junto a Visio Factory bloqueado, siempre
+con bases temporales y transporte simulado.
+
 Estados:
 
 - Ficha conocida: indice ya guardado (incluye URLs aportadas pendientes).
