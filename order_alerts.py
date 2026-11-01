@@ -41,8 +41,17 @@ RESULT_LABELS = {
     "error_consulta": "Error al consultar Odoo",
     "error_envio": "Error al enviar el email",
     "reintentos_agotados": "Reintentos de envío agotados",
+    "envio_ambiguo": "Envío con resultado desconocido (requiere confirmación)",
     "error": "Error inesperado",
 }
+
+
+class MailDeliveryAmbiguous(RuntimeError):
+    """El proveedor pudo haber aceptado el correo (timeout, corte de conexión o 5xx tras enviar la petición).
+
+    Reenviar automáticamente podría duplicar el aviso, por lo que el pedido queda bloqueado hasta que
+    una persona confirme el resultado con `OrderAlertStore.resolve_ambiguous`.
+    """
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,8 @@ class AlertDispatchResult:
     sent: bool
     error: str | None = None
     exhausted_order_ids: tuple[int, ...] = ()
+    ambiguous_order_ids: tuple[int, ...] = ()
+    ambiguous_batch: bool = False
 
 
 def alert_recipients() -> list[str]:
@@ -71,17 +82,26 @@ def dispatch_order_alerts(
     send_email: Callable[..., None],
     recipients: Sequence[str],
     max_attempts: int | None = None,
+    source: str = SOURCE_MANUAL,
 ) -> AlertDispatchResult:
-    """Reserva los pedidos no notificados, envía un único email y confirma el estado solo si el envío no falla."""
+    """Reserva los pedidos no notificados, envía un único email y confirma el estado solo tras la aceptación.
+
+    Un fallo definitivo (`Exception`) deja el pedido reintentable. `MailDeliveryAmbiguous` o una interrupción
+    tras iniciar el envío lo dejan bloqueado como 'ambiguous' hasta confirmación explícita.
+    """
     rows = list(rows)
     order_ids = [int(row["pedido_id"]) for row in rows]
     recipients = tuple(recipients)
-    batch = store.claim_orders(order_ids, max_attempts=max_attempts)
+    batch = store.claim_orders(order_ids, max_attempts=max_attempts, source=source)
     exhausted = store.exhausted_order_ids(order_ids, max_attempts) if max_attempts else ()
+    blocked = store.ambiguous_order_ids(order_ids)
     claimed = set(batch.order_ids)
     new_rows = tuple(row for row in rows if int(row["pedido_id"]) in claimed)
     if not new_rows:
-        return AlertDispatchResult((), recipients, False, None, exhausted)
+        return AlertDispatchResult((), recipients, False, None, exhausted, blocked)
+
+    if not store.begin_send(batch.batch_id, ", ".join(recipients)):
+        return AlertDispatchResult((), recipients, False, "La reserva de envío se perdió; no se envió nada", exhausted, blocked)
 
     try:
         send_email(
@@ -89,12 +109,17 @@ def dispatch_order_alerts(
             html_body=build_alert_email_html(new_rows),
             to_address=list(recipients),
         )
+    except MailDeliveryAmbiguous as exc:
+        store.mark_ambiguous(batch.batch_id, str(exc))
+        blocked = store.ambiguous_order_ids(order_ids)
+        return AlertDispatchResult(new_rows, recipients, False, str(exc), exhausted, blocked, True)
     except Exception as exc:  # noqa: BLE001
         store.mark_failed(batch.batch_id, str(exc))
-        return AlertDispatchResult(new_rows, recipients, False, str(exc), exhausted)
+        return AlertDispatchResult(new_rows, recipients, False, str(exc), exhausted, blocked)
 
+    # Si esta escritura falla, el lote sigue 'sending' y pasa a 'ambiguous' al vencer; nunca se reenvía solo.
     store.mark_sent(batch.batch_id, ", ".join(recipients))
-    return AlertDispatchResult(new_rows, recipients, True, None, exhausted)
+    return AlertDispatchResult(new_rows, recipients, True, None, exhausted, blocked)
 
 
 def scheduler_state(
@@ -221,6 +246,19 @@ class OrderAlertStore:
             );
             CREATE INDEX IF NOT EXISTS order_notifications_batch_idx
                 ON order_notifications (batch_id, status);
+            CREATE TABLE IF NOT EXISTS order_alert_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                source TEXT,
+                order_ids TEXT NOT NULL,
+                recipients TEXT,
+                outcome TEXT NOT NULL,
+                error TEXT,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS order_alert_deliveries_batch_idx
+                ON order_alert_deliveries (batch_id);
             CREATE TABLE IF NOT EXISTS order_alert_status (
                 source TEXT PRIMARY KEY,
                 started_at INTEGER,
@@ -259,6 +297,7 @@ class OrderAlertStore:
         now: int | None = None,
         lease_seconds: int = ORDER_ALERT_LEASE_SECONDS,
         max_attempts: int | None = None,
+        source: str = SOURCE_MANUAL,
     ) -> OrderAlertBatch:
         timestamp = int(time.time()) if now is None else int(now)
         batch_id = uuid.uuid4().hex
@@ -267,10 +306,19 @@ class OrderAlertStore:
             connection.execute("BEGIN IMMEDIATE")
             for order_id in dict.fromkeys(int(value) for value in order_ids):
                 row = connection.execute(
-                    "SELECT status, claimed_until, attempts FROM order_notifications WHERE order_id = ?",
+                    "SELECT status, claimed_until, attempts, batch_id FROM order_notifications WHERE order_id = ?",
                     (order_id,),
                 ).fetchone()
-                if row and row[0] == "sent":
+                if row and row[0] in ("sent", "ambiguous"):
+                    continue
+                if row and row[0] == "sending":
+                    if int(row[1] or 0) > timestamp:
+                        continue
+                    # La reserva venció durante el envío: no se sabe si el proveedor lo aceptó.
+                    self._set_ambiguous(
+                        connection, "WHERE order_id = ?", (order_id,), row[3],
+                        "Envío interrumpido: no hay confirmación de aceptación ni de rechazo", timestamp,
+                    )
                     continue
                 if row and row[0] == "pending" and int(row[1] or 0) > timestamp:
                     continue
@@ -296,7 +344,75 @@ class OrderAlertStore:
                     (order_id, batch_id, timestamp + lease_seconds, attempts, timestamp),
                 )
                 claimed.append(order_id)
+            if claimed:
+                connection.execute(
+                    """
+                    INSERT INTO order_alert_deliveries (batch_id, source, order_ids, outcome, started_at)
+                    VALUES (?, ?, ?, 'claimed', ?)
+                    """,
+                    (batch_id, source, json.dumps(claimed), timestamp),
+                )
         return OrderAlertBatch(batch_id, tuple(claimed))
+
+    @staticmethod
+    def _set_ambiguous(
+        connection: sqlite3.Connection,
+        where: str,
+        params: tuple[Any, ...],
+        batch_id: str | None,
+        error: str,
+        timestamp: int,
+    ) -> None:
+        connection.execute(
+            f"""
+            UPDATE order_notifications
+            SET status = 'ambiguous', last_error = ?, updated_at = ?, claimed_until = NULL
+            {where} AND status = 'sending'
+            """,
+            (error[:2000], timestamp, *params),
+        )
+        if batch_id:
+            connection.execute(
+                """
+                UPDATE order_alert_deliveries SET outcome = 'ambiguous', error = ?, finished_at = ?
+                WHERE batch_id = ? AND outcome IN ('claimed', 'sending')
+                """,
+                (error[:2000], timestamp, batch_id),
+            )
+
+    def begin_send(
+        self,
+        batch_id: str,
+        recipient: str,
+        now: int | None = None,
+        lease_seconds: int = ORDER_ALERT_LEASE_SECONDS,
+    ) -> bool:
+        """Persiste (con fsync) que el envío va a empezar. Devuelve False si la reserva ya no es válida."""
+        timestamp = int(time.time()) if now is None else int(now)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            expected = connection.execute(
+                "SELECT order_ids FROM order_alert_deliveries WHERE batch_id = ? AND outcome = 'claimed'",
+                (batch_id,),
+            ).fetchone()
+            if expected is None:
+                return False
+            updated = connection.execute(
+                """
+                UPDATE order_notifications
+                SET status = 'sending', claimed_until = ?, updated_at = ?
+                WHERE batch_id = ? AND status = 'pending' AND claimed_until > ?
+                """,
+                (timestamp + lease_seconds, timestamp, batch_id, timestamp),
+            ).rowcount
+            if updated != len(json.loads(expected[0])):
+                connection.rollback()
+                return False
+            connection.execute(
+                "UPDATE order_alert_deliveries SET outcome = 'sending', recipients = ? WHERE batch_id = ?",
+                (recipient, batch_id),
+            )
+        return True
 
     def mark_sent(self, batch_id: str, recipient: str, now: int | None = None) -> None:
         timestamp = int(time.time()) if now is None else int(now)
@@ -307,9 +423,16 @@ class OrderAlertStore:
                 UPDATE order_notifications
                 SET status = 'sent', recipient = ?, sent_at = ?, updated_at = ?,
                     claimed_until = NULL, last_error = NULL
-                WHERE batch_id = ? AND status = 'pending'
+                WHERE batch_id = ? AND status IN ('pending', 'sending')
                 """,
                 (recipient, timestamp, timestamp, batch_id),
+            )
+            connection.execute(
+                """
+                UPDATE order_alert_deliveries SET outcome = 'sent', recipients = ?, error = NULL, finished_at = ?
+                WHERE batch_id = ? AND outcome IN ('claimed', 'sending')
+                """,
+                (recipient, timestamp, batch_id),
             )
 
     def mark_failed(self, batch_id: str, error: str, now: int | None = None) -> None:
@@ -320,10 +443,100 @@ class OrderAlertStore:
                 """
                 UPDATE order_notifications
                 SET status = 'failed', last_error = ?, updated_at = ?, claimed_until = NULL
-                WHERE batch_id = ? AND status = 'pending'
+                WHERE batch_id = ? AND status IN ('pending', 'sending')
                 """,
                 (str(error)[:2000], timestamp, batch_id),
             )
+            connection.execute(
+                """
+                UPDATE order_alert_deliveries SET outcome = 'failed', error = ?, finished_at = ?
+                WHERE batch_id = ? AND outcome IN ('claimed', 'sending')
+                """,
+                (str(error)[:2000], timestamp, batch_id),
+            )
+
+    def mark_ambiguous(self, batch_id: str, error: str, now: int | None = None) -> None:
+        timestamp = int(time.time()) if now is None else int(now)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._set_ambiguous(connection, "WHERE batch_id = ?", (batch_id,), batch_id, str(error), timestamp)
+
+    def ambiguous_order_ids(self, order_ids: Iterable[int] | None = None) -> tuple[int, ...]:
+        """Pedidos bloqueados por un envío de resultado desconocido (todos, o los indicados)."""
+        ids = None if order_ids is None else list(dict.fromkeys(int(value) for value in order_ids))
+        with self._connect() as connection:
+            if ids is None:
+                rows = connection.execute(
+                    "SELECT order_id FROM order_notifications WHERE status = 'ambiguous' ORDER BY order_id"
+                ).fetchall()
+            elif not ids:
+                return ()
+            else:
+                placeholders = ",".join("?" for _ in ids)
+                rows = connection.execute(
+                    f"SELECT order_id FROM order_notifications WHERE status = 'ambiguous' "
+                    f"AND order_id IN ({placeholders}) ORDER BY order_id",
+                    ids,
+                ).fetchall()
+        return tuple(int(row[0]) for row in rows)
+
+    def resolve_ambiguous(
+        self,
+        order_ids: Iterable[int],
+        resolution: str,
+        actor: str,
+        now: int | None = None,
+    ) -> tuple[int, ...]:
+        """Acción explícita tras comprobar el buzón: 'sent' lo da por notificado, 'retry' lo habilita de nuevo."""
+        if resolution not in ("sent", "retry"):
+            raise ValueError("resolution debe ser 'sent' o 'retry'")
+        if not actor.strip():
+            raise ValueError("Se requiere identificar quién resuelve el envío ambiguo")
+        timestamp = int(time.time()) if now is None else int(now)
+        resolved: list[int] = []
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for order_id in dict.fromkeys(int(value) for value in order_ids):
+                if resolution == "sent":
+                    updated = connection.execute(
+                        """
+                        UPDATE order_notifications
+                        SET status = 'sent', sent_at = ?, updated_at = ?, last_error = NULL,
+                            recipient = 'confirmado manualmente'
+                        WHERE order_id = ? AND status = 'ambiguous'
+                        """,
+                        (timestamp, timestamp, order_id),
+                    ).rowcount
+                else:
+                    updated = connection.execute(
+                        """
+                        UPDATE order_notifications
+                        SET status = 'failed', attempts = 0, updated_at = ?
+                        WHERE order_id = ? AND status = 'ambiguous'
+                        """,
+                        (timestamp, order_id),
+                    ).rowcount
+                if updated:
+                    resolved.append(order_id)
+            if resolved:
+                connection.execute(
+                    """
+                    INSERT INTO order_alert_deliveries
+                        (batch_id, source, order_ids, outcome, error, started_at, finished_at)
+                    VALUES (?, 'resolution', ?, ?, ?, ?, ?)
+                    """,
+                    (uuid.uuid4().hex, json.dumps(resolved), f"resolved_{resolution}", f"actor={actor.strip()}",
+                     timestamp, timestamp),
+                )
+        return tuple(resolved)
+
+    def recent_deliveries(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                "SELECT * FROM order_alert_deliveries ORDER BY id DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def exhausted_order_ids(
         self,
@@ -341,7 +554,7 @@ class OrderAlertStore:
                 f"""
                 SELECT order_id FROM order_notifications
                 WHERE order_id IN ({placeholders})
-                  AND status != 'sent'
+                  AND status NOT IN ('sent', 'ambiguous')
                   AND attempts >= ?
                   AND COALESCE(claimed_until, 0) <= ?
                 ORDER BY order_id

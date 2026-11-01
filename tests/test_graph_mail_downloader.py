@@ -233,10 +233,10 @@ def test_send_alert_email_is_not_retried(monkeypatch) -> None:
     config = graph.M365Config("tenant", "client", "secret", "mailbox", graph.Path("."))
     try:
         graph.send_alert_email("subject", "body", "user@example.test", config)
-    except requests.HTTPError:
+    except graph.MailDeliveryAmbiguous:
         pass
     else:
-        raise AssertionError("El envío rechazado debía propagarse")
+        raise AssertionError("Un 5xx de sendMail debe tratarse como resultado ambiguo")
 
     assert len(calls) == 1
 

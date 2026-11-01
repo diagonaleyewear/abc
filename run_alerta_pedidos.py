@@ -145,6 +145,7 @@ def run_check(
         send_email,
         alert_recipients(),
         max_attempts=max_send_attempts,
+        source=source,
     )
     found = len(resultados)
     nuevos = len(dispatch.new_rows)
@@ -152,16 +153,25 @@ def run_check(
     errors: list[str] = []
     if dispatch.error:
         errors.append(f"Envío a {', '.join(dispatch.recipients)}: {dispatch.error}")
+    if dispatch.ambiguous_order_ids:
+        errors.append(
+            f"Pedido(s) {', '.join(map(str, dispatch.ambiguous_order_ids))} con resultado de envío desconocido; "
+            "comprueba Elementos enviados y resuelve con --resolve-ambiguous {sent,retry}"
+        )
     if dispatch.exhausted_order_ids:
         errors.append(
             f"Pedido(s) {', '.join(map(str, dispatch.exhausted_order_ids))} sin enviar tras "
             f"{max_send_attempts} intento(s); usa «Comprobar ahora» para reintentar"
         )
 
-    if dispatch.error:
+    if dispatch.ambiguous_batch:
+        result = "envio_ambiguo"
+    elif dispatch.error:
         result = "error_envio"
     elif dispatch.sent:
         result = "enviado"
+    elif dispatch.ambiguous_order_ids:
+        result = "envio_ambiguo"
     elif dispatch.exhausted_order_ids:
         result = "reintentos_agotados"
     else:
@@ -226,7 +236,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="Ejecutar la comprobación puntual aunque el servicio continuo esté activo.",
     )
+    parser.add_argument(
+        "--resolve-ambiguous",
+        choices=("sent", "retry"),
+        help="Resolver pedidos con envío de resultado desconocido (requiere --orders y --actor).",
+    )
+    parser.add_argument("--orders", help="IDs de pedido separados por comas para --resolve-ambiguous.")
+    parser.add_argument("--actor", help="Persona que confirma el resultado tras revisar Elementos enviados.")
     return parser.parse_args(argv)
+
+
+def resolve_ambiguous_orders(store: OrderAlertStore, resolution: str, orders: str | None, actor: str | None) -> int:
+    if not orders or not actor:
+        raise ValueError("--resolve-ambiguous requiere --orders y --actor")
+    order_ids = [int(value) for value in orders.split(",") if value.strip()]
+    resolved = store.resolve_ambiguous(order_ids, resolution, actor)
+    _log(f"Resueltos como '{resolution}': {list(resolved) or 'ninguno'} (solo se modifican pedidos ambiguos)")
+    return 0 if len(resolved) == len(set(order_ids)) else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -237,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
         store = OrderAlertStore()
         if args.healthcheck:
             return healthcheck(store)
+        if args.resolve_ambiguous:
+            return resolve_ambiguous_orders(store, args.resolve_ambiguous, args.orders, args.actor)
 
         dias_atras = _int_env(DIAS_ATRAS_ENV, DIAS_ATRAS_DEFAULT, minimum=1)
         query_attempts = _int_env(REINTENTOS_CONSULTA_ENV, REINTENTOS_CONSULTA_DEFAULT, minimum=1)

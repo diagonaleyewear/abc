@@ -18,11 +18,13 @@ from urllib.parse import unquote, urlparse
 import logging
 
 import requests
+from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import URL
 
 from db_config import load_db_config, load_env_file
 from filelock import FileLock
+from order_alerts import MailDeliveryAmbiguous
 from image_repository import ImageRepository, atomic_write, collision_name, file_checksum, repository_root
 import hashlib
 from image_naming import sanitize_filename as _sanitize_filename
@@ -320,13 +322,47 @@ def send_alert_email(
         },
         "saveToSentItems": True,
     }
-    with closing(requests.post(
-        f"https://graph.microsoft.com/v1.0/users/{config.mailbox}/sendMail",
-        headers={**_graph_headers(token), "Content-Type": "application/json"},
-        json=payload,
-        timeout=30,
-    )) as response:
-        response.raise_for_status()
+    try:
+        with closing(requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{config.mailbox}/sendMail",
+            headers={**_graph_headers(token), "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )) as response:
+            status = response.status_code
+    except requests.RequestException as exc:
+        if _request_never_reached_graph(exc):
+            raise
+        raise MailDeliveryAmbiguous(
+            f"Sin respuesta de Microsoft Graph tras enviar la petición ({type(exc).__name__}); "
+            "el correo pudo haberse enviado"
+        ) from exc
+    if status == 202:
+        return
+    if status >= 500:
+        raise MailDeliveryAmbiguous(f"Microsoft Graph respondió {status}; el correo pudo haberse enviado")
+    # 4xx (incluido 429): Graph rechazó o no procesó la petición, por lo que reintentar es seguro.
+    raise RuntimeError(f"Microsoft Graph rechazó el envío (HTTP {status})")
+
+
+def _request_never_reached_graph(exc: requests.RequestException) -> bool:
+    """True solo si el fallo ocurrió al conectar, antes de transmitir el cuerpo de sendMail."""
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (NewConnectionError, ConnectTimeoutError)):
+            return True
+        pending.extend(
+            arg for arg in (*getattr(current, "args", ()), getattr(current, "reason", None))
+            if isinstance(arg, BaseException)
+        )
+    return False
 
 
 def _mark_message_read(token: str, mailbox: str, message_id: str) -> None:
