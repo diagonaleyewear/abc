@@ -98,7 +98,8 @@ proxies, rotacion ni elusion de CAPTCHA.
 ## Localizacion de fichas del piloto
 
 La interfaz muestra matriz 20x6, cobertura, tabla filtrable EAN/competidor/
-metodo/estado/URL y candidatos con evidencia y referencia normalizada.
+metodo/estado/URL y candidatos con evidencia y referencia normalizada. Los
+filtros de esta tabla son solo visuales y nunca cambian la cola.
 
 Estados:
 
@@ -112,10 +113,26 @@ Estados:
 - Consulta no autorizada: metodo/acceso/condiciones no preparados.
 - Error o bloqueo: HTTP, presupuesto, CAPTCHA o mecanismo incompatible.
 
+Antes de iniciar, el selector de alcance permite:
+
+- Una referencia y un competidor: un EAN y una tienda.
+- Varios productos de un competidor: varios EAN y una tienda.
+- Todos los pendientes: todas las combinaciones pendientes del piloto; exige
+  una confirmacion separada que indica el numero de trabajos.
+
+La vista previa no realiza HTTP ni escribe en la base. Muestra combinaciones
+seleccionadas, trabajos autorizados realmente pendientes, URLs conocidas y
+candidatos pendientes excluidos, combinaciones no autorizadas, metodo
+configurado y presupuesto. Una seleccion fuera de los 20 EAN/seis tiendas se
+rechaza. Solo el conjunto efectivo autorizado se guarda y encola. Por ejemplo,
+Edel-Optics mas `8056597875226` crea como maximo un trabajo; ningun otro EAN o
+competidor se consulta.
+
 Al iniciar:
 
-1. Lee exactamente los 20 EAN y seis tiendas persistidos.
-2. Encola solo combinaciones pendientes (6 conocidas -> 114 pendientes).
+1. Valida la seleccion contra los 20 EAN y seis tiendas persistidos.
+2. Encola exclusivamente las combinaciones solicitadas que aun esten
+   pendientes y autorizadas; excluye conocidas y candidatos sin revision.
 3. Comprueba condiciones revisadas con nota, robots permitido y metodo
    autorizado. Mantiene bloqueo global del piloto y por competidor.
 4. Reutiliza presupuestos persistentes, pausa, timeout, robots y validacion
@@ -145,9 +162,16 @@ Un candidato guardado antes de interrumpirse se reutiliza sin volver a visitar
 la ficha. Si el proceso muere entre HTTP y guardar el candidato, su presupuesto
 permanece consumido; no se promete idempotencia de una peticion ya enviada.
 
-Una cola interrumpida bloquea otras operaciones: reanudar la correcta o,
-con piloto desactivado, volver a guardar el mismo alcance para cerrar la cola
-anterior conservando su evidencia. Guardar no activa consultas generales.
+La seleccion solicitada y la cola efectiva se guardan en la fila de ejecucion.
+Al reanudar, se recupera esa cola, se rechaza un alcance distinto y no se
+recrean trabajos. Trabajos terminados/candidatos no se vuelven a consultar;
+presupuestos e intentos permanecen asociados a la ejecucion.
+
+Una cola interrumpida bloquea otras operaciones: reanudar la seleccion original
+o cerrarla desde la interfaz con una nota. El cierre marca los trabajos
+pendientes como cancelados y la ejecucion como cancelada, conservando
+seleccion, candidatos, consultas, intentos y presupuestos; no elimina datos.
+Guardar/cerrar no activa consultas generales.
 Un presupuesto agotado no se recarga al reanudar; un nuevo intento requiere
 revision explicita del usuario. Bloqueos anteriores no se levantan.
 Planificador periodico continua desactivado; ni configuracion ni aprobacion
@@ -159,6 +183,8 @@ Migracion idempotente en el constructor, bajo el bloqueo SQLite existente:
 
 - Columnas nuevas de mercado/estrategia en `competitor_web_config`.
 - `pilot_runs.operation`, default `prices` para ejecuciones antiguas.
+- `pilot_runs.selection` y `pilot_runs.selection_request`, con JSON de la cola
+  efectiva y de la seleccion original; defaults vacios para ejecuciones antiguas.
 - `pilot_discovery`: estado por combinacion, ultima operacion/metodo/motivo.
 - `pilot_url_candidates`: evidencia y revision por intento/URL.
 - `pilot_http_log`: URL, EAN, tienda, fecha, HTTP/error por peticion.
@@ -176,18 +202,21 @@ El audit UI muestra las ultimas 500 consultas; la base conserva todo el registro
 3. Elegir estrategia, plantilla publica soportada y alternativas autorizadas;
    confirmar mecanismo con evidencia. Para AJAX no comprobado, no marcarlo
    como GET verificado y dejar pendiente.
-4. En Localizacion revisar 20x6, pendientes y limites; marcar aprobacion
-   supervisada y localizar. No pulsar repetidamente la consulta de precios
-   sobre las mismas seis fichas como sustituto del descubrimiento.
+4. En Localizacion seleccionar primero una tienda y uno o varios EAN,
+   revisar la vista previa y marcar aprobacion supervisada. Usar "Todos los
+   pendientes" solo despues de confirmar el total mostrado.
 5. Revisar cada candidato. Confirmar solo exactos completos; descartar dudas.
-6. Reanudar interrupciones; errores/bloqueos necesitan revision y motivos.
+6. Reanudar la cola original o cerrarla con nota; errores/bloqueos necesitan
+   revision y motivo antes de preparar un nuevo intento.
 7. Ejecutar piloto comercial manual para las URLs guardadas; comprobar
    identidad/comercio y las nuevas ofertas, sin modificar las anteriores.
 
 ## Validacion
 
 [Tests offline](../tests/test_price_discovery.py): fuentes y conflictos de
-mercado, fallback verificado y deduplicacion; 6/114 y 20x6; EAN/modelo/color;
+mercado, fallback verificado y deduplicacion; 6/114 y 20x6; alcance selectivo,
+vista previa sin HTTP, reanudacion inmutable y cierre no destructivo;
+EAN/modelo/color;
 automatico y alternativas autorizadas; sitemap; sugerencias Edel-Optics;
 AJAX sin endpoints; candidatos y aprobacion; contradicciones/ambiguedad;
 reanudacion/budget/bloqueos/robots/redirecciones; retirada de autorizacion;
@@ -197,7 +226,7 @@ Ejecutar suite de comparador, suite completa CI y build Docker. Resultados
 exactos y enlace al CI se registran en la PR independiente de esta entrega.
 No se autoriza merge ni despliegue por el hecho de que los tests pasen.
 
-Validacion local previa a la PR:
+Validacion local de PR #98 (historica):
 
 - Suite completa del comparador: **432 passed, 1 skipped**.
 - Validacion final del piloto/localizador: **87 passed**.
@@ -209,6 +238,19 @@ Validacion local previa a la PR:
   `py_compile` y `git diff --check`: correctos.
 - CI remoto y Docker pendientes al publicar este commit; sus resultados
   finales se documentan en la PR. Docker/Podman no disponibles localmente.
+
+Validacion local de ejecucion selectiva:
+
+- Regresiones de localizador/piloto: **92 passed**, incluidos selector de un
+  EAN/competidor, seleccion multiple, preview sin escrituras/HTTP, caso
+  Edel-Optics, reanudacion inmutable y cierre no destructivo.
+- Suite CI completa: **1343 passed, 16 skipped, 10 subtests passed,
+  1 failed**. El unico fallo es
+  `test_kering_image_sections.py::test_local_library_search_and_download_permissions`,
+  en validacion de fotografias Kering, fuera de los archivos modificados.
+- `compileall` y `git diff --check`: correctos.
+- Docker/Podman no estan instalados localmente. La build Docker y smoke test
+  de la imagen quedan para el workflow de CI de esta PR.
 
 ## Riesgos, despliegue y rollback
 

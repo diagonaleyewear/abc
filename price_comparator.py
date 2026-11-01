@@ -27,7 +27,9 @@ COVERAGE_STATUSES = {"not_checked", "no_authorized_connector", "pending_authoriz
                      "manual_verified", "operational"}
 # Columns added after the first release; CREATE TABLE IF NOT EXISTS cannot add them to existing databases.
 _ADDED_COLUMNS = {
-    "pilot_runs": {"operation": "TEXT NOT NULL DEFAULT 'prices'"},
+    "pilot_runs": {"operation": "TEXT NOT NULL DEFAULT 'prices'",
+                   "selection": "TEXT NOT NULL DEFAULT '[]'",
+                   "selection_request": "TEXT NOT NULL DEFAULT '[]'"},
     "competitor_web_config": {
         "sales_market": "TEXT NOT NULL DEFAULT ''",
         "market_verified": "INTEGER NOT NULL DEFAULT 0",
