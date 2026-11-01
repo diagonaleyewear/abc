@@ -909,6 +909,9 @@ class WebPriceSearch:
             status = "manual_review"
         priced = page is not None and page.has_price and status != "rejected"
         tax = "" if page is None or page.includes_tax is None else ("sí" if page.includes_tax else "no")
+        evidence = outcome.detail or "Ficha pública verificada"
+        if page:
+            evidence += "".join(" | " + note for note in page.notes if note not in evidence)
         return {
             "EAN": product["ean"], "Competidor": config["name"], "Precio": page.price if priced else "",
             "Precio anterior": page.previous_price if priced and page.previous_price else "",
@@ -916,7 +919,7 @@ class WebPriceSearch:
             "Mercado": market or "UNKNOWN",
             "URL": outcome.url, "Disponibilidad": page.availability if page else "unknown",
             "Estado coincidencia": status, "Método": outcome.method or "web",
-            "Evidencia": (outcome.detail or "Ficha pública verificada") + " | " + market_note, "Fecha consulta": stamp,
+            "Evidencia": evidence + " | " + market_note, "Fecha consulta": stamp,
             "Marca": page.brand if page else "", "Modelo": product["model"] if outcome.state == "exact" else "",
             "Color": page.color if page else "", "Calibre": page.caliber if page else "",
             "EAN publicado": page.ean_published if page else "", "Título": page.title if page else "",

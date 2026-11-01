@@ -1,5 +1,94 @@
 # Identidad del comparador: EAN o modelo y color
 
+## Revision conjunta del 1 de noviembre de 2026
+
+Base cotejada: `9d240daf38ae5a9629d370d32641986cf9ef4cad`. Al iniciar
+esta correccion, `origin/main` seguia en ese commit; no habia diferencias
+posteriores que resolver. El paquete comercial aportado se leyo completo:
+informe HTML, Excel, matriz, identidades, historico, prioridades, referencias
+tecnicas y cotejo original. Los archivos ya descomprimidos coincidian byte a
+byte con el ZIP. Excel y JSON coinciden en las 84 combinaciones, identidades,
+precios fechados y EAN/colores como texto.
+
+El alcance comercial es seis EAN por 14 competidores: 69 identidades exactas,
+dos variantes distintas y 13 busquedas sin ficha exacta localizada. Las otras
+94 referencias del original no se han revisado. Las tres lecturas comparables
+del informe son observaciones puntuales, **no una regla por tienda ni precios
+vigentes garantizados**. El acceso manual no acredita automatizacion y no
+levanta bloqueos ni modifica la configuracion.
+
+| Clasificacion | Evidencia y resultado |
+|---|---|
+| Defecto reproducible | `Product` y `ProductGroup` con misma ruta y distinto `?variant=` elegian el primer nodo por ruta, mezclando identidad, precio y stock. Se selecciona una unica URL completa, incluida query; tambien se comprueba la URL de `Offer`. Una URL de oferta no puede contradecir la variante declarada por su `Product`. Sin vinculacion unica, no se toma precio/stock ni se acepta identidad exacta. |
+| Defecto reproducible | Un selector global podia suplir un precio ausente de la variante activa con el precio transitorio de otra variante. En paginas multivariante, precio, EAN, IVA por precio sin impuestos y mercado globales no se heredan. Se conservan las URLs declaradas, el identificador `variant`, SKU/MPN y la evidencia. |
+| Defecto reproducible | `FT1044/S 93E` no coincidia con `FT1044 93E`; la normalizacion compartida de modelos FT de cuatro digitos admite el sufijo `/S`, sin eliminar ni flexibilizar el color. `52S` y `01E` siguen rechazados. |
+| Defecto reproducible | El parser podia ignorar `OPT` tras `SL 596 DUNE`, incluso con EAN objetivo. Ese sufijo se conserva como parte del modelo: no se acepta DUNE OPT como DUNE de sol. |
+| Defecto reproducible | Varios GTIN del mismo `Product` ocultaban la contradiccion tomando el primero. Se conserva la lista en evidencia y se requiere revision. UPC equivalente y ceros iniciales siguen usando la normalizacion existente. |
+| Defecto reproducible | El campo JSON-LD `model` no se transmitia al clasificador. Ahora se conserva, de modo que un modelo explicito incorrecto no puede esconderse tras un titulo y EAN coincidentes. |
+| Defecto reproducible | CTA y «disponible bajo pedido» se trataban como stock; un selector «Agotado» no se contrastaba con JSON-LD `InStock`. Se guardan las señales y el plazo por separado. CTA, canal OnlineOnly/InStoreOnly y plazos no acreditan stock. Contradicciones quedan `unknown`, sin borrar precio ni identidad. |
+| Defecto reproducible | Una `priceSpecification` condicionada por cantidad o membresia podia suplir el precio de venta; IVA del PVP podia atribuirse a la venta. Solo especificaciones de venta no condicionada sustentan el precio/IVA. PVP, historico y cupones no se extraen como precio de venta de un selector. |
+| Ya resuelto, conservado | Calibre informativo, UPC/EAN, rechazo de EAN/modelo/color contradictorios, tarjetas Edel independientes, precio de venta frente a PVP, ausencia de precio estatico, historial y reutilizacion de URLs verificadas. |
+| Ya resuelto, conservado | Descubrimiento guarda candidatos y razones y evalua un segundo candidato tras rechazar el primero. La regresion FT1044 demuestra 52S rechazado y 93E candidato, con cuatro peticiones simuladas dentro del presupuesto existente y aprobacion humana sin HTTP. |
+| Falta de evidencia comercial | IVA, mercado ES y stock no publicados siguen sin acreditarse. EUR, idioma y seleccion regional (incluida Austria en `/en-eu`) no prueban entrega ES. No se rellena configuracion ni se importan precios del informe. |
+| Restriccion de autorizacion/configuracion | Robots, bloqueos persistentes, limites, reanudacion, alcance del piloto y permisos existentes no cambian. No se activan planificadores ni metodos nuevos. |
+
+### Stock y plazo: criterio conservador
+
+Las señales de disponibilidad de las ofertas se conservan separadas del
+precio y de `deliveryTime`. Dos estados explicitos incompatibles requieren
+revision sin convertir una identidad exacta en un producto distinto.
+El selector de disponibilidad ya autorizado conserva su texto completo como
+evidencia. «En Stock» junto a «entrega/envio en N dias» positivos, o junto
+a «bajo pedido», no acredita stock inmediato coherente: se marca conflicto
+para revision, sin afirmar que no haya existencias. No se introduce un
+umbral arbitrario de dias, ni se deduce stock de un plazo. Un tiempo de
+transito estructurado por si solo no se interpreta como falta de stock.
+
+### Limites de esta correccion
+
+Las nuevas fixtures son sinteticas, con importes de prueba, no una copia
+de precios comerciales supuestamente actuales. Los 17 fallos iniciales de
+regresion reproducen riesgos del codigo base; no prueban que el precio
+transitorio 207/204 EUR de Celine fuera causado por JSON-LD en Cloud.
+El paquete no contiene los HTML crudos de cada estado de sus controles:
+no se inventan selectores de tienda ni mecanismos de espera/recarga.
+Si una variante solo puede identificarse tras JavaScript o su JSON-LD no
+publica una URL unica y coherente, requiere revision con una fuente
+autorizada. No se automatiza navegador ni se usan endpoints privados.
+
+Los campos adicionales de `ProductPage` se guardan en la evidencia JSON y
+las notas comerciales existentes; **no hay migracion SQLite**. El codigo
+actual admite evidencia anterior mediante valores por defecto. Riesgo de
+reversion: versiones antiguas que construyen `ProductPage(**evidencia)`
+no conocen los nuevos campos de candidatos; antes de revertir codigo con
+datos generados por esta version debe evaluarse esa compatibilidad, sin
+borrar ni reescribir historicos automaticamente.
+
+Pruebas nuevas:
+[regresiones conjuntas offline](../tests/test_price_reviewed_variants.py).
+La suite existente sigue verificando robots, bloqueos, presupuesto,
+reanudacion y retirada de autorizaciones. No se cambian esos componentes
+para hacer pasar casos comerciales pendientes.
+
+### Validacion local de esta revision
+
+- Regresiones nuevas: 55 casos; focalizadas con identidad, referencias,
+  estructuras existentes y tarjetas Edel: **164 correctos**.
+- Suite final `tests/test_price*.py`: **515 correctos, 1 omitido**.
+- Suite general offline durante la implementacion: **1422 correctos,
+  16 omitidos y 10 subtests correctos**; esa pasada precede al ultimo caso
+  adicional de `model`, validado despues con las suites focalizada y del
+  comparador. La PR debe ejecutar tambien la suite general sobre su commit
+  final en Linux.
+- Flake8 fatal, compilacion Python, sintaxis Pylance y `git diff --check`:
+  correctos. No hay errores de tipos en los componentes comunes consultados.
+- El verificador local de locks devuelve 1 por finales CRLF del checkout
+  Windows frente a LF regenerados. Los contenidos normalizados de ambos
+  locks son identicos (53/62 CRLF frente a cero); no se han cambiado locks
+  ni dependencias. Linux CI debe verificar sus bytes exactos.
+- Docker no esta instalado localmente. El workflow existente de una PR
+  puede construirlo en Linux: `push: false`, sin publicacion ni despliegue.
+
 ## Causa raiz demostrada
 
 La fila real ya almacenada para `8056597875349` publica el titulo
