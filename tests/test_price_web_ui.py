@@ -56,7 +56,7 @@ def test_stored_search_by_ean_shows_price_and_percentage_against_vytria(ui):
     search.run(list(PRADA), [cid])
     app = _search(_run(), "8056597875349", competitors=["Visio Factory"])
     assert not app.exception and not app.error
-    frame = next(f for f in _frames(app) if "Diferencia %" in f.columns)
+    frame = next(f for f in _frames(app) if "Diferencia %" in f.columns and "Competidor" in f.columns)
     row = frame.iloc[0]
     assert row["Competidor"] == "Visio Factory" and row["Precio"] == 239.0
     assert row["Estado"] == "Precio almacenado" and round(row["Diferencia %"], 1) == -23.4

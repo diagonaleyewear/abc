@@ -163,8 +163,9 @@ def test_page_with_real_stored_offer_shows_gap_chart_and_competitor_requests(tmp
     assert not app.exception
     assert [tab.label for tab in app.tabs] == ["Resumen", "Comparativa", "Histórico", "Competidores", "Configuración"]
     values = {metric.label: metric.value for metric in app.metric}
-    assert values["Diferencia media del mercado vs Vytria"].startswith("-")
-    assert values["Referencias con precio Vytria"] == "1/1"
+    assert values["Productos comparados"] == "1 / 1"
+    assert values["Más caro"] == "100,0 %"
+    assert values["Diferencia media vs. mejor"] == "+11,1 %"
     labels = [expander.label for expander in app.expander]
     assert any(label.startswith("Edel-Optics") and "Bloqueado" in label for label in labels)
     assert any("**Necesitamos:**" in markdown.value for markdown in app.markdown)
@@ -183,4 +184,4 @@ def test_page_creates_initial_configuration_on_first_access(tmp_path, monkeypatc
     with reopened._connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM competitor_schedule WHERE enabled=0").fetchone()[0] == 14
         assert connection.execute("SELECT COUNT(*) FROM comparator_settings").fetchone()[0] == 3
-    assert {metric.label: metric.value for metric in app.metric}["Diferencia media del mercado vs Vytria"] == "Sin datos"
+    assert any("Importe primero el catálogo piloto" in item.value for item in app.info)

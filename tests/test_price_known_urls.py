@@ -249,7 +249,8 @@ def test_competitor_panels_have_separate_web_and_scheduler_sections_with_the_sch
     assert len(labels) == 14 and all("Pendiente de revisión de condiciones" in label for label in labels)
     assert any("URLs conocidas:** 1" in m for m in headings)
     assert not _rows(ui, "SELECT 1 FROM competitor_schedule WHERE enabled=1")
-    assert app.metric[2].value == "0/14"  # a registered URL never counts as a competitor with data
+    assert {metric.label: metric.value for metric in app.metric}["Más caro"] == "Sin datos"
+    # Registered URLs remain configuration only; they do not create comparable price observations.
     assert not app.error
 
 
