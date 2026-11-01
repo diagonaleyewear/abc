@@ -207,7 +207,8 @@ class PricePilot:
                              "plan": state, "known_urls": len(urls), **limits})
         return pd.DataFrame(rows)
 
-    def run(self, *, resume: bool = False, search=None, operation: str = "prices") -> int:
+    def run(self, *, resume: bool = False, search=None, operation: str = "prices",
+            selection=None) -> int:
         from price_web import WebPriceSearch
         from price_discovery import PilotDiscovery
 
@@ -222,6 +223,13 @@ class PricePilot:
                 eligible = self.candidates()
                 if not set(scope["eans"]).issubset(set(eligible.loc[eligible["eligible"], "ean"])):
                     raise PilotError("Uno o más productos ya no tienen datos/precio Vytria válidos")
+                discovery_preview = None
+                if operation == "discovery" and not resume:
+                    if selection is None:
+                        raise PilotError("La localización requiere una selección explícita")
+                    discovery_preview = PilotDiscovery(self.store).preview(selection)
+                    if not discovery_preview["effective"]:
+                        raise PilotError("No hay trabajos pendientes autorizados en la selección")
                 with self.store._connect() as connection, connection:
                     last = connection.execute("""SELECT * FROM pilot_runs
                         WHERE status IN ('running','interrupted') ORDER BY id DESC LIMIT 1""").fetchone()
@@ -235,22 +243,58 @@ class PricePilot:
                         if last["scope"] != json.dumps(scope["eans"]) or last["competitors"] != json.dumps(scope["competitors"]):
                             raise PilotError("El alcance cambió; la cola anterior no se puede reanudar")
                         run_id = last["id"]
+                        if operation == "discovery":
+                            original = json.loads(last["selection_request"] or "[]")
+                            saved = json.loads(last["selection"] or "[]")
+                            if not saved:
+                                saved = [[r["competitor_id"], r["ean"]] for r in connection.execute(
+                                    "SELECT DISTINCT competitor_id,ean FROM pilot_jobs WHERE run_id=? ORDER BY id",
+                                    (run_id,))]
+                                connection.execute("UPDATE pilot_runs SET selection=? WHERE id=?",
+                                                   (json.dumps(saved), run_id))
+                            if selection is not None:
+                                if not original:
+                                    raise PilotError("La selección antigua está fijada por sus trabajos; reanude sin cambios")
+                                requested = PilotDiscovery(self.store).preview(selection)["requested"]
+                                if requested != original:
+                                    raise PilotError("La selección original de la localización es inmutable")
+                            job_pairs = [[r["competitor_id"], r["ean"]] for r in connection.execute(
+                                "SELECT DISTINCT competitor_id,ean FROM pilot_jobs WHERE run_id=? ORDER BY id",
+                                (run_id,))]
+                            if set(map(tuple, saved)) != set(map(tuple, job_pairs)):
+                                raise PilotError("La cola de localización no coincide con su selección persistida")
+                            if any(cid not in scope["competitors"] or ean not in scope["eans"]
+                                   for cid, ean in saved):
+                                raise PilotError("La cola contiene trabajos fuera del alcance persistido")
                         connection.execute("UPDATE pilot_jobs SET status='pending' WHERE run_id=? AND status='running'",
                                            (run_id,))
                         connection.execute("UPDATE pilot_runs SET status='running' WHERE id=?", (run_id,))
                     else:
-                        run_id = connection.execute("""INSERT INTO pilot_runs(started_at,status,scope,competitors,operation)
-                            VALUES(?,'running',?,?,?)""",
-                                                    (stamp(), json.dumps(scope["eans"]),
-                                                     json.dumps(scope["competitors"]), operation)).lastrowid
-                        pending = PilotDiscovery(self.store).pending() if operation == "discovery" else None
-                        for cid in scope["competitors"]:
-                            connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)", (run_id, cid))
-                            for ean in scope["eans"]:
-                                if pending is not None and (cid, ean) not in pending:
-                                    continue
+                        if operation == "discovery":
+                            effective = discovery_preview["effective"]
+                            original = discovery_preview["requested"]
+                            selected_competitors = list(dict.fromkeys(cid for cid, _ in effective))
+                            run_id = connection.execute("""INSERT INTO pilot_runs(
+                                started_at,status,scope,competitors,operation,selection,selection_request)
+                                VALUES(?,'running',?,?,?,?,?)""",
+                                (stamp(), json.dumps(scope["eans"]), json.dumps(scope["competitors"]),
+                                 operation, json.dumps(effective), json.dumps(original))).lastrowid
+                            for cid in selected_competitors:
+                                connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)",
+                                                   (run_id, cid))
+                            for cid, ean in effective:
                                 connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
                                                    (run_id, cid, ean))
+                        else:
+                            run_id = connection.execute("""INSERT INTO pilot_runs(started_at,status,scope,competitors,operation)
+                                VALUES(?,'running',?,?,?)""",
+                                (stamp(), json.dumps(scope["eans"]), json.dumps(scope["competitors"]), operation)).lastrowid
+                            for cid in scope["competitors"]:
+                                connection.execute("INSERT INTO pilot_budgets(run_id,competitor_id) VALUES(?,?)",
+                                                   (run_id, cid))
+                                for ean in scope["eans"]:
+                                    connection.execute("INSERT INTO pilot_jobs(run_id,competitor_id,ean) VALUES(?,?,?)",
+                                                       (run_id, cid, ean))
                     ean_placeholders = ",".join("?" for _ in scope["eans"])
                     cid_placeholders = ",".join("?" for _ in scope["competitors"])
                     connection.execute(f"""UPDATE pilot_jobs SET status='cancelled',outcome='pilot_excluded',
@@ -318,7 +362,15 @@ class PricePilot:
                         VALUES(?,?,?,?,?,?)""", (run_id, cid, job["ean"], url, f"HTTP {result[0]}", stamp()))
                 return result
 
+        if operation == "discovery":
+            with self.store._connect() as connection:
+                run_competitors = {row[0] for row in connection.execute(
+                    "SELECT DISTINCT competitor_id FROM pilot_jobs WHERE run_id=?", (run_id,))}
+        else:
+            run_competitors = set(scope["competitors"])
         for cid, limits in scope["competitors"].items():
+            if cid not in run_competitors:
+                continue
             config = search.config(cid)
             with FileLock(f"{self.store.database_path}.competitor-{cid}.lock", timeout=0):
                 with self.store._connect() as connection:
@@ -374,6 +426,29 @@ class PricePilot:
                                                (run_id, cid))
                             budget = connection.execute("SELECT * FROM pilot_budgets WHERE run_id=? AND competitor_id=?",
                                                         (run_id, cid)).fetchone()
+
+    def close_interrupted_discovery(self, *, note: str) -> int:
+        if not note.strip():
+            raise PilotError("Indique el motivo para cerrar la localización interrumpida")
+        try:
+            with self.lock():
+                with self.store._connect() as connection, connection:
+                    run = connection.execute("""SELECT id,operation FROM pilot_runs
+                        WHERE status IN ('running','interrupted')
+                        ORDER BY id DESC LIMIT 1""").fetchone()
+                    if run is None:
+                        raise PilotError("No hay una localización interrumpida que cerrar")
+                    if run["operation"] != "discovery":
+                        raise PilotError("Reanude o cierre primero la operación interrumpida del piloto")
+                    run_id = run["id"]
+                    detail = f"Cerrado manualmente: {note.strip()[:400]}"
+                    connection.execute("""UPDATE pilot_jobs SET status='cancelled',outcome='cancelled',
+                        detail=? WHERE run_id=? AND status IN ('pending','running')""", (detail, run_id))
+                    connection.execute("""UPDATE pilot_runs SET status='cancelled',finished_at=?,error=?
+                        WHERE id=?""", (stamp(), detail, run_id))
+                    return run_id
+        except Timeout as exc:
+            raise PilotError("Ya hay otra ejecución del piloto") from exc
 
     def _record(self, search, config: dict, outcome, *, validation: dict | None = None) -> list[str]:
         page = outcome.page

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+from collections.abc import Iterable
 
 import pandas as pd
 from filelock import Timeout
 
-from price_comparator import PriceComparatorStore
+from price_comparator import PriceComparatorStore, normalize_gtin
 from price_connectors import ConnectorBlocked, ConnectorError
 from price_pilot import PilotError, PricePilot, _execution, pilot_scope, require_pilot_access, stamp
 from price_references import EXACT, classify
@@ -65,6 +66,114 @@ class PilotDiscovery:
     def pending(self) -> set[tuple[str, str]]:
         return {(r["competitor_id"], r["ean"]) for r in self.coverage().to_dict("records") if r["state"] == "pending"}
 
+    @staticmethod
+    def _canonical(pairs: Iterable[tuple[str, str]], scope: dict) -> list[list[str]]:
+        order_ean = {ean: index for index, ean in enumerate(scope["eans"])}
+        order_cid = {cid: index for index, cid in enumerate(scope["competitors"])}
+        return [[cid, ean] for cid, ean in sorted(
+            set(pairs), key=lambda pair: (order_cid[pair[0]], order_ean[pair[1]]))]
+
+    def preview(self, requested: Iterable[tuple[str, str]]) -> dict:
+        """Read-only execution preview; validates scope and never performs HTTP or writes."""
+        scope = pilot_scope(self.store)
+        if scope is None:
+            raise PilotError("Piloto sin configurar")
+        requested = list(requested)
+        if not requested:
+            raise PilotError("Seleccione al menos una combinación EAN × competidor")
+        pairs: set[tuple[str, str]] = set()
+        for item in requested:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise PilotError("Cada selección debe contener un competidor y un EAN")
+            cid, ean = item
+            if not isinstance(cid, str) or not isinstance(ean, str):
+                raise PilotError("Competidor/EAN de selección no válido")
+            try:
+                normalized = normalize_gtin(ean)
+            except ValueError as exc:
+                raise PilotError("EAN de selección no válido") from exc
+            if normalized != ean or cid not in scope["competitors"] or ean not in scope["eans"]:
+                raise PilotError("La selección contiene un EAN o competidor fuera del piloto")
+            pairs.add((cid, ean))
+        if len(pairs) != len(requested):
+            raise PilotError("La selección contiene combinaciones duplicadas")
+
+        coverage = self.coverage().set_index(["competitor_id", "ean"])
+        pending, known, candidates, other, unauthorized = [], [], [], [], []
+        methods: dict[str, dict] = {}
+        budgets: dict[str, dict] = {}
+        config_ids = tuple(dict.fromkeys(cid for cid, _ in pairs))
+        with self.store._connect() as connection:
+            config_rows = connection.execute(f"""SELECT w.*,c.name,c.url AS site_url,c.domain,c.market,c.currency
+                FROM competitor_web_config w JOIN competitors c ON c.id=w.competitor_id
+                WHERE w.competitor_id IN ({','.join('?' for _ in config_ids)})""", config_ids).fetchall()
+            configs = {row["competitor_id"]: dict(row) for row in config_rows}
+            missing = {cid for cid, _ in pairs} - set(configs)
+            if missing:
+                raise PilotError("Falta configuración web para: " + ", ".join(sorted(missing)))
+            active = connection.execute("""SELECT id,status,operation FROM pilot_runs
+                WHERE status IN ('running','interrupted') ORDER BY id DESC LIMIT 1""").fetchone()
+            active_budgets = {}
+            if active:
+                active_budgets = {r["competitor_id"]: dict(r) for r in connection.execute(
+                    "SELECT * FROM pilot_budgets WHERE run_id=?", (active["id"],))}
+        for cid, ean in self._canonical(pairs, scope):
+            cell = coverage.loc[(cid, ean)].to_dict()
+            config = configs[cid]
+            state = cell["state"]
+            if state in ("known", "confirmed"):
+                known.append([cid, ean])
+                continue
+            if state in ("candidate_found", "pending_validation"):
+                candidates.append([cid, ean])
+                continue
+            if state != "pending":
+                other.append({"competitor_id": cid, "ean": ean, "state": state})
+                continue
+            pending.append([cid, ean])
+            auth_reasons = []
+            if not config["terms_reviewed"] or not config["terms_note"].strip():
+                auth_reasons.append("Condiciones comerciales no verificadas")
+            if config["access_status"] != "robots_allowed":
+                auth_reasons.append("robots.txt no permitido/verificado")
+            allowed = set(config["locate_strategy"].split(","))
+            mode = config["search_mode"]
+            search_methods = []
+            if mode == "known":
+                auth_reasons.append("Configurado para solo URLs conocidas")
+            elif mode == "auto":
+                search_methods = []
+                if config["search_verified"] and "site_search" in allowed:
+                    search_methods.extend([config["search_preferred"], *config["search_alternatives"].split(",")])
+                if "sitemap" in allowed and "sitemap" in config["search_alternatives"].split(","):
+                    search_methods.append("sitemap")
+                search_methods = list(dict.fromkeys(m for m in search_methods if m))
+                if not search_methods:
+                    auth_reasons.append("Sin método automático verificado y autorizado")
+            elif not config["search_verified"] or "site_search" not in allowed:
+                search_methods = []
+                auth_reasons.append("Búsqueda GET no verificada/autorizada")
+            else:
+                search_methods = [mode]
+            methods[cid] = {"mode": mode, "methods": search_methods}
+            used = active_budgets.get(cid, {}).get("requests", 0)
+            limit = scope["competitors"][cid]["max_http_requests"]
+            budgets[cid] = {"used": used, "limit": limit, "available": max(0, limit - used)}
+            if auth_reasons:
+                unauthorized.append({"competitor_id": cid, "ean": ean, "reasons": auth_reasons})
+        auth_keys = {(r["competitor_id"], r["ean"]) for r in unauthorized}
+        effective = [pair for pair in pending if tuple(pair) not in auth_keys]
+        if active and active["operation"] == "discovery":
+            with self.store._connect() as connection:
+                previous = connection.execute("SELECT selection FROM pilot_runs WHERE id=?", (active["id"],)).fetchone()[0]
+            saved = json.loads(previous or "[]")
+        else:
+            saved = []
+        return {"requested": self._canonical(pairs, scope), "pending": pending, "effective": effective,
+                "known_excluded": known, "candidate_excluded": candidates, "other_excluded": other,
+                "unauthorized": unauthorized, "methods": methods, "budgets": budgets,
+                "active_run": dict(active) if active else None, "saved_selection": saved}
+
     def candidates(self) -> pd.DataFrame:
         scope = pilot_scope(self.store)
         with self.store._connect() as connection:
@@ -73,8 +182,43 @@ class PilotDiscovery:
             return frame.iloc[:0]
         return frame[frame.ean.isin(scope["eans"]) & frame.competitor_id.isin(scope["competitors"])]
 
-    def run(self, *, resume: bool = False, search: WebPriceSearch | None = None) -> int:
-        return PricePilot(self.store).run(resume=resume, search=search, operation="discovery")
+    def run(self, *, selection: Iterable[tuple[str, str]] | None = None, resume: bool = False,
+            search: WebPriceSearch | None = None) -> int:
+        return PricePilot(self.store).run(resume=resume, search=search, operation="discovery", selection=selection)
+
+    def latest_run(self) -> dict | None:
+        with self.store._connect() as connection:
+            row = connection.execute("""SELECT * FROM pilot_runs WHERE operation='discovery'
+                ORDER BY id DESC LIMIT 1""").fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["selection"] = json.loads(result["selection"])
+        result["selection_request"] = json.loads(result["selection_request"])
+        with self.store._connect() as connection:
+            jobs = connection.execute("""SELECT outcome,status,COUNT(*) AS count FROM pilot_jobs
+                WHERE run_id=? GROUP BY outcome,status""", (row["id"],)).fetchall()
+            result["jobs"] = {f"{item['outcome'] or 'pending'}:{item['status']}": item["count"] for item in jobs}
+            totals = {}
+            for item in jobs:
+                key = item["outcome"] or "pending"
+                totals[key] = totals.get(key, 0) + item["count"]
+            result["results"] = {
+                "Trabajos ejecutados": sum(item["count"] for item in jobs if item["status"] == "done"),
+                "Candidatos encontrados": totals.get("candidate_found", 0) + totals.get("pending_validation", 0),
+                "Productos no encontrados": totals.get("not_found", 0),
+                "Errores": totals.get("error", 0),
+                "Bloqueos": totals.get("blocked", 0),
+                "No autorizados": totals.get("not_allowed", 0),
+                "Pendientes o en curso": sum(item["count"] for item in jobs
+                                               if item["status"] in ("pending", "running")),
+            }
+            result["budgets"] = [dict(item) for item in connection.execute(
+                "SELECT * FROM pilot_budgets WHERE run_id=? ORDER BY competitor_id", (row["id"],))]
+            result["budget_used"] = sum(item["requests"] for item in result["budgets"])
+            result["candidates_pending_review"] = connection.execute("""SELECT COUNT(*) FROM pilot_url_candidates
+                WHERE run_id=? AND state IN ('candidate_found','pending_validation')""", (row["id"],)).fetchone()[0]
+        return result
 
     def _guard(self, ean: str, cid: str, run_id: int) -> None:
         require_pilot_access(self.store, ean, cid)

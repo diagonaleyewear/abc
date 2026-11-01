@@ -42,6 +42,10 @@ def only_pending(store, cid, eans):
                     VALUES(?,?,'not_found','offline')""", (row["competitor_id"], row["ean"]))
 
 
+def run_all_pending(discovery, search):
+    return discovery.run(selection=discovery.pending(), search=search)
+
+
 def route(site, query, *, ean=EAN, **overrides):
     url = BASE + "/pr27zs-16k08z.html"
     site.add(BASE + "/search?q=" + quote(query, safe=""), f'<a href="{url}">Prada PR27ZS 16K08Z {ean}</a>')
@@ -154,6 +158,100 @@ def test_twenty_by_six_identifies_114_missing_without_visiting_six_known(pilot):
     assert len(frame.competitor_id.unique()) == 6
     assert len(discovery.pending()) == 114
     assert (frame.state == "known").sum() == 6 and site.calls == []
+    preview = discovery.preview([(cid, ean) for cid in pilot_scope(store)["competitors"]
+                                 for ean in pilot_scope(store)["eans"]])
+    assert len(preview["requested"]) == 120
+    assert len(preview["pending"]) == 114
+    assert len(preview["known_excluded"]) == 6 and site.calls == []
+
+
+def test_preview_is_read_only_and_one_selected_pair_creates_one_job(pilot):
+    service, store, search, site, cid, _ = pilot
+    configure(search, cid)
+    only_pending(store, cid, [EAN, SAMPLE_EANS[1]])
+    service.enable()
+    discovery = PilotDiscovery(store)
+    before = commerce(store)
+    with store._connect() as connection:
+        before_queue = {
+            table: [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")]
+            for table in ("pilot_runs", "pilot_jobs", "pilot_budgets", "competitor_web_config")
+        }
+    preview = discovery.preview([(cid, EAN)])
+    assert preview["requested"] == [[cid, EAN]]
+    assert preview["effective"] == [[cid, EAN]]
+    assert site.calls == [] and commerce(store) == before
+    with store._connect() as connection:
+        after_queue = {
+            table: [tuple(row) for row in connection.execute(f"SELECT * FROM {table}")]
+            for table in before_queue
+        }
+    assert after_queue == before_queue
+
+    run_id = discovery.run(selection=[(cid, EAN)], search=search)
+    with store._connect() as connection:
+        jobs = connection.execute("SELECT competitor_id,ean FROM pilot_jobs WHERE run_id=?", (run_id,)).fetchall()
+        saved = connection.execute("SELECT selection,selection_request FROM pilot_runs WHERE id=?",
+                                   (run_id,)).fetchone()
+        budget_ids = [row[0] for row in connection.execute(
+            "SELECT competitor_id FROM pilot_budgets WHERE run_id=?", (run_id,))]
+    assert [tuple(row) for row in jobs] == [(cid, EAN)]
+    assert json.loads(saved["selection"]) == [[cid, EAN]]
+    assert json.loads(saved["selection_request"]) == [[cid, EAN]]
+    assert budget_ids == [cid]
+    assert all(EAN in url for url in site.calls if "/search?" in url)
+    assert not store.dashboard()[1]["confirmed"]
+
+
+def test_multiple_selected_eans_create_only_the_selected_pending_jobs(pilot):
+    service, store, search, site, cid, _ = pilot
+    configure(search, cid)
+    eans = [EAN, SAMPLE_EANS[1], SAMPLE_EANS[2]]
+    only_pending(store, cid, eans)
+    service.enable()
+    discovery = PilotDiscovery(store)
+    run_id = discovery.run(selection=[(cid, ean) for ean in eans[:2]], search=search)
+    with store._connect() as connection:
+        jobs = [tuple(row) for row in connection.execute(
+            "SELECT competitor_id,ean FROM pilot_jobs WHERE run_id=? ORDER BY id", (run_id,))]
+    assert jobs == [(cid, ean) for ean in eans[:2]]
+    queries = [url for url in site.calls if "/search?" in url]
+    assert len(queries) == 2
+    assert all(any(ean in url for ean in eans[:2]) for url in queries)
+
+
+def test_edel_optics_selected_ean_creates_one_search_job(pilot):
+    service, store, search, site, _, _ = pilot
+    cid = next(row["id"] for row in service.competitors() if row["name"] == "Edel-Optics")
+    ean = "8056597875226"
+    base = search.config(cid)["site_url"].rstrip("/")
+    search.update_config(cid, locate_strategy="site_search", search_mode="ean",
+                         search_url_template=base + "/B%C3%BAsqueda.html?query={query}",
+                         search_verified=True, search_evidence="Simulated authorized GET configuration",
+                         terms_reviewed=True, terms_note="Offline authorization",
+                         access_status="robots_allowed")
+    only_pending(store, cid, [ean])
+    site.add(base + "/robots.txt", ROBOTS_OK)
+    site.add(base + "/B%C3%BAsqueda.html?query=" + ean, "<html>No results</html>")
+    service.enable()
+    discovery = PilotDiscovery(store)
+    run_id = discovery.run(selection=[(cid, ean)], search=search)
+    with store._connect() as connection:
+        jobs = connection.execute("SELECT competitor_id,ean FROM pilot_jobs WHERE run_id=?", (run_id,)).fetchall()
+    assert [tuple(row) for row in jobs] == [(cid, ean)]
+    assert site.calls == [base + "/robots.txt", base + "/B%C3%BAsqueda.html?query=" + ean]
+    assert store.dashboard()[1]["confirmed"] == 0
+
+
+def test_selection_rejects_products_and_competitors_outside_pilot(pilot):
+    _, store, _, _, cid, extras = pilot
+    discovery = PilotDiscovery(store)
+    outside = next(row["id"] for row in store.competitors().to_dict("records")
+                   if row["id"] not in pilot_scope(store)["competitors"])
+    with pytest.raises(PilotError, match="fuera del piloto"):
+        discovery.preview([(cid, extras[0])])
+    with pytest.raises(PilotError, match="fuera del piloto"):
+        discovery.preview([(outside, EAN)])
 
 
 @pytest.mark.parametrize("mode,query", [("ean", EAN), ("model_color", "PRADA PR 27ZS 16K08Z")])
@@ -167,10 +265,12 @@ def test_supervised_search_exact_candidate_requires_approval_and_reuses_confirme
     service.enable()
     before = commerce(store)
     discovery = PilotDiscovery(store)
-    run_id = discovery.run(search=search)
+    run_id = run_all_pending(discovery, search)
     assert commerce(store) == before
     candidates = discovery.candidates()
     assert len(candidates) == 1 and candidates.iloc[0].state == "candidate_found"
+    preview = discovery.preview([(cid, EAN)])
+    assert preview["effective"] == [] and preview["candidate_excluded"] == [[cid, EAN]]
     assert search._indexed(cid, EAN) == []  # No automatic approval.
     assert site.calls == [BASE + "/robots.txt", BASE + "/search?q=" + quote(query, safe=""), url]
     with store._connect() as connection:
@@ -181,7 +281,8 @@ def test_supervised_search_exact_candidate_requires_approval_and_reuses_confirme
     assert search._indexed(cid, EAN)[0]["status"] == "verified"
     assert commerce(store) == before
     site.calls.clear()
-    discovery.run(search=search)
+    assert discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == "confirmed"
+    assert site.calls == []
     assert site.calls == []
     assert (discovery.coverage().state == "confirmed").sum() == 1
     service.run(search=search)
@@ -205,7 +306,7 @@ def test_wrong_or_doubtful_identity_is_never_approved(pilot, overrides, state):
     service.enable()
     before = commerce(store)
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     candidate = discovery.candidates().iloc[0]
     assert candidate.state == state
     with pytest.raises(PilotError):
@@ -226,7 +327,7 @@ def test_automatic_fallback_only_uses_authorized_methods(pilot):
     route(site, "PRADA PR 27ZS 16K08Z")
     service.enable()
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     row = discovery.candidates().iloc[0]
     assert row.method == "model_color"
     assert site.calls[1:3] == [BASE + "/search?q=" + EAN,
@@ -241,10 +342,12 @@ def test_no_unverified_search_or_unauthorized_competitor_queries(pilot, mode, ve
     search.update_config(cid, search_mode=mode, search_verified=verified,
                          terms_reviewed=terms, terms_note="Offline authorization")
     only_pending(store, cid, [EAN])
-    service.enable()
-    PilotDiscovery(store).run(search=search)
+    discovery = PilotDiscovery(store)
+    preview = discovery.preview([(cid, EAN)])
+    assert preview["effective"] == []
+    assert len(preview["unauthorized"]) == 1
     assert site.calls == []
-    assert PilotDiscovery(store).coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == "not_allowed"
+    assert discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == "pending"
 
 
 def test_not_found_is_persistent_and_explicit_retry_does_not_do_http(pilot):
@@ -254,10 +357,9 @@ def test_not_found_is_persistent_and_explicit_retry_does_not_do_http(pilot):
     site.add(BASE + "/search?q=" + EAN, "<html>No results</html>")
     service.enable()
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     assert discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == "not_found"
     calls = list(site.calls)
-    discovery.run(search=search)
     assert site.calls == calls
     discovery.reset(EAN, cid, note="Autorizar otro intento tras revisar mecanismo")
     assert (cid, EAN) in discovery.pending() and site.calls == calls
@@ -278,7 +380,7 @@ def test_robots_blocks_and_no_retries(pilot, body, status, state):
         site.add(BASE + "/search?q=" + EAN, body, status)
     service.enable()
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     assert discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0].state == state
     assert len(site.calls) <= 2
     assert discovery.candidates().empty
@@ -307,15 +409,46 @@ def test_http_budget_is_reserved_before_io_and_never_refunded_on_resume(pilot, m
 
     monkeypatch.setattr(PilotDiscovery, "locate", lambda self, *args: interrupt(*args))
     with pytest.raises(RuntimeError, match="Interrupción"):
-        discovery.run(search=search)
+        run_all_pending(discovery, search)
     calls = list(site.calls)
     monkeypatch.setattr(PilotDiscovery, "locate", lambda self, *args: original(*args))
     reopened = PilotDiscovery(PriceComparatorStore(store.database_path))
+    with pytest.raises(PilotError, match="inmutable"):
+        reopened.run(search=search, resume=True, selection=[(cid, EAN)])
     reopened.run(search=search, resume=True)
     assert site.calls == calls  # persistent budget exhausted, known candidate not re-fetched
     assert commerce(store) == before
     assert reopened.candidates().iloc[0].state == "candidate_found"
     assert _pending_job_count(store) == 0
+    latest = reopened.latest_run()
+    assert latest["selection"] == [[cid, EAN], [cid, SAMPLE_EANS[1]]]
+    assert sum(row["requests"] for row in latest["budgets"]) == 3
+
+
+def test_interrupted_selection_can_be_closed_without_deleting_its_evidence(pilot, monkeypatch):
+    service, store, search, site, cid, _ = pilot
+    configure(search, cid)
+    only_pending(store, cid, [EAN])
+    service.enable()
+    discovery = PilotDiscovery(store)
+    before = commerce(store)
+    monkeypatch.setattr(PilotDiscovery, "locate",
+                        lambda *args: (_ for _ in ()).throw(RuntimeError("simulated stop")))
+    with pytest.raises(RuntimeError, match="simulated stop"):
+        discovery.run(selection=[(cid, EAN)], search=search)
+    run_before = discovery.latest_run()
+    assert run_before["status"] == "interrupted"
+    assert site.calls == []
+
+    run_id = service.close_interrupted_discovery(note="Cerrar prueba interrumpida")
+    latest = discovery.latest_run()
+    with store._connect() as connection:
+        jobs = connection.execute("SELECT status,outcome FROM pilot_jobs WHERE run_id=?", (run_id,)).fetchall()
+    assert run_id == run_before["id"] and latest["status"] == "cancelled"
+    assert latest["selection"] == [[cid, EAN]]
+    assert [tuple(row) for row in jobs] == [("cancelled", "cancelled")]
+    assert commerce(store) == before
+    assert site.calls == []
 
 
 def test_sitemap_is_an_explicit_auto_alternative_not_external_search(pilot):
@@ -327,7 +460,7 @@ def test_sitemap_is_an_explicit_auto_alternative_not_external_search(pilot):
     site.add(url, prada_page(EAN))
     search.external_search = lambda *args: pytest.fail("No external discovery")
     service.enable()
-    PilotDiscovery(store).run(search=search)
+    run_all_pending(PilotDiscovery(store), search)
     assert PilotDiscovery(store).candidates().iloc[0].method == "sitemap"
     assert site.calls == [BASE + "/robots.txt", BASE + "/sitemap.xml", url]
 
@@ -348,7 +481,7 @@ def test_edel_optics_ean_strategy_suggestion_never_proves_published_gtin(pilot, 
     site.add(base + "/pr26zs-16k08z.html", prada_page("8056597875226", gtin=published))
     service.enable()
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     assert discovery.candidates().iloc[0].state == state
     assert site.calls == [base + "/robots.txt", base + "/search?q=8056597875226", base + "/pr26zs-16k08z.html"]
     assert search._indexed(cid, "8056597875226") == []
@@ -361,7 +494,7 @@ def test_ajax_search_is_reported_without_calling_endpoints(pilot):
     site.add(BASE + "/search?q=" + EAN, '<script>fetch("/internal/suggest?ean=8056597875349")</script>')
     service.enable()
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     row = discovery.coverage().query("ean == @EAN and competitor_id == @cid").iloc[0]
     assert row.state == "error" and "AJAX" in row.detail
     assert site.calls == [BASE + "/robots.txt", BASE + "/search?q=" + EAN]
@@ -387,7 +520,7 @@ def test_discovery_never_follows_off_domain_redirects(pilot):
 
     search._factory = factory
     service.enable()
-    PilotDiscovery(store).run(search=search)
+    run_all_pending(PilotDiscovery(store), search)
     assert site.calls == [BASE + "/robots.txt", BASE + "/search?q=" + EAN]
     assert PilotDiscovery(store).candidates().empty
 
@@ -414,7 +547,7 @@ def test_auth_withdrawal_before_product_request_interrupts_resumably(pilot):
     search._factory = revoke
     service.enable()
     with pytest.raises(PilotError, match="Autorización"):
-        PilotDiscovery(store).run(search=search)
+        run_all_pending(PilotDiscovery(store), search)
     assert site.calls == [BASE + "/robots.txt", BASE + "/search?q=" + EAN]
     with store._connect() as connection:
         assert connection.execute("SELECT status FROM pilot_runs").fetchone()[0] == "interrupted"
@@ -427,7 +560,7 @@ def test_review_revalidates_catalogue_and_conflicts_are_never_overridden(pilot):
     route(site, EAN)
     service.enable()
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     candidate = discovery.candidates().iloc[0]
     with store._connect() as connection, connection:
         connection.execute("UPDATE products SET color='ZVN09T' WHERE ean=?", (EAN,))
@@ -443,11 +576,11 @@ def test_discard_retry_same_url_keeps_prior_evidence_and_new_candidate(pilot):
     route(site, EAN)
     service.enable()
     discovery = PilotDiscovery(store)
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     old = int(discovery.candidates().iloc[0].id)
     discovery.review(old, accept=False, note="Revisor descarta temporalmente")
     discovery.reset(EAN, cid, note="Revisor autoriza repetir tras revisar")
-    discovery.run(search=search)
+    run_all_pending(discovery, search)
     rows = discovery.candidates()
     assert len(rows) == 2 and set(rows.state) == {"discarded", "candidate_found"}
     assert rows.set_index("id").loc[old, "review_note"] == "Revisor descarta temporalmente"
@@ -477,7 +610,7 @@ def test_no_parallel_operations_general_queries_or_outside_scope(pilot):
     discovery = PilotDiscovery(store)
     with FileLock(f"{store.database_path}.pilot.lock", timeout=0):
         with pytest.raises(PilotError):
-            discovery.run(search=search)
+            run_all_pending(discovery, search)
     other = next(r["id"] for r in store.competitors().to_dict("records") if r["id"] not in pilot_scope(store)["competitors"])
     for ean, competitor in [(extras[0], cid), (EAN, other), (EAN, cid)]:
         with pytest.raises(PilotError):

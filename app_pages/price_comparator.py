@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 import logging
 import json
@@ -136,9 +137,9 @@ def _run_pilot(pilot: PricePilot, resume: bool) -> None:
         pilot.report_error(exc)
 
 
-def _run_discovery(pilot: PricePilot, resume: bool) -> None:
+def _run_discovery(pilot: PricePilot, resume: bool, selection=None) -> None:
     try:
-        PilotDiscovery(pilot.store).run(resume=resume)
+        PilotDiscovery(pilot.store).run(resume=resume, selection=selection)
     except Exception as exc:
         logging.getLogger(__name__).exception("Localización supervisada del piloto interrumpida")
         pilot.report_error(exc)
@@ -864,19 +865,104 @@ def _render_discovery(pilot: PricePilot, busy: bool) -> None:
               "Pendientes": int(counts.get("pending", 0)), "Combinaciones": len(coverage)})
     st.dataframe(coverage.pivot(index="ean", columns="competitor", values="Estado"),
                  width="stretch")
-    st.caption("Solo se localizan combinaciones pendientes. No se repiten fichas conocidas ni candidatos "
-               "pendientes; no se crean ofertas. Los presupuestos incluyen robots, búsquedas y fichas. "
-               "Los errores o «no encontrado» necesitan un nuevo intento aprobado explícitamente.")
-    approval = st.checkbox("He revisado los métodos autorizados, el alcance y los límites; localizar pendientes",
-                            key="discovery_approval")
-    a, b = st.columns(2)
-    start = a.button("Localizar fichas pendientes", disabled=not approval or busy or not discovery.pending(),
+    st.caption("La selección de ejecución es independiente de los filtros de la matriz. No se repiten fichas "
+               "conocidas ni candidatos pendientes; el descubrimiento no crea ofertas.")
+    scope = pilot_scope(pilot.store)
+    if scope is None:
+        return
+    names = {row["id"]: row["name"] for row in pilot.competitors()}
+    mode = st.radio("Alcance de ejecución", ["Una referencia y un competidor",
+                    "Varios productos de un competidor", "Todos los pendientes"],
+                    horizontal=True, key="discovery_execution_mode")
+    competitor = st.selectbox("Competidor", list(scope["competitors"]),
+                              format_func=lambda cid: names.get(cid, cid),
+                              key="discovery_execution_competitor",
+                              disabled=mode == "Todos los pendientes")
+    available_eans = list(scope["eans"])
+    if mode == "Una referencia y un competidor":
+        ean = st.selectbox("EAN", available_eans, key="discovery_execution_ean")
+        requested = [(competitor, ean)]
+    elif mode == "Varios productos de un competidor":
+        eans = st.multiselect("EAN o lista de EAN", available_eans, key="discovery_execution_eans")
+        requested = [(competitor, selected_ean) for selected_ean in eans]
+    else:
+        requested = [(cid, ean) for cid in scope["competitors"] for ean in scope["eans"]]
+    preview = None
+    try:
+        if requested:
+            preview = discovery.preview(requested)
+            st.write({
+                "Combinaciones seleccionadas": len(preview["requested"]),
+                "Trabajos pendientes reales": len(preview["effective"]),
+                "Fichas existentes excluidas": len(preview["known_excluded"]),
+                "Candidatos pendientes excluidos": len(preview["candidate_excluded"]),
+                "Otras combinaciones excluidas": len(preview["other_excluded"]),
+                "Combinaciones sin autorización": len(preview["unauthorized"]),
+            })
+            if mode == "Todos los pendientes":
+                st.warning(f"Se iniciarán como máximo {len(preview['effective'])} trabajos autorizados "
+                           "de las combinaciones pendientes.")
+            if preview["methods"]:
+                st.dataframe(pd.DataFrame([
+                    {"Competidor": names.get(cid, cid), "Método configurado": detail["mode"],
+                     "Métodos disponibles": ", ".join(detail["methods"]) or "Ninguno",
+                     "Presupuesto disponible": preview["budgets"].get(cid, {}).get("available", 0)}
+                    for cid, detail in preview["methods"].items()
+                ]), hide_index=True, width="stretch")
+            if preview["unauthorized"]:
+                st.warning(preview["unauthorized"])
+            if preview["active_run"]:
+                active = preview["active_run"]
+                st.warning(f"Hay una ejecución {active['operation']} {active['status']} #{active['id']}; "
+                           "debe reanudarse o cerrarse antes de iniciar otra.")
+    except PilotError as exc:
+        st.error(str(exc))
+    review_key = "invalid"
+    if preview:
+        review_state = json.dumps({
+            "requested": preview["requested"], "effective": preview["effective"],
+            "methods": preview["methods"], "unauthorized": preview["unauthorized"],
+            "budgets": preview["budgets"],
+        }, ensure_ascii=True, sort_keys=True)
+        review_key = hashlib.sha256(review_state.encode("utf-8")).hexdigest()[:12]
+    all_confirmed = True
+    if mode == "Todos los pendientes":
+        all_confirmed = st.checkbox(
+            f"Confirmo iniciar los {len(preview['effective']) if preview else 0} trabajos autorizados pendientes",
+            key=f"discovery_all_pending_confirmation_{review_key}")
+    approval = st.checkbox("He revisado el alcance seleccionado, los métodos y las autorizaciones",
+                           key=f"discovery_approval_{review_key}")
+    active = discovery.latest_run()
+    can_start = bool(preview and preview["effective"] and not preview["active_run"]
+                     and approval and all_confirmed and not busy)
+    start = st.button("Iniciar localización supervisada", disabled=not can_start,
                       key="discovery_start", type="primary")
-    resume = b.button("Reanudar localización interrumpida", disabled=not approval or busy, key="discovery_resume")
-    if start or resume:
+    no_other_operation = not preview or not preview["active_run"] \
+        or preview["active_run"]["operation"] == "discovery"
+    resume_enabled = bool(active and active["status"] in ("running", "interrupted")
+                          and no_other_operation)
+    resume = st.button("Reanudar selección original", disabled=not resume_enabled or not approval or busy,
+                       key="discovery_resume")
+    if start:
         pilot.enable()
-        _launch(_run_discovery, pilot, resume)
+        _launch(_run_discovery, pilot, False, requested)
         st.rerun()
+    if resume:
+        pilot.enable()
+        _launch(_run_discovery, pilot, True, None)
+        st.rerun()
+    if active:
+        st.write({"Última ejecución": active["id"], "Estado": active["status"],
+                  "Selección inmutable": active["selection"], "Resultados": active["results"],
+                  "Presupuesto utilizado": active["budget_used"],
+                  "Candidatos pendientes de revisión": active["candidates_pending_review"]})
+        if active["status"] in ("running", "interrupted") and no_other_operation:
+            with st.form("discovery_close_interrupted"):
+                close_note = st.text_input("Motivo para cerrar la cola no finalizada")
+                close = st.form_submit_button("Cerrar sin eliminar datos", disabled=busy or not close_note.strip())
+                if close:
+                    pilot.close_interrupted_discovery(note=close_note)
+                    st.rerun()
     f1, f2, f3, f4 = st.columns(4)
     ean_filter = f1.multiselect("Filtrar EAN", list(coverage.ean.unique()), key="discovery_ean_filter")
     cid_filter = f2.multiselect("Filtrar competidor", list(coverage.competitor.unique()), key="discovery_cid_filter")
