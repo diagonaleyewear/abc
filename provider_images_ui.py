@@ -28,6 +28,14 @@ from provider_odoo_orders import (
 )
 
 TITLE = "Proveedores de imágenes"
+IMAGE_PROVIDER_OPTIONS = ("Luxottica", "Kering", "Marcolin", "NuORDER", "Safilo")
+IMAGE_PROVIDER_KEYS = {
+    "Luxottica": "luxottica",
+    "Kering": "kering",
+    "Marcolin": "marcolin",
+    "NuORDER": "nuorder",
+    "Safilo": "safilo",
+}
 MODULES = {"marcolin": marcolin_images, "nuorder": nuorder_images, "safilo": safilo_images}
 CONNECTORS = {"marcolin": marcolin_images.MarcolinConnector, "nuorder": nuorder_images.NuorderConnector,
               "safilo": safilo_images.SafiloConnector}
@@ -98,11 +106,23 @@ def _guard() -> None:
         st.stop()
 
 
-def render_provider_page(engine_factory, selected_provider: str | None = None) -> None:
+def render_provider_page(
+    engine_factory, selected_provider: str | None = None, *, show_title: bool = True
+) -> None:
     _guard()
-    st.title(TITLE)
-    provider = selected_provider or st.radio(
-        "Proveedor", PROVIDERS, horizontal=True, format_func=str.capitalize)
+    if show_title:
+        st.title(TITLE)
+    provider = selected_provider or st.segmented_control(
+        "Proveedor",
+        PROVIDERS,
+        default=PROVIDERS[0],
+        format_func=str.capitalize,
+        selection_mode="single",
+        width="stretch",
+        key="provider_page_selector",
+    )
+    if provider is None:
+        return
     if provider not in PROVIDERS:
         st.error("Proveedor no válido.")
         return

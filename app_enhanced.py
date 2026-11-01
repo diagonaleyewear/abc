@@ -2019,20 +2019,25 @@ MASTERDATA_KERING_IMAGES_PAGE = st.Page(
 
 def render_provider_images_page() -> None:
     render_sidebar_shell("Proveedores de imágenes")
-    from provider_images_ui import render_provider_page
-    provider_labels = {
-        "Luxottica": "luxottica",
-        "Kering": "kering",
-        "Marcolin": "marcolin",
-        "NuORDER": "nuorder",
-        "Safilo": "safilo",
-    }
-    provider = st.radio(
+    from provider_images_ui import (
+        IMAGE_PROVIDER_KEYS,
+        IMAGE_PROVIDER_OPTIONS,
+        render_provider_page,
+    )
+
+    cloud_page_title("Proveedores de imágenes")
+    provider = st.segmented_control(
         "Proveedor",
-        tuple(provider_labels),
-        horizontal=True,
+        IMAGE_PROVIDER_OPTIONS,
+        default=IMAGE_PROVIDER_OPTIONS[0],
+        selection_mode="single",
+        width="stretch",
+        wrap=True,
         key="image_provider_selector",
     )
+    if provider is None:
+        render_footer()
+        return
     if provider == "Luxottica":
         require_admin_access()
         cloud_page_title(
@@ -2043,7 +2048,11 @@ def render_provider_images_page() -> None:
     elif provider == "Kering":
         render_kering_page(get_db_engine)
     else:
-        render_provider_page(get_db_engine, selected_provider=provider_labels[provider])
+        render_provider_page(
+            get_db_engine,
+            selected_provider=IMAGE_PROVIDER_KEYS[provider],
+            show_title=False,
+        )
     render_footer()
 
 
